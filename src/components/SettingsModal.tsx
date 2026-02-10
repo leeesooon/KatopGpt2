@@ -1,0 +1,463 @@
+import { useState } from 'react'
+import {
+  X, Eye, EyeOff, CheckCircle, AlertCircle, Loader2,
+  Plus, Trash2, ChevronDown, ChevronUp, Server, ImageIcon,
+} from 'lucide-react'
+import { useChatStore } from '../store/chatStore'
+import { testApiConnection } from '../services/chatApi'
+import type { ApiProvider, ModelConfig } from '../types'
+
+interface ProviderFormData {
+  name: string
+  baseUrl: string
+  apiKey: string
+  models: ModelConfig[]
+  modelInput: string
+}
+
+function emptyForm(): ProviderFormData {
+  return { name: '', baseUrl: '', apiKey: '', models: [], modelInput: '' }
+}
+
+function fromProvider(p: ApiProvider): ProviderFormData {
+  return { name: p.name, baseUrl: p.baseUrl, apiKey: p.apiKey, models: [...p.models], modelInput: '' }
+}
+
+export default function SettingsModal() {
+  const {
+    settings, updateSettings, isSettingsOpen, setSettingsOpen,
+    addProvider, updateProvider, deleteProvider,
+  } = useChatStore()
+
+  const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [editForms, setEditForms] = useState<Record<string, ProviderFormData>>({})
+  const [showKeys, setShowKeys] = useState<Record<string, boolean>>({})
+  const [testing, setTesting] = useState<Record<string, boolean>>({})
+  const [testResults, setTestResults] = useState<Record<string, 'success' | 'error'>>({})
+
+  // New provider form
+  const [isAdding, setIsAdding] = useState(false)
+  const [newForm, setNewForm] = useState<ProviderFormData>(emptyForm())
+  const [newShowKey, setNewShowKey] = useState(false)
+
+  // General settings
+  const [systemPrompt, setSystemPrompt] = useState(settings.systemPrompt)
+  const [temperature, setTemperature] = useState(settings.temperature)
+  const [maxTokens, setMaxTokens] = useState(settings.maxTokens)
+
+  if (!isSettingsOpen) return null
+
+  const getForm = (p: ApiProvider): ProviderFormData => {
+    return editForms[p.id] ?? fromProvider(p)
+  }
+
+  const setForm = (id: string, form: ProviderFormData) => {
+    setEditForms((prev) => ({ ...prev, [id]: form }))
+  }
+
+  const handleToggle = (id: string) => {
+    if (expandedId === id) {
+      setExpandedId(null)
+    } else {
+      setExpandedId(id)
+      const p = settings.providers.find((x) => x.id === id)
+      if (p && !editForms[id]) {
+        setForm(id, fromProvider(p))
+      }
+    }
+  }
+
+  const handleAddModel = (form: ProviderFormData, setFn: (f: ProviderFormData) => void) => {
+    const modelName = form.modelInput.trim()
+    if (!modelName || form.models.some((m) => m.name === modelName)) return
+    setFn({ ...form, models: [...form.models, { name: modelName, multimodal: false }], modelInput: '' })
+  }
+
+  const handleRemoveModel = (form: ProviderFormData, setFn: (f: ProviderFormData) => void, modelName: string) => {
+    setFn({ ...form, models: form.models.filter((m) => m.name !== modelName) })
+  }
+
+  const handleToggleMultimodal = (form: ProviderFormData, setFn: (f: ProviderFormData) => void, modelName: string) => {
+    setFn({
+      ...form,
+      models: form.models.map((m) =>
+        m.name === modelName ? { ...m, multimodal: !m.multimodal } : m
+      ),
+    })
+  }
+
+  const handleModelKeyDown = (e: React.KeyboardEvent, form: ProviderFormData, setFn: (f: ProviderFormData) => void) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      handleAddModel(form, setFn)
+    }
+  }
+
+  const handleSaveProvider = (id: string) => {
+    const form = editForms[id]
+    if (!form) return
+    updateProvider(id, {
+      name: form.name,
+      baseUrl: form.baseUrl,
+      apiKey: form.apiKey,
+      models: form.models,
+    })
+    setEditForms((prev) => {
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
+    setExpandedId(null)
+  }
+
+  const handleAddProvider = () => {
+    if (!newForm.name.trim() || !newForm.baseUrl.trim()) return
+    addProvider({
+      name: newForm.name.trim(),
+      baseUrl: newForm.baseUrl.trim(),
+      apiKey: newForm.apiKey.trim(),
+      models: newForm.models,
+    })
+    setNewForm(emptyForm())
+    setIsAdding(false)
+  }
+
+  const handleDeleteProvider = (id: string) => {
+    deleteProvider(id)
+    setExpandedId(null)
+  }
+
+  const handleTest = async (baseUrl: string, apiKey: string, key: string) => {
+    setTesting((p) => ({ ...p, [key]: true }))
+    setTestResults((p) => { const n = { ...p }; delete n[key]; return n })
+    try {
+      const ok = await testApiConnection({ baseUrl, apiKey })
+      setTestResults((p) => ({ ...p, [key]: ok ? 'success' : 'error' }))
+    } catch {
+      setTestResults((p) => ({ ...p, [key]: 'error' }))
+    } finally {
+      setTesting((p) => ({ ...p, [key]: false }))
+    }
+  }
+
+  const handleSaveGeneral = () => {
+    updateSettings({ systemPrompt, temperature, maxTokens })
+    setSettingsOpen(false)
+  }
+
+  const handleOverlayClick = (e: React.MouseEvent) => {
+    if (e.target === e.currentTarget) setSettingsOpen(false)
+  }
+
+  const renderModelTags = (form: ProviderFormData, setFn: (f: ProviderFormData) => void) => (
+    <div className="space-y-2">
+      <label className="text-xs font-medium text-surface-400">模型列表</label>
+      <div className="flex flex-wrap gap-1.5 min-h-[32px]">
+        {form.models.map((model) => (
+          <span
+            key={model.name}
+            className="inline-flex items-center gap-1 px-2 py-0.5 bg-primary-600/15 border border-primary-500/25
+                       text-primary-300 text-xs rounded-md font-mono"
+          >
+            {model.name}
+            <button
+              onClick={() => handleToggleMultimodal(form, setFn, model.name)}
+              className={`ml-0.5 p-0.5 rounded transition-colors ${
+                model.multimodal
+                  ? 'text-emerald-400 hover:text-emerald-300'
+                  : 'text-surface-500 hover:text-surface-300'
+              }`}
+              title={model.multimodal ? '多模态已开启' : '点击开启多模态'}
+            >
+              <ImageIcon size={11} />
+            </button>
+            <button
+              onClick={() => handleRemoveModel(form, setFn, model.name)}
+              className="hover:text-red-400 transition-colors ml-0.5"
+            >
+              <X size={11} />
+            </button>
+          </span>
+        ))}
+      </div>
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={form.modelInput}
+          onChange={(e) => setFn({ ...form, modelInput: e.target.value })}
+          onKeyDown={(e) => handleModelKeyDown(e, form, setFn)}
+          placeholder="输入模型名后回车添加，如 gpt-4o"
+          className="input-field flex-1"
+        />
+        <button
+          onClick={() => handleAddModel(form, setFn)}
+          disabled={!form.modelInput.trim()}
+          className="btn-ghost border border-surface-600/50 text-xs px-3 disabled:opacity-30"
+        >
+          添加
+        </button>
+      </div>
+    </div>
+  )
+
+  const renderApiFields = (
+    form: ProviderFormData,
+    setFn: (f: ProviderFormData) => void,
+    keyId: string,
+  ) => (
+    <div className="space-y-3">
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium text-surface-400">名称</label>
+        <input
+          type="text"
+          value={form.name}
+          onChange={(e) => setFn({ ...form, name: e.target.value })}
+          placeholder="如：OpenAI、DeepSeek"
+          className="input-field"
+        />
+      </div>
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium text-surface-400">Base URL</label>
+        <input
+          type="text"
+          value={form.baseUrl}
+          onChange={(e) => setFn({ ...form, baseUrl: e.target.value })}
+          placeholder="https://api.openai.com/v1"
+          className="input-field"
+        />
+      </div>
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium text-surface-400">API Key</label>
+        <div className="relative">
+          <input
+            type={showKeys[keyId] || (keyId === '__new' && newShowKey) ? 'text' : 'password'}
+            value={form.apiKey}
+            onChange={(e) => setFn({ ...form, apiKey: e.target.value })}
+            placeholder="sk-..."
+            className="input-field pr-10"
+          />
+          <button
+            onClick={() => {
+              if (keyId === '__new') setNewShowKey(!newShowKey)
+              else setShowKeys((p) => ({ ...p, [keyId]: !p[keyId] }))
+            }}
+            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 hover:bg-surface-700/50 rounded transition-colors"
+          >
+            {(keyId === '__new' ? newShowKey : showKeys[keyId]) ? (
+              <EyeOff size={14} className="text-surface-400" />
+            ) : (
+              <Eye size={14} className="text-surface-400" />
+            )}
+          </button>
+        </div>
+      </div>
+      {renderModelTags(form, setFn)}
+      <div className="flex items-center gap-3 pt-1">
+        <button
+          onClick={() => handleTest(form.baseUrl, form.apiKey, keyId)}
+          disabled={testing[keyId] || !form.apiKey}
+          className="btn-ghost border border-surface-600/50 flex items-center gap-2 text-xs disabled:opacity-40"
+        >
+          {testing[keyId] ? <Loader2 size={13} className="animate-spin" /> : null}
+          测试连接
+        </button>
+        {testResults[keyId] === 'success' && (
+          <span className="flex items-center gap-1 text-xs text-emerald-400">
+            <CheckCircle size={13} /> 连接成功
+          </span>
+        )}
+        {testResults[keyId] === 'error' && (
+          <span className="flex items-center gap-1 text-xs text-red-400">
+            <AlertCircle size={13} /> 连接失败
+          </span>
+        )}
+      </div>
+    </div>
+  )
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in"
+      onClick={handleOverlayClick}
+    >
+      <div className="w-full max-w-2xl mx-4 glass-panel rounded-2xl shadow-2xl animate-slide-up overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-surface-700/50">
+          <h2 className="text-lg font-semibold text-surface-100">设置</h2>
+          <button
+            onClick={() => setSettingsOpen(false)}
+            className="p-1.5 hover:bg-surface-700/50 rounded-lg transition-colors"
+          >
+            <X size={18} className="text-surface-400" />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="px-6 py-5 space-y-6 max-h-[70vh] overflow-y-auto">
+          {/* === API Providers === */}
+          <section className="space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-surface-300 uppercase tracking-wider">
+                API 服务商
+              </h3>
+              {!isAdding && (
+                <button
+                  onClick={() => setIsAdding(true)}
+                  className="btn-ghost text-xs flex items-center gap-1 text-primary-400 hover:text-primary-300"
+                >
+                  <Plus size={14} /> 添加
+                </button>
+              )}
+            </div>
+
+            {/* Existing providers */}
+            {settings.providers.map((p) => {
+              const isExpanded = expandedId === p.id
+              const form = getForm(p)
+              return (
+                <div
+                  key={p.id}
+                  className="border border-surface-700/50 rounded-xl overflow-hidden bg-surface-800/30"
+                >
+                  <button
+                    onClick={() => handleToggle(p.id)}
+                    className="w-full flex items-center justify-between px-4 py-3 hover:bg-surface-700/20 transition-colors"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <Server size={15} className="text-primary-400" />
+                      <span className="text-sm font-medium text-surface-200">{p.name}</span>
+                      <span className="text-[11px] text-surface-500 font-mono">
+                        {p.models.length} 个模型
+                      </span>
+                    </div>
+                    {isExpanded ? (
+                      <ChevronUp size={15} className="text-surface-400" />
+                    ) : (
+                      <ChevronDown size={15} className="text-surface-400" />
+                    )}
+                  </button>
+                  {isExpanded && (
+                    <div className="px-4 pb-4 pt-1 border-t border-surface-700/30 space-y-3 animate-fade-in">
+                      {renderApiFields(form, (f) => setForm(p.id, f), p.id)}
+                      <div className="flex items-center justify-between pt-2">
+                        <button
+                          onClick={() => handleDeleteProvider(p.id)}
+                          className="btn-ghost text-xs text-red-400 hover:text-red-300 flex items-center gap-1"
+                        >
+                          <Trash2 size={13} /> 删除
+                        </button>
+                        <div className="flex gap-2">
+                          <button onClick={() => setExpandedId(null)} className="btn-ghost text-xs">
+                            取消
+                          </button>
+                          <button
+                            onClick={() => handleSaveProvider(p.id)}
+                            disabled={!form.name.trim() || !form.baseUrl.trim()}
+                            className="btn-primary text-xs px-3 py-1.5"
+                          >
+                            保存
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+
+            {/* Add new provider form */}
+            {isAdding && (
+              <div className="border border-primary-500/30 rounded-xl p-4 bg-primary-600/5 space-y-3 animate-fade-in">
+                <h4 className="text-sm font-medium text-primary-300">添加新服务商</h4>
+                {renderApiFields(newForm, setNewForm, '__new')}
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    onClick={() => { setIsAdding(false); setNewForm(emptyForm()) }}
+                    className="btn-ghost text-xs"
+                  >
+                    取消
+                  </button>
+                  <button
+                    onClick={handleAddProvider}
+                    disabled={!newForm.name.trim() || !newForm.baseUrl.trim()}
+                    className="btn-primary text-xs px-3 py-1.5"
+                  >
+                    添加
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {settings.providers.length === 0 && !isAdding && (
+              <div className="text-center py-6 text-surface-500 text-sm">
+                还没有配置 API 服务商，点击上方「添加」开始
+              </div>
+            )}
+          </section>
+
+          {/* === General Parameters === */}
+          <section className="space-y-4">
+            <h3 className="text-sm font-semibold text-surface-300 uppercase tracking-wider">
+              模型参数
+            </h3>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-surface-400">系统提示词</label>
+              <textarea
+                value={systemPrompt}
+                onChange={(e) => setSystemPrompt(e.target.value)}
+                rows={3}
+                placeholder="You are a helpful assistant."
+                className="input-field resize-none"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-medium text-surface-400">Temperature</label>
+                <span className="text-xs text-surface-500 font-mono">
+                  {temperature.toFixed(1)}
+                </span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="2"
+                step="0.1"
+                value={temperature}
+                onChange={(e) => setTemperature(parseFloat(e.target.value))}
+                className="w-full accent-primary-500"
+              />
+              <div className="flex justify-between text-[10px] text-surface-500">
+                <span>精确</span>
+                <span>创意</span>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-surface-400">最大 Tokens</label>
+              <input
+                type="number"
+                value={maxTokens}
+                onChange={(e) => setMaxTokens(parseInt(e.target.value) || 4096)}
+                min={1}
+                max={128000}
+                className="input-field"
+              />
+            </div>
+          </section>
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-surface-700/50">
+          <button onClick={() => setSettingsOpen(false)} className="btn-ghost">
+            取消
+          </button>
+          <button onClick={handleSaveGeneral} className="btn-primary">
+            保存
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}

@@ -1,0 +1,169 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  html, body, #root {
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+  }
+
+  body {
+    font-family: 'Inter', 'Noto Sans SC', system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgba(100, 116, 139, 0.3);
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(100, 116, 139, 0.5);
+  }
+
+  /* Title bar drag region */
+  .drag-region {
+    -webkit-app-region: drag;
+  }
+
+  .no-drag {
+    -webkit-app-region: no-drag;
+  }
+
+  /* Selection */
+  ::selection {
+    background: rgba(92, 124, 250, 0.3);
+  }
+}
+
+@layer components {
+  .glass-panel {
+    @apply bg-surface-900/80 backdrop-blur-xl border border-surface-700/50;
+  }
+
+  .glass-panel-light {
+    @apply bg-surface-800/60 backdrop-blur-lg border border-surface-700/30;
+  }
+
+  .btn-primary {
+    @apply px-4 py-2 bg-primary-600 hover:bg-primary-500 text-white rounded-lg
+           transition-all duration-200 font-medium text-sm
+           active:scale-[0.97] disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-ghost {
+    @apply px-3 py-2 hover:bg-surface-700/50 text-surface-300 hover:text-surface-100
+           rounded-lg transition-all duration-200 text-sm
+           active:scale-[0.97];
+  }
+
+  .input-field {
+    @apply w-full px-3 py-2 bg-surface-800/80 border border-surface-600/50
+           rounded-lg text-surface-100 placeholder-surface-500
+           focus:outline-none focus:border-primary-500/60 focus:ring-1 focus:ring-primary-500/30
+           transition-all duration-200 text-sm;
+  }
+}
+
+/* Markdown content styles */
+.markdown-body {
+  line-height: 1.7;
+  word-break: break-word;
+}
+
+.markdown-body p {
+  margin-bottom: 0.75em;
+}
+
+.markdown-body p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body code {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 0.95em;
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  color: #e2a8ff;
+  background: none;
+}
+
+.markdown-body pre {
+  margin: 0.75em 0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.markdown-body pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.markdown-body ul, .markdown-body ol {
+  padding-left: 1.5em;
+  margin-bottom: 0.75em;
+}
+
+.markdown-body li {
+  margin-bottom: 0.25em;
+}
+
+.markdown-body blockquote {
+  border-left: 3px solid rgba(92, 124, 250, 0.5);
+  padding-left: 1em;
+  margin: 0.75em 0;
+  color: rgba(168, 181, 207, 0.9);
+}
+
+.markdown-body h1, .markdown-body h2, .markdown-body h3,
+.markdown-body h4, .markdown-body h5, .markdown-body h6 {
+  font-weight: 600;
+  margin: 1em 0 0.5em;
+}
+
+.markdown-body h1 { font-size: 1.5em; }
+.markdown-body h2 { font-size: 1.3em; }
+.markdown-body h3 { font-size: 1.15em; }
+
+.markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75em 0;
+}
+
+.markdown-body th, .markdown-body td {
+  border: 1px solid rgba(71, 85, 105, 0.5);
+  padding: 0.5em 0.75em;
+  text-align: left;
+}
+
+.markdown-body th {
+  background: rgba(30, 41, 59, 0.6);
+  font-weight: 600;
+}
+
+/* Typing indicator animation */
+.typing-dot {
+  animation: pulseDot 1.4s ease-in-out infinite;
+}
+.typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-dot:nth-child(3) { animation-delay: 0.4s; }
