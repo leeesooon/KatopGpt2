@@ -44,6 +44,13 @@ export default function SettingsModal() {
   const [systemPrompt, setSystemPrompt] = useState(settings.systemPrompt)
   const [temperature, setTemperature] = useState(settings.temperature)
   const [maxTokens, setMaxTokens] = useState(settings.maxTokens)
+  const [contextWindowSize, setContextWindowSize] = useState(settings.contextWindowSize)
+  const [searchEngine, setSearchEngine] = useState(settings.searchEngine)
+  const [serperApiKey, setSerperApiKey] = useState(settings.serperApiKey)
+  const [tavilyApiKey, setTavilyApiKey] = useState(settings.tavilyApiKey)
+  const [enableSearchByDefault, setEnableSearchByDefault] = useState(settings.enableSearchByDefault)
+  const [showSerperKey, setShowSerperKey] = useState(false)
+  const [showTavilyKey, setShowTavilyKey] = useState(false)
 
   if (!isSettingsOpen) return null
 
@@ -141,7 +148,16 @@ export default function SettingsModal() {
   }
 
   const handleSaveGeneral = () => {
-    updateSettings({ systemPrompt, temperature, maxTokens })
+    updateSettings({
+      systemPrompt,
+      temperature,
+      maxTokens,
+      contextWindowSize,
+      searchEngine,
+      serperApiKey,
+      tavilyApiKey,
+      enableSearchByDefault,
+    })
     setSettingsOpen(false)
   }
 
@@ -393,6 +409,111 @@ export default function SettingsModal() {
                 还没有配置 API 服务商，点击上方「添加」开始
               </div>
             )}
+
+          </section>
+
+          {/* === Web Search Settings === */}
+          <section className="space-y-4">
+            <h3 className="text-sm font-semibold text-surface-300 uppercase tracking-wider">
+              网络搜索
+            </h3>
+
+            {/* Search Engine Selector */}
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-surface-400">搜索引擎</label>
+              <select
+                value={searchEngine}
+                onChange={(e) => setSearchEngine(e.target.value as 'serper' | 'tavily')}
+                className="input-field"
+              >
+                <option value="tavily">Tavily（推荐，免费1000次/月）</option>
+                <option value="serper">Serper（免费2500次/月）</option>
+              </select>
+              <p className="text-[10px] text-surface-500">
+                Tavily 专为 AI 优化，注册简单。Serper 提供 Google 搜索结果。
+              </p>
+            </div>
+
+            {/* Tavily API Key */}
+            {searchEngine === 'tavily' && (
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-surface-400">Tavily API Key</label>
+                <div className="relative">
+                  <input
+                    type={showTavilyKey ? 'text' : 'password'}
+                    value={tavilyApiKey}
+                    onChange={(e) => setTavilyApiKey(e.target.value)}
+                    placeholder="输入 Tavily API Key"
+                    className="input-field pr-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowTavilyKey(!showTavilyKey)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 hover:bg-surface-700/50 rounded transition-colors"
+                  >
+                    {showTavilyKey ? <EyeOff size={14} className="text-surface-400" /> : <Eye size={14} className="text-surface-400" />}
+                  </button>
+                </div>
+                <p className="text-[10px] text-surface-500">
+                  免费额度：1000次/月。
+                  <a href="https://tavily.com" target="_blank" rel="noopener noreferrer" className="text-primary-400 hover:underline ml-1">
+                    获取 API Key
+                  </a>
+                </p>
+              </div>
+            )}
+
+            {/* Serper API Key */}
+            {searchEngine === 'serper' && (
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-surface-400">Serper API Key</label>
+                <div className="relative">
+                  <input
+                    type={showSerperKey ? 'text' : 'password'}
+                    value={serperApiKey}
+                    onChange={(e) => setSerperApiKey(e.target.value)}
+                    placeholder="输入 Serper API Key"
+                    className="input-field pr-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowSerperKey(!showSerperKey)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 hover:bg-surface-700/50 rounded transition-colors"
+                  >
+                    {showSerperKey ? <EyeOff size={14} className="text-surface-400" /> : <Eye size={14} className="text-surface-400" />}
+                  </button>
+                </div>
+                <p className="text-[10px] text-surface-500">
+                  免费额度：2500次/月。
+                  <a href="https://serper.dev" target="_blank" rel="noopener noreferrer" className="text-primary-400 hover:underline ml-1">
+                    获取 API Key
+                  </a>
+                </p>
+              </div>
+            )}
+
+            {/* Enable Search by Default */}
+            <div className="flex items-center justify-between">
+              <div className="flex-1">
+                <label className="text-xs font-medium text-surface-400">默认启用网络搜索</label>
+                <p className="text-[10px] text-surface-500 mt-0.5">
+                  自动检测需要搜索的问题并联网查询
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEnableSearchByDefault(!enableSearchByDefault)}
+                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                  enableSearchByDefault ? 'bg-primary-500' : 'bg-surface-600'
+                }`}
+              >
+                <span
+                  className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                    enableSearchByDefault ? 'translate-x-5' : 'translate-x-0.5'
+                  }`}
+                />
+              </button>
+            </div>
           </section>
 
           {/* === General Parameters === */}
@@ -439,11 +560,39 @@ export default function SettingsModal() {
               <input
                 type="number"
                 value={maxTokens}
-                onChange={(e) => setMaxTokens(parseInt(e.target.value) || 4096)}
-                min={1}
+                onChange={(e) => setMaxTokens(parseInt(e.target.value) || 0)}
+                min={0}
                 max={128000}
                 className="input-field"
               />
+              <p className="text-[10px] text-surface-500">
+                设为 0 则不限制，由 API 根据模型上下文长度自动决定
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-medium text-surface-400">上下文窗口（消息条数）</label>
+                <span className="text-xs text-surface-500 font-mono">
+                  {contextWindowSize}
+                </span>
+              </div>
+              <input
+                type="range"
+                min="2"
+                max="100"
+                step="2"
+                value={contextWindowSize}
+                onChange={(e) => setContextWindowSize(parseInt(e.target.value))}
+                className="w-full accent-primary-500"
+              />
+              <div className="flex justify-between text-[10px] text-surface-500">
+                <span>省 Token</span>
+                <span>多上下文</span>
+              </div>
+              <p className="text-[10px] text-surface-500">
+                发送 API 请求时仅携带最近 N 条消息，更早的历史仍保留在本地
+              </p>
             </div>
           </section>
         </div>

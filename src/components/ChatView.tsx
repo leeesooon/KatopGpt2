@@ -4,6 +4,7 @@ import { useChatStore } from '../store/chatStore'
 import { streamChat, ChatApiError } from '../services/chatApi'
 import { recognizeImages } from '../services/ocr'
 import { resolveApiConfig } from '../types'
+import { webSearch, formatSearchContext, shouldTriggerSearch, SearchApiError } from '../services/searchApi'
 import type { ImageAttachment, FileAttachment } from '../types'
 import MessageBubble from './MessageBubble'
 import InputArea from './InputArea'
@@ -14,17 +15,22 @@ export default function ChatView() {
     activeConversationId,
     settings,
     streamingConvIds,
+    searchEnabled,
     createConversation,
     addMessage,
     updateMessage,
     updateConversationTitle,
     setConversationStreaming,
+    attachSearchResults,
   } = useChatStore()
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const abortMapRef = useRef<Map<string, AbortController>>(new Map())
   const scrollRafRef = useRef<number>(0)
+  const scrollPositionsRef = useRef<Map<string, number>>(new Map())
+  const prevConvIdRef = useRef<string | null>(null)
+  const isRestoringScrollRef = useRef(false)
   const [showScrollBottom, setShowScrollBottom] = useState(false)
 
   const activeConversation = conversations.find((c) => c.id === activeConversationId)
@@ -32,7 +38,7 @@ export default function ChatView() {
   const isCurrentStreaming = activeConversationId ? streamingConvIds.includes(activeConversationId) : false
 
   const scrollToBottom = useCallback(() => {
-    if (scrollRafRef.current) return
+    if (scrollRafRef.current || isRestoringScrollRef.current) return
     scrollRafRef.current = requestAnimationFrame(() => {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
       scrollRafRef.current = 0
@@ -49,16 +55,44 @@ export default function ChatView() {
     }
   }, [])
 
-  // Detect if user scrolled away from bottom
+  // Save scroll position continuously + detect scroll-away-from-bottom
   useEffect(() => {
     const container = scrollContainerRef.current
     if (!container) return
     const handleScroll = () => {
       const { scrollTop, scrollHeight, clientHeight } = container
       setShowScrollBottom(scrollHeight - scrollTop - clientHeight > 120)
+      if (activeConversationId) {
+        scrollPositionsRef.current.set(activeConversationId, scrollTop)
+      }
     }
     container.addEventListener('scroll', handleScroll, { passive: true })
     return () => container.removeEventListener('scroll', handleScroll)
+  }, [activeConversationId])
+
+  // Restore scroll position on conversation switch
+  useEffect(() => {
+    const prevId = prevConvIdRef.current
+    prevConvIdRef.current = activeConversationId ?? null
+
+    if (prevId === activeConversationId) return
+
+    const container = scrollContainerRef.current
+    if (!container || !activeConversationId) return
+
+    isRestoringScrollRef.current = true
+
+    requestAnimationFrame(() => {
+      const savedPos = scrollPositionsRef.current.get(activeConversationId)
+      if (savedPos != null) {
+        container.scrollTop = savedPos
+      } else {
+        messagesEndRef.current?.scrollIntoView()
+      }
+      requestAnimationFrame(() => {
+        isRestoringScrollRef.current = false
+      })
+    })
   }, [activeConversationId])
 
   const handleScrollToBottom = () => {
@@ -74,17 +108,9 @@ export default function ChatView() {
       convId = createConversation()
     }
 
-    // Build message content with file contents prepended
+    // Build message content — file contents are injected at API call time, not stored in message
     let messageContent = content
     const messageFiles: FileAttachment[] | undefined = files.length > 0 ? files : undefined
-
-    if (files.length > 0) {
-      const fileParts = files.map((f) => {
-        const label = files.length > 1 ? `[文件: ${f.name}]` : `[文件: ${f.name}]`
-        return `${label}\n\`\`\`\n${f.content}\n\`\`\``
-      })
-      messageContent = fileParts.join('\n\n') + (content ? '\n\n' + content : '')
-    }
 
     // Handle images
     let messageImages: ImageAttachment[] | undefined = undefined
@@ -126,23 +152,87 @@ export default function ChatView() {
     abortMapRef.current.set(convId, abortController)
 
     // Add empty assistant message
+
+    // Web search if enabled
+    let searchResults = []
+    let searchContext = ''
+    const apiKey = settings.searchEngine === 'tavily' ? settings.tavilyApiKey : settings.serperApiKey
+    
+    console.group('%c[Search Flow] %cInitializing', 'color:#5c7cfa;font-weight:bold', 'color:#64748b')
+    console.log('%cSearch enabled (manual): %c%s', 'color:#8494b2', 'color:#e8ecf4', searchEnabled)
+    console.log('%cSearch enabled (auto): %c%s', 'color:#8494b2', 'color:#e8ecf4', settings.enableSearchByDefault)
+    console.log('%cSearch engine: %c%s', 'color:#8494b2', 'color:#e8ecf4', settings.searchEngine)
+    console.log('%cAPI key configured: %c%s', 'color:#8494b2', 'color:#e8ecf4', apiKey ? 'YES' : 'NO')
+    console.log('%cMessage content: %c%s', 'color:#8494b2', 'color:#e8ecf4', messageContent.slice(0, 100))
+    console.groupEnd()
+    
+    if ((searchEnabled || settings.enableSearchByDefault) && apiKey) {
+      const shouldSearch = searchEnabled || shouldTriggerSearch(messageContent)
+      console.log('%c[Search Flow] %cShould trigger search: %c%s', 'color:#5c7cfa;font-weight:bold', 'color:#64748b', 'color:#e8ecf4', shouldSearch)
+      
+      if (shouldSearch) {
+        try {
+          console.log('%c[Search] %cTriggered for query (%s)', 'color:#5c7cfa;font-weight:bold', 'color:#64748b', settings.searchEngine)
+          searchResults = await webSearch(messageContent, apiKey, settings.searchEngine, 'zh-CN', 8)
+          searchContext = formatSearchContext(searchResults, 4000)
+          
+          console.group('%c[Search] %c✓ Search completed', 'color:#10b981;font-weight:bold', 'color:#64748b')
+          console.log('%cResults count: %c%d', 'color:#8494b2', 'color:#e8ecf4', searchResults.length)
+          console.log('%cContext length: %c%d chars', 'color:#8494b2', 'color:#e8ecf4', searchContext.length)
+          console.log('%cFirst 3 results:', 'color:#8494b2')
+          console.dir(searchResults.slice(0, 3), { depth: null })
+          console.groupEnd()
+        } catch (err) {
+          console.group('%c[Search] %c✗ Search failed', 'color:#ef4444;font-weight:bold', 'color:#64748b')
+          console.error(err)
+          console.groupEnd()
+          
+          if (err instanceof SearchApiError) {
+            // Non-blocking: continue without search
+            console.log('%c[Search] %cContinuing without search results', 'color:#f59e0b;font-weight:bold', 'color:#64748b')
+          }
+        }
+      } else {
+        console.log('%c[Search Flow] %cSkipped - trigger conditions not met', 'color:#f59e0b;font-weight:bold', 'color:#64748b')
+      }
+    } else {
+      console.group('%c[Search Flow] %cSkipped - prerequisites not met', 'color:#f59e0b;font-weight:bold', 'color:#64748b')
+      if (!apiKey) console.log('%cReason: %cNo API key configured', 'color:#8494b2', 'color:#ef4444')
+      if (!searchEnabled && !settings.enableSearchByDefault) console.log('%cReason: %cSearch not enabled', 'color:#8494b2', 'color:#ef4444')
+      console.groupEnd()
+    }
+
     const assistantMsg = addMessage(convId, { role: 'assistant', content: '' })
     let fullContent = ''
     let rafPending = false
 
     try {
-      const currentMessages = useChatStore
+      const allMessages = useChatStore
         .getState()
         .conversations.find((c) => c.id === convId)!
         .messages.filter((m) => m.id !== assistantMsg.id)
 
+      // Sliding window: only send the last N messages as context
+      const windowSize = settings.contextWindowSize
+      const currentMessages = allMessages.length > windowSize
+        ? allMessages.slice(-windowSize)
+        : allMessages
+
+      console.group('%c[API Call] %cPreparing request', 'color:#5c7cfa;font-weight:bold', 'color:#64748b')
+      console.log('%cSearch context length: %c%d chars', 'color:#8494b2', 'color:#e8ecf4', searchContext.length)
+      if (searchContext) {
+        console.log('%cSearch context preview: %c%s', 'color:#8494b2', 'color:#e8ecf4', searchContext.slice(0, 200) + '...')
+      }
+      console.groupEnd()
+      
       const stream = streamChat(
         apiConfig,
         currentMessages,
         settings.systemPrompt,
         settings.temperature,
         settings.maxTokens,
-        abortController.signal
+        abortController.signal,
+        searchContext || undefined
       )
 
       for await (const chunk of stream) {
@@ -160,6 +250,18 @@ export default function ChatView() {
 
       // Final flush — ensure the complete content is written
       updateMessage(convId!, assistantMsg.id, fullContent)
+      
+      // Attach search results if any
+      if (searchResults.length > 0) {
+        console.group('%c[Search Results] %cAttaching to message', 'color:#10b981;font-weight:bold', 'color:#64748b')
+        console.log('%cMessage ID: %c%s', 'color:#8494b2', 'color:#e8ecf4', assistantMsg.id)
+        console.log('%cResults count: %c%d', 'color:#8494b2', 'color:#e8ecf4', searchResults.length)
+        console.groupEnd()
+        
+        attachSearchResults(convId!, assistantMsg.id, searchResults)
+      } else {
+        console.log('%c[Search Results] %cNo results to attach', 'color:#f59e0b;font-weight:bold', 'color:#64748b')
+      }
     } catch (err: unknown) {
       if (err instanceof Error && err.name === 'AbortError') {
         if (!fullContent) {

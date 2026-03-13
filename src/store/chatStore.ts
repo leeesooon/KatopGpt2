@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { v4 as uuidv4 } from 'uuid'
-import type { Conversation, Message, AppSettings, ApiProvider, ModelSelection, ModelConfig } from '../types'
+import type { Conversation, Message, AppSettings, ApiProvider, ModelSelection, ModelConfig, SearchResult } from '../types'
 import { DEFAULT_SETTINGS } from '../types'
 
 interface ChatState {
@@ -11,6 +11,9 @@ interface ChatState {
   isSettingsOpen: boolean
   /** Set of conversation IDs currently streaming */
   streamingConvIds: string[]
+  /** Enable web search for current message */
+  searchEnabled: boolean
+  /** Enable web search for current message */
 
   // Conversation actions
   createConversation: () => string
@@ -32,12 +35,15 @@ interface ChatState {
   setActiveModel: (selection: ModelSelection | null) => void
 
   // Settings actions
-  updateSettings: (settings: Partial<Pick<AppSettings, 'systemPrompt' | 'temperature' | 'maxTokens'>>) => void
+  updateSettings: (settings: Partial<Pick<AppSettings, 'systemPrompt' | 'temperature' | 'maxTokens' | 'contextWindowSize' | 'searchEngine' | 'serperApiKey' | 'tavilyApiKey' | 'enableSearchByDefault'>>) => void
   setSettingsOpen: (open: boolean) => void
 
   // Streaming — per conversation
   setConversationStreaming: (convId: string, streaming: boolean) => void
   isConversationStreaming: (convId: string) => boolean
+  // Search actions
+  setSearchEnabled: (enabled: boolean) => void
+  attachSearchResults: (conversationId: string, messageId: string, results: SearchResult[]) => void
 }
 
 export const useChatStore = create<ChatState>()(
@@ -48,6 +54,7 @@ export const useChatStore = create<ChatState>()(
       settings: DEFAULT_SETTINGS,
       isSettingsOpen: false,
       streamingConvIds: [],
+      searchEnabled: false,
 
       createConversation: () => {
         const id = uuidv4()
@@ -215,10 +222,28 @@ export const useChatStore = create<ChatState>()(
       isConversationStreaming: (convId) => {
         return get().streamingConvIds.includes(convId)
       },
+
+      setSearchEnabled: (enabled) => set({ searchEnabled: enabled }),
+
+      attachSearchResults: (conversationId, messageId, results) => {
+        set((state) => ({
+          conversations: state.conversations.map((c) =>
+            c.id === conversationId
+              ? {
+                  ...c,
+                  messages: c.messages.map((m) =>
+                    m.id === messageId ? { ...m, searchResults: results } : m
+                  ),
+                  updatedAt: Date.now(),
+                }
+              : c
+          ),
+        }))
+      },
     }),
     {
       name: 'katop-gpt-storage',
-      version: 2,
+      version: 5,
       partialize: (state) => ({
         conversations: state.conversations,
         activeConversationId: state.activeConversationId,
@@ -271,6 +296,38 @@ export const useChatStore = create<ChatState>()(
                 typeof m === 'string' ? { name: m, multimodal: false } : m
               ) as ModelConfig[],
             }))
+          }
+        }
+        if (version <= 2) {
+          // Add contextWindowSize with default value
+          const settings = state.settings as Record<string, unknown> | undefined
+          if (settings && settings.contextWindowSize == null) {
+            settings.contextWindowSize = DEFAULT_SETTINGS.contextWindowSize
+          }
+        }
+        if (version <= 3) {
+          // maxTokens default 4096 → 0 (0 = don't send, let API decide)
+          const settings = state.settings as Record<string, unknown> | undefined
+          if (settings && settings.maxTokens === 4096) {
+            settings.maxTokens = 0
+          }
+        }
+        if (version <= 4) {
+          // Add search settings with defaults
+          const settings = state.settings as Record<string, unknown> | undefined
+          if (settings) {
+            if (settings.searchEngine == null) {
+              settings.searchEngine = 'tavily'
+            }
+            if (settings.serperApiKey == null) {
+              settings.serperApiKey = ''
+            }
+            if (settings.tavilyApiKey == null) {
+              settings.tavilyApiKey = ''
+            }
+            if (settings.enableSearchByDefault == null) {
+              settings.enableSearchByDefault = false
+            }
           }
         }
         return state as unknown as ChatState

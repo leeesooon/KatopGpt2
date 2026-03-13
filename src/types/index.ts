@@ -21,12 +21,35 @@ export interface FileAttachment {
   content: string
 }
 
+/** Web search result from search API */
+export interface SearchResult {
+  title: string
+  url: string
+  snippet: string
+  date?: string
+}
+
+/** Search state for a conversation */
+export interface SearchState {
+  /** Search results for current query */
+  results: SearchResult[]
+  /** Whether search is in progress */
+  isSearching: boolean
+  /** Search error message if failed */
+  error: string | null
+}
+
+/** Supported search engines */
+export type SearchEngine = 'serper' | 'tavily' 
+
 export interface Message {
   id: string
   role: 'user' | 'assistant' | 'system'
   content: string
   images?: ImageAttachment[]
   files?: FileAttachment[]
+  /** Search results attached to this message (for assistant responses) */
+  searchResults?: SearchResult[]
   timestamp: number
 }
 
@@ -67,6 +90,16 @@ export interface AppSettings {
   systemPrompt: string
   temperature: number
   maxTokens: number
+  /** Number of recent messages to send as context (sliding window) */
+  contextWindowSize: number
+  /** Selected search engine */
+  searchEngine: SearchEngine
+  /** Serper API key for web search */
+  serperApiKey: string
+  /** Tavily API key for web search */
+  tavilyApiKey: string
+  /** Enable web search by default */
+  enableSearchByDefault: boolean
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -74,7 +107,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
   activeModel: null,
   systemPrompt: 'You are a helpful assistant.',
   temperature: 0.7,
-  maxTokens: 4096,
+  maxTokens: 0,
+  contextWindowSize: 20,
+  searchEngine: 'tavily',
+  serperApiKey: '',
+  tavilyApiKey: '',
+  enableSearchByDefault: false,
 }
 
 /** Resolve a ModelSelection into a flat ApiConfig for API calls */

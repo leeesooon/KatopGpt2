@@ -1,15 +1,31 @@
-import { useMemo, memo } from 'react'
+import {
+  Children,
+  cloneElement,
+  isValidElement,
+  memo,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { Copy, Check, User, Bot, FileText } from 'lucide-react'
-import { useState } from 'react'
 import type { Message } from '../types'
+import SourcesPanel from './SourcesPanel'
 
 interface MessageBubbleProps {
   message: Message
 }
+
+type CitationContainerTag = 'blockquote' | 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6' | 'li' | 'p' | 'td' | 'th'
+
+const MARKDOWN_WRAPPER_RE = /^\s*```[ \t]*(?:markdown|md)\s*\r?\n/i
+const TRAILING_FENCE_RE = /\r?\n```[ \t]*$/
+const CITATION_RE = /(\[\d+\])/g
+const SKIP_CITATION_TAGS = new Set(['a', 'code', 'pre'])
 
 function CodeBlock({ language, value }: { language: string; value: string }) {
   const [copied, setCopied] = useState(false)
@@ -48,11 +64,99 @@ function CodeBlock({ language, value }: { language: string; value: string }) {
   )
 }
 
+
+function unwrapOuterMarkdownFence(content: string) {
+  const openingMatch = content.match(MARKDOWN_WRAPPER_RE)
+  if (!openingMatch) return content
+
+  let unwrapped = content.slice(openingMatch[0].length)
+  if (TRAILING_FENCE_RE.test(unwrapped)) {
+    unwrapped = unwrapped.replace(TRAILING_FENCE_RE, '')
+  }
+
+  return unwrapped
+}
+
+/** Parse citation markers [1], [2] and convert them to clickable links. */
+function parseCitationsInText(text: string, sources: { url: string }[] = [], keyPrefix = 'citation'): ReactNode[] {
+  const parts = text.split(CITATION_RE)
+  
+  return parts.map((part, index) => {
+    const match = part.match(/\[(\d+)\]/)
+    if (!match) return part
+    
+    const citationIndex = parseInt(match[1]) - 1
+    const url = sources[citationIndex]?.url
+    
+    if (!url) return part
+    
+    return (
+      <a
+        key={`${keyPrefix}-${index}`}
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-primary-400 hover:text-primary-300 hover:underline mx-0.5 transition-colors"
+        title={url}
+      >
+        {part}
+      </a>
+    )
+  })
+}
+
+/** Walk React markdown output and replace citation markers without flattening inline markdown nodes. */
+function injectCitations(children: ReactNode, sources: { url: string }[] = [], keyPrefix = 'node'): ReactNode {
+  return Children.map(children, (child, index) => {
+    const childKey = `${keyPrefix}-${index}`
+
+    if (typeof child === 'string' || typeof child === 'number') {
+      return parseCitationsInText(String(child), sources, childKey)
+    }
+
+    if (!isValidElement(child)) {
+      return child
+    }
+
+    if (typeof child.type === 'string' && SKIP_CITATION_TAGS.has(child.type)) {
+      return child
+    }
+
+    const props = child.props as { children?: ReactNode }
+    if (props.children == null) {
+      return child
+    }
+
+    return cloneElement(
+      child,
+      undefined,
+      injectCitations(props.children, sources, childKey)
+    )
+  })
+}
+
 const MessageBubble = memo(function MessageBubble({ message }: MessageBubbleProps) {
   const isUser = message.role === 'user'
+  const [showCopyButton, setShowCopyButton] = useState(false)
+  const [copiedMessage, setCopiedMessage] = useState(false)
+  const contentRef = useRef<HTMLDivElement>(null)
 
-  const markdownComponents = useMemo(
-    () => ({
+  const renderedContent = useMemo(
+    () => unwrapOuterMarkdownFence(message.content),
+    [message.content]
+  )
+
+  const markdownComponents = useMemo(() => {
+    const createCitationContainer = (Tag: CitationContainerTag) =>
+      function CitationContainer({ node, children, ...props }: any) {
+        return (
+          <Tag {...props}>
+            {injectCitations(children, message.searchResults)}
+          </Tag>
+        )
+      }
+
+    return {
       code({ className, children, ...props }: any) {
         const match = /language-(\w+)/.exec(className || '')
         const value = String(children).replace(/\n$/, '')
@@ -67,9 +171,25 @@ const MessageBubble = memo(function MessageBubble({ message }: MessageBubbleProp
           </code>
         )
       },
-    }),
-    []
-  )
+      blockquote: createCitationContainer('blockquote'),
+      h1: createCitationContainer('h1'),
+      h2: createCitationContainer('h2'),
+      h3: createCitationContainer('h3'),
+      h4: createCitationContainer('h4'),
+      h5: createCitationContainer('h5'),
+      h6: createCitationContainer('h6'),
+      li: createCitationContainer('li'),
+      p: createCitationContainer('p'),
+      td: createCitationContainer('td'),
+      th: createCitationContainer('th'),
+    }
+  }, [message.searchResults])
+
+  const handleCopyMessage = async () => {
+    await navigator.clipboard.writeText(message.content)
+    setCopiedMessage(true)
+    setTimeout(() => setCopiedMessage(false), 2000)
+  }
 
   return (
     <div className={`flex gap-3 animate-fade-in ${isUser ? 'flex-row-reverse' : ''}`}>
@@ -90,12 +210,28 @@ const MessageBubble = memo(function MessageBubble({ message }: MessageBubbleProp
 
       {/* Content */}
       <div
-        className={`max-w-[75%] rounded-2xl px-4 py-3 ${
+        ref={contentRef}
+        onMouseEnter={() => !isUser && setShowCopyButton(true)}
+        onMouseLeave={() => {
+          setShowCopyButton(false)
+          setCopiedMessage(false)
+        }}
+        className={`relative max-w-[75%] rounded-2xl px-4 py-3 ${
           isUser
             ? 'bg-primary-600/20 border border-primary-500/20 text-surface-100'
             : 'bg-surface-800/50 border border-surface-700/30 text-surface-200'
         }`}
       >
+        {/* 复制按钮 - 仅在 AI 消息上显示 */}
+        {!isUser && showCopyButton && message.content && (
+          <button
+            onClick={handleCopyMessage}
+            className="absolute top-2 right-2 p-1.5 rounded-lg bg-surface-700/80 hover:bg-surface-600/80 text-surface-300 hover:text-surface-100 transition-all opacity-90 hover:opacity-100 backdrop-blur-sm z-10"
+            title={copiedMessage ? '已复制' : '复制消息'}
+          >
+            {copiedMessage ? <Check size={14} /> : <Copy size={14} />}
+          </button>
+        )}
         {isUser ? (
           <>
             {message.images && message.images.length > 0 && (
@@ -133,11 +269,21 @@ const MessageBubble = memo(function MessageBubble({ message }: MessageBubbleProp
             <div className="typing-dot w-2 h-2 rounded-full bg-surface-400" />
           </div>
         ) : (
-          <div className="markdown-body text-sm">
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-              {message.content}
-            </ReactMarkdown>
-          </div>
+          <>
+            <div className="markdown-body text-sm">
+              <ReactMarkdown 
+                remarkPlugins={[remarkGfm]} 
+                components={markdownComponents}
+              >
+                {renderedContent}
+              </ReactMarkdown>
+            </div>
+            {message.searchResults && message.searchResults.length > 0 && (
+              <>
+                <SourcesPanel sources={message.searchResults} />
+              </>
+            )}
+          </>
         )}
       </div>
     </div>

@@ -1,4 +1,4 @@
-import type { ApiConfig, Message, ImageAttachment } from '../types'
+import type { ApiConfig, Message, ImageAttachment, FileAttachment } from '../types'
 
 export class ChatApiError extends Error {
   constructor(
@@ -30,24 +30,40 @@ type ContentPart =
 function buildApiMessages(
   messages: Message[],
   systemPrompt: string,
-  multimodal: boolean
+  multimodal: boolean,
+  searchContext?: string
 ): Array<{ role: string; content: string | ContentPart[] }> {
+  // Inject search context into system prompt if provided
+  const enhancedSystemPrompt = searchContext 
+    ? `${systemPrompt}\n\n以下是网络搜索结果，请在回答时引用相关来源（使用 [1], [2] 等标记）：\n\n${searchContext}`
+    : systemPrompt
+  
   const result: Array<{ role: string; content: string | ContentPart[] }> = [
-    { role: 'system', content: systemPrompt },
+    { role: 'system', content: enhancedSystemPrompt },
   ]
 
   for (const m of messages) {
+    // Build text content — inject file contents before user text
+    let textContent = m.content
+    if (m.files && m.files.length > 0) {
+      const fileParts = m.files.map((f) => {
+        const label = `[文件: ${f.name}]`
+        return `${label}\n\`\`\`\n${f.content}\n\`\`\``
+      })
+      textContent = fileParts.join('\n\n') + (textContent ? '\n\n' + textContent : '')
+    }
+
     if (multimodal && m.images && m.images.length > 0) {
       const parts: ContentPart[] = []
-      if (m.content) {
-        parts.push({ type: 'text', text: m.content })
+      if (textContent) {
+        parts.push({ type: 'text', text: textContent })
       }
       for (const img of m.images) {
         parts.push({ type: 'image_url', image_url: { url: img.base64 } })
       }
       result.push({ role: m.role, content: parts })
     } else {
-      result.push({ role: m.role, content: m.content })
+      result.push({ role: m.role, content: textContent })
     }
   }
 
@@ -60,19 +76,22 @@ export async function* streamChat(
   systemPrompt: string,
   temperature: number,
   maxTokens: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  searchContext?: string
 ): AsyncGenerator<string, void, unknown> {
-  const apiMessages = buildApiMessages(messages, systemPrompt, config.multimodal)
+  const apiMessages = buildApiMessages(messages, systemPrompt, config.multimodal, searchContext)
 
   const baseUrl = config.baseUrl.replace(/\/+$/, '')
   const url = `${baseUrl}/chat/completions`
 
-  const requestBody = {
+  const requestBody: Record<string, unknown> = {
     model: config.model,
     messages: apiMessages,
     stream: true,
     temperature,
-    max_tokens: maxTokens,
+  }
+  if (maxTokens > 0) {
+    requestBody.max_tokens = maxTokens
   }
 
   // Log request

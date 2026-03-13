@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
-import { Send, Square, ImagePlus, Paperclip, X } from 'lucide-react'
+import { Send, Square, ImagePlus, Paperclip, X, FileText, Search } from 'lucide-react'
 import { v4 as uuidv4 } from 'uuid'
 import ModelSelector from './ModelSelector'
+import { useChatStore } from '../store/chatStore'
 import type { ImageAttachment, FileAttachment } from '../types'
 
 interface InputAreaProps {
@@ -12,6 +13,7 @@ interface InputAreaProps {
 }
 
 export default function InputArea({ onSend, onStop, isStreaming, disabled }: InputAreaProps) {
+  const { searchEnabled, setSearchEnabled, settings } = useChatStore()
   const [input, setInput] = useState('')
   const [images, setImages] = useState<ImageAttachment[]>([])
   const [files, setFiles] = useState<FileAttachment[]>([])
@@ -103,6 +105,10 @@ export default function InputArea({ onSend, onStop, isStreaming, disabled }: Inp
 
   const removeImage = (id: string) => {
     setImages((prev) => prev.filter((img) => img.id !== id))
+  }
+
+  const removeFile = (id: string) => {
+    setFiles((prev) => prev.filter((f) => f.id !== id))
   }
 
   const handlePaste = (e: React.ClipboardEvent) => {
@@ -208,8 +214,54 @@ export default function InputArea({ onSend, onStop, isStreaming, disabled }: Inp
             </div>
           )}
 
+          {/* File previews */}
+          {files.length > 0 && (
+            <div className="flex flex-wrap gap-2 px-2 py-2">
+              {files.map((file) => (
+                <div
+                  key={file.id}
+                  className="relative group flex items-center gap-1.5 px-2.5 py-1.5
+                             bg-surface-700/40 border border-surface-600/50 rounded-lg"
+                >
+                  <FileText size={14} className="text-primary-400 shrink-0" />
+                  <span className="text-xs text-surface-300 truncate max-w-[120px]">{file.name}</span>
+                  <span className="text-[10px] text-surface-500">
+                    {file.size < 1024
+                      ? `${file.size} B`
+                      : file.size < 1048576
+                        ? `${(file.size / 1024).toFixed(1)} KB`
+                        : `${(file.size / 1048576).toFixed(1)} MB`}
+                  </span>
+                  <button
+                    onClick={() => removeFile(file.id)}
+                    className="ml-0.5 p-0.5 hover:bg-red-500/20 rounded transition-colors"
+                  >
+                    <X size={12} className="text-surface-400 hover:text-red-400" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
           {/* Input row */}
           <div className="flex items-end gap-2">
+            {/* Search toggle button */}
+            {(settings.serperApiKey || settings.tavilyApiKey) && (
+              <button
+                onClick={() => setSearchEnabled(!searchEnabled)}
+                disabled={disabled || isStreaming}
+                className={`shrink-0 p-2 rounded-lg transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed ${
+                  searchEnabled
+                    ? 'bg-primary-500/20 text-primary-400 hover:bg-primary-500/30'
+                    : 'hover:bg-surface-700/50 text-surface-400 hover:text-surface-200'
+                }`}
+                title={searchEnabled ? '已启用网络搜索' : '点击启用网络搜索'}
+              >
+                <Search size={18} />
+              </button>
+            )}
+
+
             {/* Image upload button */}
             <button
               onClick={() => imageInputRef.current?.click()}
