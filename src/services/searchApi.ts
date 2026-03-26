@@ -1,4 +1,5 @@
 import type { SearchResult } from '../types'
+import { normalizeExternalUrl } from '../utils/externalLinks'
 
 export class SearchApiError extends Error {
   constructor(
@@ -127,7 +128,7 @@ export async function webSearch(
 
     const results: SearchResult[] = (data.organic ?? []).map((item) => ({
       title: item.title,
-      url: item.link,
+      url: normalizeExternalUrl(item.link) ?? item.link,
       snippet: item.snippet,
       date: item.date,
     }))
@@ -229,7 +230,7 @@ async function tavilySearch(
 
     const results: SearchResult[] = (data.results ?? []).map((item) => ({
       title: item.title,
-      url: item.url,
+      url: normalizeExternalUrl(item.url) ?? item.url,
       snippet: item.content.slice(0, 500), // Truncate long content
       date: item.published_date,
     }))

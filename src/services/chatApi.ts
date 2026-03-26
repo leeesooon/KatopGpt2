@@ -17,6 +17,12 @@ interface ChatCompletionChunk {
   }>
 }
 
+interface ParsedStreamLine {
+  chunk?: ChatCompletionChunk
+  content?: string
+  isDone: boolean
+}
+
 type ContentPart =
   | { type: 'text'; text: string }
   | { type: 'image_url'; image_url: { url: string } }
@@ -137,20 +143,41 @@ export async function* streamChat(
   let fullResponse = ''
   const chunks: ChatCompletionChunk[] = []
 
+  const parseStreamLine = (line: string): ParsedStreamLine | null => {
+    const trimmed = line.trim()
+    if (!trimmed || !trimmed.startsWith('data: ')) return null
+
+    const data = trimmed.slice(6)
+    if (data === '[DONE]') {
+      return { isDone: true }
+    }
+
+    try {
+      const chunk: ChatCompletionChunk = JSON.parse(data)
+      return {
+        chunk,
+        content: chunk.choices[0]?.delta?.content,
+        isDone: false,
+      }
+    } catch {
+      return null
+    }
+  }
+
   try {
+    let streamEnded = false
+
     while (true) {
       const { done, value } = await reader.read()
-      if (done) break
-
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true })
+      const lines = buffer.split(/\r?\n/)
       buffer = lines.pop() ?? ''
 
       for (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed || !trimmed.startsWith('data: ')) continue
-        const data = trimmed.slice(6)
-        if (data === '[DONE]') {
+        const parsed = parseStreamLine(line)
+        if (!parsed) continue
+
+        if (parsed.isDone) {
           // Log complete response
           console.group('%c[API Response] %c← %s %c(%d chunks)', 'color:#10b981;font-weight:bold', 'color:#64748b', config.model, 'color:#8494b2', chunks.length)
           console.log('%cFull content:', 'color:#8494b2')
@@ -158,20 +185,41 @@ export async function* streamChat(
           console.log('%cLast chunk:', 'color:#8494b2')
           if (chunks.length > 0) console.dir(chunks[chunks.length - 1], { depth: null })
           console.groupEnd()
-          return
+          streamEnded = true
+          break
         }
 
-        try {
-          const chunk: ChatCompletionChunk = JSON.parse(data)
-          chunks.push(chunk)
-          const content = chunk.choices[0]?.delta?.content
-          if (content) {
-            fullResponse += content
-            yield content
-          }
-        } catch {
-          // skip malformed JSON
+        if (parsed.chunk) {
+          chunks.push(parsed.chunk)
         }
+        if (parsed.content) {
+          fullResponse += parsed.content
+          yield parsed.content
+        }
+      }
+
+      if (streamEnded) return
+      if (done) break
+    }
+
+    const trailingLine = buffer.trim()
+    if (trailingLine) {
+      const parsed = parseStreamLine(trailingLine)
+      if (parsed?.chunk) {
+        chunks.push(parsed.chunk)
+      }
+      if (parsed?.content) {
+        fullResponse += parsed.content
+        yield parsed.content
+      }
+      if (parsed?.isDone) {
+        console.group('%c[API Response] %c← %s %c(%d chunks)', 'color:#10b981;font-weight:bold', 'color:#64748b', config.model, 'color:#8494b2', chunks.length)
+        console.log('%cFull content:', 'color:#8494b2')
+        console.log(fullResponse)
+        console.log('%cLast chunk:', 'color:#8494b2')
+        if (chunks.length > 0) console.dir(chunks[chunks.length - 1], { depth: null })
+        console.groupEnd()
+        return
       }
     }
 

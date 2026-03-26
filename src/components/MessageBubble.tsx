@@ -15,6 +15,7 @@ import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { Copy, Check, User, Bot, FileText } from 'lucide-react'
 import type { Message } from '../types'
 import SourcesPanel from './SourcesPanel'
+import { normalizeExternalUrl, openExternalUrl } from '../utils/externalLinks'
 
 interface MessageBubbleProps {
   message: Message
@@ -26,6 +27,11 @@ const MARKDOWN_WRAPPER_RE = /^\s*```[ \t]*(?:markdown|md)\s*\r?\n/i
 const TRAILING_FENCE_RE = /\r?\n```[ \t]*$/
 const CITATION_RE = /(\[\d+\])/g
 const SKIP_CITATION_TAGS = new Set(['a', 'code', 'pre'])
+
+function handleExternalAnchorClick(event: React.MouseEvent<HTMLAnchorElement>, rawUrl?: string | null) {
+  event.preventDefault()
+  openExternalUrl(rawUrl ?? '')
+}
 
 function CodeBlock({ language, value }: { language: string; value: string }) {
   const [copied, setCopied] = useState(false)
@@ -87,17 +93,19 @@ function parseCitationsInText(text: string, sources: { url: string }[] = [], key
     
     const citationIndex = parseInt(match[1]) - 1
     const url = sources[citationIndex]?.url
+    const normalizedUrl = normalizeExternalUrl(url)
     
     if (!url) return part
     
     return (
       <a
         key={`${keyPrefix}-${index}`}
-        href={url}
+        href={normalizedUrl ?? url}
         target="_blank"
         rel="noopener noreferrer"
         className="text-primary-400 hover:text-primary-300 hover:underline mx-0.5 transition-colors"
-        title={url}
+        title={normalizedUrl ?? url}
+        onClick={(event) => handleExternalAnchorClick(event, normalizedUrl ?? url)}
       >
         {part}
       </a>
@@ -169,6 +177,21 @@ const MessageBubble = memo(function MessageBubble({ message }: MessageBubbleProp
           <code className={className} {...props}>
             {children}
           </code>
+        )
+      },
+      a({ href, children, ...props }: any) {
+        const normalizedHref = normalizeExternalUrl(href)
+
+        return (
+          <a
+            {...props}
+            href={normalizedHref ?? href}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(event) => handleExternalAnchorClick(event, normalizedHref ?? href)}
+          >
+            {children}
+          </a>
         )
       },
       blockquote: createCitationContainer('blockquote'),

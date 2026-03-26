@@ -5,6 +5,7 @@ interface ElectronAPI {
   maximize: () => void
   close: () => void
   isMaximized: () => Promise<boolean>
+  openExternal: (url: string) => Promise<boolean>
 }
 
 declare global {

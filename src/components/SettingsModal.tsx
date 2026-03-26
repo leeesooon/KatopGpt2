@@ -6,6 +6,7 @@ import {
 import { useChatStore } from '../store/chatStore'
 import { testApiConnection } from '../services/chatApi'
 import type { ApiProvider, ModelConfig } from '../types'
+import { openExternalUrl } from '../utils/externalLinks'
 
 interface ProviderFormData {
   name: string
@@ -163,6 +164,11 @@ export default function SettingsModal() {
 
   const handleOverlayClick = (e: React.MouseEvent) => {
     if (e.target === e.currentTarget) setSettingsOpen(false)
+  }
+
+  const handleExternalLinkClick = (e: React.MouseEvent<HTMLAnchorElement>, url: string) => {
+    e.preventDefault()
+    openExternalUrl(url)
   }
 
   const renderModelTags = (form: ProviderFormData, setFn: (f: ProviderFormData) => void) => (
@@ -456,7 +462,13 @@ export default function SettingsModal() {
                 </div>
                 <p className="text-[10px] text-surface-500">
                   免费额度：1000次/月。
-                  <a href="https://tavily.com" target="_blank" rel="noopener noreferrer" className="text-primary-400 hover:underline ml-1">
+                  <a
+                    href="https://tavily.com"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary-400 hover:underline ml-1"
+                    onClick={(e) => handleExternalLinkClick(e, 'https://tavily.com')}
+                  >
                     获取 API Key
                   </a>
                 </p>
@@ -485,7 +497,13 @@ export default function SettingsModal() {
                 </div>
                 <p className="text-[10px] text-surface-500">
                   免费额度：2500次/月。
-                  <a href="https://serper.dev" target="_blank" rel="noopener noreferrer" className="text-primary-400 hover:underline ml-1">
+                  <a
+                    href="https://serper.dev"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary-400 hover:underline ml-1"
+                    onClick={(e) => handleExternalLinkClick(e, 'https://serper.dev')}
+                  >
                     获取 API Key
                   </a>
                 </p>

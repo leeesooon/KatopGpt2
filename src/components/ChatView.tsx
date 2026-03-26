@@ -5,7 +5,7 @@ import { streamChat, ChatApiError } from '../services/chatApi'
 import { recognizeImages } from '../services/ocr'
 import { resolveApiConfig } from '../types'
 import { webSearch, formatSearchContext, shouldTriggerSearch, SearchApiError } from '../services/searchApi'
-import type { ImageAttachment, FileAttachment } from '../types'
+import type { ImageAttachment, FileAttachment, SearchResult } from '../types'
 import MessageBubble from './MessageBubble'
 import InputArea from './InputArea'
 
@@ -154,7 +154,7 @@ export default function ChatView() {
     // Add empty assistant message
 
     // Web search if enabled
-    let searchResults = []
+    let searchResults: SearchResult[] = []
     let searchContext = ''
     const apiKey = settings.searchEngine === 'tavily' ? settings.tavilyApiKey : settings.serperApiKey
     
@@ -205,6 +205,15 @@ export default function ChatView() {
     const assistantMsg = addMessage(convId, { role: 'assistant', content: '' })
     let fullContent = ''
     let rafPending = false
+    let pendingFrame = 0
+
+    const cancelPendingMessageUpdate = () => {
+      if (pendingFrame) {
+        cancelAnimationFrame(pendingFrame)
+        pendingFrame = 0
+      }
+      rafPending = false
+    }
 
     try {
       const allMessages = useChatStore
@@ -240,15 +249,16 @@ export default function ChatView() {
         // Throttle state updates to 1 per animation frame
         if (!rafPending) {
           rafPending = true
-          const snapshot = fullContent
-          requestAnimationFrame(() => {
-            updateMessage(convId!, assistantMsg.id, snapshot)
+          pendingFrame = requestAnimationFrame(() => {
+            updateMessage(convId!, assistantMsg.id, fullContent)
+            pendingFrame = 0
             rafPending = false
           })
         }
       }
 
       // Final flush — ensure the complete content is written
+      cancelPendingMessageUpdate()
       updateMessage(convId!, assistantMsg.id, fullContent)
       
       // Attach search results if any
@@ -263,6 +273,8 @@ export default function ChatView() {
         console.log('%c[Search Results] %cNo results to attach', 'color:#f59e0b;font-weight:bold', 'color:#64748b')
       }
     } catch (err: unknown) {
+      cancelPendingMessageUpdate()
+
       if (err instanceof Error && err.name === 'AbortError') {
         if (!fullContent) {
           updateMessage(convId!, assistantMsg.id, '*(已停止生成)*')
@@ -275,6 +287,7 @@ export default function ChatView() {
         updateMessage(convId!, assistantMsg.id, errorMsg)
       }
     } finally {
+      cancelPendingMessageUpdate()
       setConversationStreaming(convId!, false)
       abortMapRef.current.delete(convId!)
     }
