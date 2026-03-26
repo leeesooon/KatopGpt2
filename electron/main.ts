@@ -5,6 +5,9 @@ let mainWindow: BrowserWindow | null = null
 
 const APP_AMPERSAND_RE = /&(?:amp(?:;|%3[Bb])|#38;)/gi
 const ALLOWED_EXTERNAL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:'])
+const READABLE_WEB_CONTENT_TYPES = ['text/html', 'application/xhtml+xml', 'text/plain']
+const MAX_WEB_PAGE_CHARS = 500000
+const WEB_FETCH_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) KatopGPT/1.0 Chrome/124.0.0.0 Safari/537.36'
 
 function normalizeExternalUrl(rawUrl: string) {
   const trimmedUrl = rawUrl.trim()
@@ -28,6 +31,40 @@ function openExternalUrl(rawUrl: string) {
   if (!externalUrl) return false
   void shell.openExternal(externalUrl)
   return true
+}
+
+async function fetchWebPage(rawUrl: string) {
+  const externalUrl = normalizeExternalUrl(rawUrl)
+  if (!externalUrl) {
+    throw new Error('无效网页链接')
+  }
+
+  const response = await fetch(externalUrl, {
+    headers: {
+      Accept: 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      'User-Agent': WEB_FETCH_USER_AGENT,
+    },
+    redirect: 'follow',
+  })
+
+  if (!response.ok) {
+    throw new Error(`网页请求失败 (${response.status})`)
+  }
+
+  const contentType = response.headers.get('content-type') ?? ''
+  const isReadableContent = READABLE_WEB_CONTENT_TYPES.some((type) => contentType.includes(type))
+  if (contentType && !isReadableContent) {
+    throw new Error(`暂不支持读取该网页类型：${contentType}`)
+  }
+
+  const html = (await response.text()).slice(0, MAX_WEB_PAGE_CHARS)
+
+  return {
+    finalUrl: normalizeExternalUrl(response.url) ?? externalUrl,
+    contentType,
+    html,
+  }
 }
 
 function isAppUrl(url: string) {
@@ -111,3 +148,4 @@ ipcMain.on('window:maximize', () => {
 ipcMain.on('window:close', () => mainWindow?.close())
 ipcMain.handle('window:isMaximized', () => mainWindow?.isMaximized())
 ipcMain.handle('shell:openExternal', (_event, url: string) => openExternalUrl(url))
+ipcMain.handle('web:fetchPage', (_event, url: string) => fetchWebPage(url))

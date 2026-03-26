@@ -5,6 +5,7 @@ import { streamChat, ChatApiError } from '../services/chatApi'
 import { recognizeImages } from '../services/ocr'
 import { resolveApiConfig } from '../types'
 import { webSearch, formatSearchContext, shouldTriggerSearch, SearchApiError } from '../services/searchApi'
+import { readWebPagesFromText, formatWebPageContext } from '../services/webpage'
 import type { ImageAttachment, FileAttachment, SearchResult } from '../types'
 import MessageBubble from './MessageBubble'
 import InputArea from './InputArea'
@@ -153,10 +154,23 @@ export default function ChatView() {
 
     // Add empty assistant message
 
-    // Web search if enabled
-    let searchResults: SearchResult[] = []
-    let searchContext = ''
+    // Web references and search
+    let referenceSources: SearchResult[] = []
+    const referenceSections: string[] = []
     const apiKey = settings.searchEngine === 'tavily' ? settings.tavilyApiKey : settings.serperApiKey
+
+    const webPages = await readWebPagesFromText(messageContent)
+    if (webPages.sources.length > 0) {
+      const startIndex = referenceSources.length + 1
+      referenceSections.push(`以下是用户提供网页的提取内容：\n\n${formatWebPageContext(webPages.sources, 5000, startIndex)}`)
+      referenceSources = [...referenceSources, ...webPages.sources]
+
+      console.group('%c[Web Page] %c✓ Read completed', 'color:#10b981;font-weight:bold', 'color:#64748b')
+      console.log('%cPages read: %c%d', 'color:#8494b2', 'color:#e8ecf4', webPages.sources.length)
+      console.log('%cFirst result:', 'color:#8494b2')
+      console.dir(webPages.sources[0], { depth: null })
+      console.groupEnd()
+    }
     
     console.group('%c[Search Flow] %cInitializing', 'color:#5c7cfa;font-weight:bold', 'color:#64748b')
     console.log('%cSearch enabled (manual): %c%s', 'color:#8494b2', 'color:#e8ecf4', searchEnabled)
@@ -173,8 +187,13 @@ export default function ChatView() {
       if (shouldSearch) {
         try {
           console.log('%c[Search] %cTriggered for query (%s)', 'color:#5c7cfa;font-weight:bold', 'color:#64748b', settings.searchEngine)
-          searchResults = await webSearch(messageContent, apiKey, settings.searchEngine, 'zh-CN', 8)
-          searchContext = formatSearchContext(searchResults, 4000)
+          const searchResults = await webSearch(messageContent, apiKey, settings.searchEngine, 'zh-CN', 8)
+          const startIndex = referenceSources.length + 1
+          const searchContext = formatSearchContext(searchResults, 4000, startIndex)
+          if (searchContext) {
+            referenceSections.push(`以下是网络搜索结果：\n\n${searchContext}`)
+            referenceSources = [...referenceSources, ...searchResults]
+          }
           
           console.group('%c[Search] %c✓ Search completed', 'color:#10b981;font-weight:bold', 'color:#64748b')
           console.log('%cResults count: %c%d', 'color:#8494b2', 'color:#e8ecf4', searchResults.length)
@@ -226,11 +245,12 @@ export default function ChatView() {
       const currentMessages = allMessages.length > windowSize
         ? allMessages.slice(-windowSize)
         : allMessages
+      const referenceContext = referenceSections.join('\n\n')
 
       console.group('%c[API Call] %cPreparing request', 'color:#5c7cfa;font-weight:bold', 'color:#64748b')
-      console.log('%cSearch context length: %c%d chars', 'color:#8494b2', 'color:#e8ecf4', searchContext.length)
-      if (searchContext) {
-        console.log('%cSearch context preview: %c%s', 'color:#8494b2', 'color:#e8ecf4', searchContext.slice(0, 200) + '...')
+      console.log('%cReference context length: %c%d chars', 'color:#8494b2', 'color:#e8ecf4', referenceContext.length)
+      if (referenceContext) {
+        console.log('%cReference context preview: %c%s', 'color:#8494b2', 'color:#e8ecf4', referenceContext.slice(0, 200) + '...')
       }
       console.groupEnd()
       
@@ -241,7 +261,7 @@ export default function ChatView() {
         settings.temperature,
         settings.maxTokens,
         abortController.signal,
-        searchContext || undefined
+        referenceContext || undefined
       )
 
       for await (const chunk of stream) {
@@ -261,16 +281,16 @@ export default function ChatView() {
       cancelPendingMessageUpdate()
       updateMessage(convId!, assistantMsg.id, fullContent)
       
-      // Attach search results if any
-      if (searchResults.length > 0) {
-        console.group('%c[Search Results] %cAttaching to message', 'color:#10b981;font-weight:bold', 'color:#64748b')
+      // Attach reference sources if any
+      if (referenceSources.length > 0) {
+        console.group('%c[Sources] %cAttaching to message', 'color:#10b981;font-weight:bold', 'color:#64748b')
         console.log('%cMessage ID: %c%s', 'color:#8494b2', 'color:#e8ecf4', assistantMsg.id)
-        console.log('%cResults count: %c%d', 'color:#8494b2', 'color:#e8ecf4', searchResults.length)
+        console.log('%cResults count: %c%d', 'color:#8494b2', 'color:#e8ecf4', referenceSources.length)
         console.groupEnd()
         
-        attachSearchResults(convId!, assistantMsg.id, searchResults)
+        attachSearchResults(convId!, assistantMsg.id, referenceSources)
       } else {
-        console.log('%c[Search Results] %cNo results to attach', 'color:#f59e0b;font-weight:bold', 'color:#64748b')
+        console.log('%c[Sources] %cNo results to attach', 'color:#f59e0b;font-weight:bold', 'color:#64748b')
       }
     } catch (err: unknown) {
       cancelPendingMessageUpdate()

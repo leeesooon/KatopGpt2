@@ -6,4 +6,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
   close: () => ipcRenderer.send('window:close'),
   isMaximized: () => ipcRenderer.invoke('window:isMaximized'),
   openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),
+  fetchWebPage: (url: string) => ipcRenderer.invoke('web:fetchPage', url),
 })

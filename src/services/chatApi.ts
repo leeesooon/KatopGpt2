@@ -37,11 +37,11 @@ function buildApiMessages(
   messages: Message[],
   systemPrompt: string,
   multimodal: boolean,
-  searchContext?: string
+  referenceContext?: string
 ): Array<{ role: string; content: string | ContentPart[] }> {
-  // Inject search context into system prompt if provided
-  const enhancedSystemPrompt = searchContext 
-    ? `${systemPrompt}\n\n以下是网络搜索结果，请在回答时引用相关来源（使用 [1], [2] 等标记）：\n\n${searchContext}`
+  // Inject reference context into system prompt if provided
+  const enhancedSystemPrompt = referenceContext 
+    ? `${systemPrompt}\n\n以下是补充参考资料（可能包含用户提供的网页内容和网络搜索结果）。请基于这些资料回答，并在引用时使用 [1], [2] 等标记：\n\n${referenceContext}`
     : systemPrompt
   
   const result: Array<{ role: string; content: string | ContentPart[] }> = [
@@ -83,9 +83,9 @@ export async function* streamChat(
   temperature: number,
   maxTokens: number,
   signal?: AbortSignal,
-  searchContext?: string
+  referenceContext?: string
 ): AsyncGenerator<string, void, unknown> {
-  const apiMessages = buildApiMessages(messages, systemPrompt, config.multimodal, searchContext)
+  const apiMessages = buildApiMessages(messages, systemPrompt, config.multimodal, referenceContext)
 
   const baseUrl = config.baseUrl.replace(/\/+$/, '')
   const url = `${baseUrl}/chat/completions`

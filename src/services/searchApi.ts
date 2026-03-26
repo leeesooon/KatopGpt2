@@ -262,17 +262,19 @@ async function tavilySearch(
  */
 export function formatSearchContext(
   results: SearchResult[],
-  maxTokens: number = 4000
+  maxTokens: number = 4000,
+  startIndex: number = 1
 ): string {
   const contextParts: string[] = []
   let currentTokens = 0
 
   for (let i = 0; i < results.length; i++) {
     const result = results[i]
+    const sourceIndex = startIndex + i
     const snippet = result.snippet.slice(0, 500) // Truncate long snippets
     const date = result.date ? `\n日期: ${result.date}` : ''
 
-    const entry = `[来源 ${i + 1}]
+    const entry = `[来源 ${sourceIndex}]
 标题: ${result.title}
 链接: ${result.url}${date}
 内容: ${snippet}`
