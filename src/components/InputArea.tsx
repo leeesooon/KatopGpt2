@@ -1,9 +1,29 @@
 import { useState, useRef, useEffect } from 'react'
-import { Send, Square, ImagePlus, Paperclip, X, FileText, Search } from 'lucide-react'
+import { Send, Square, ImagePlus, Paperclip, X, FileText, Search, Loader2 } from 'lucide-react'
 import { v4 as uuidv4 } from 'uuid'
 import ModelSelector from './ModelSelector'
 import { useChatStore } from '../store/chatStore'
 import type { ImageAttachment, FileAttachment } from '../types'
+
+const EXTRACTABLE_DOCUMENT_EXTENSIONS = ['.pptx', '.pdf', '.docx']
+
+function getFileExtension(fileName: string) {
+  const lastDotIndex = fileName.lastIndexOf('.')
+  return lastDotIndex >= 0 ? fileName.slice(lastDotIndex).toLowerCase() : ''
+}
+
+function isExtractableDocument(file: File) {
+  const extension = getFileExtension(file.name)
+  if (EXTRACTABLE_DOCUMENT_EXTENSIONS.includes(extension)) {
+    return true
+  }
+
+  return [
+    'application/pdf',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  ].includes(file.type)
+}
 
 interface InputAreaProps {
   onSend: (content: string, images: ImageAttachment[], files: FileAttachment[]) => void
@@ -17,11 +37,14 @@ export default function InputArea({ onSend, onStop, isStreaming, disabled }: Inp
   const [input, setInput] = useState('')
   const [images, setImages] = useState<ImageAttachment[]>([])
   const [files, setFiles] = useState<FileAttachment[]>([])
+  const [pendingFiles, setPendingFiles] = useState<string[]>([])
+  const [attachmentError, setAttachmentError] = useState<string | null>(null)
   const [isDragOver, setIsDragOver] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const dragCounterRef = useRef(0)
+  const isProcessingFiles = pendingFiles.length > 0
 
   useEffect(() => {
     if (!isStreaming && textareaRef.current) {
@@ -38,11 +61,12 @@ export default function InputArea({ onSend, onStop, isStreaming, disabled }: Inp
 
   const handleSend = () => {
     const trimmed = input.trim()
-    if ((!trimmed && images.length === 0 && files.length === 0) || disabled) return
+    if ((!trimmed && images.length === 0 && files.length === 0) || disabled || isProcessingFiles) return
     onSend(trimmed, images, files)
     setInput('')
     setImages([])
     setFiles([])
+    setAttachmentError(null)
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
@@ -56,42 +80,104 @@ export default function InputArea({ onSend, onStop, isStreaming, disabled }: Inp
     }
   }
 
-  const addImageFile = (file: File) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      const base64 = reader.result as string
-      setImages((prev) => [...prev, { id: uuidv4(), base64, name: file.name }])
-    }
-    reader.readAsDataURL(file)
-  }
-
-  const addTextFile = (file: File) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      const content = reader.result as string
-      setFiles((prev) => [
-        ...prev,
-        { id: uuidv4(), name: file.name, size: file.size, content },
-      ])
-    }
-    reader.readAsText(file)
-  }
-
-  const processFiles = (fileList: FileList | File[]) => {
-    Array.from(fileList).forEach((file) => {
-      if (file.type.startsWith('image/')) {
-        addImageFile(file)
-      } else {
-        addTextFile(file)
-      }
+  const readFileAsDataUrl = (file: File) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result as string)
+      reader.onerror = () => reject(new Error(`读取文件失败：${file.name}`))
+      reader.readAsDataURL(file)
     })
+
+  const readFileAsText = (file: File) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result as string)
+      reader.onerror = () => reject(new Error(`读取文件失败：${file.name}`))
+      reader.readAsText(file)
+    })
+
+  const readFileAsArrayBuffer = (file: File) =>
+    new Promise<ArrayBuffer>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result as ArrayBuffer)
+      reader.onerror = () => reject(new Error(`读取文件失败：${file.name}`))
+      reader.readAsArrayBuffer(file)
+    })
+
+  const addImageFile = async (file: File) => {
+    const base64 = await readFileAsDataUrl(file)
+    setImages((prev) => [...prev, { id: uuidv4(), base64, name: file.name }])
+  }
+
+  const addTextFile = async (file: File) => {
+    const content = await readFileAsText(file)
+    setFiles((prev) => [
+      ...prev,
+      { id: uuidv4(), name: file.name, size: file.size, content },
+    ])
+  }
+
+  const addExtractedDocumentFile = async (file: File) => {
+    if (!window.electronAPI?.extractDocumentText) {
+      throw new Error('当前环境暂不支持自动提取该文档，请使用桌面版应用')
+    }
+
+    const data = await readFileAsArrayBuffer(file)
+    const result = await window.electronAPI.extractDocumentText({
+      fileName: file.name,
+      mimeType: file.type,
+      data,
+    })
+
+    if (!result.ok || !result.content) {
+      throw new Error(result.error ?? '自动提取文本失败')
+    }
+
+    const content = result.content
+
+    setFiles((prev) => [
+      ...prev,
+      { id: uuidv4(), name: file.name, size: file.size, content },
+    ])
+  }
+
+  const processSingleFile = async (file: File) => {
+    if (file.type.startsWith('image/')) {
+      await addImageFile(file)
+      return
+    }
+
+    setAttachmentError(null)
+    setPendingFiles((prev) => [...prev, file.name])
+
+    try {
+      if (isExtractableDocument(file)) {
+        await addExtractedDocumentFile(file)
+      } else {
+        await addTextFile(file)
+      }
+    } catch (error) {
+      setAttachmentError(error instanceof Error ? error.message : `处理文件失败：${file.name}`)
+    } finally {
+      setPendingFiles((prev) => {
+        const index = prev.indexOf(file.name)
+        if (index < 0) return prev
+        return prev.filter((_, currentIndex) => currentIndex !== index)
+      })
+    }
+  }
+
+  const processFiles = async (fileList: FileList | File[]) => {
+    for (const file of Array.from(fileList)) {
+      await processSingleFile(file)
+    }
   }
 
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files
     if (!fileList) return
     Array.from(fileList).forEach((file) => {
-      if (file.type.startsWith('image/')) addImageFile(file)
+      if (file.type.startsWith('image/')) void addImageFile(file)
     })
     e.target.value = ''
   }
@@ -99,7 +185,7 @@ export default function InputArea({ onSend, onStop, isStreaming, disabled }: Inp
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files
     if (!fileList) return
-    processFiles(fileList)
+    void processFiles(fileList)
     e.target.value = ''
   }
 
@@ -118,7 +204,7 @@ export default function InputArea({ onSend, onStop, isStreaming, disabled }: Inp
         e.preventDefault()
         const file = item.getAsFile()
         if (!file) continue
-        addImageFile(file)
+        void addImageFile(file)
       }
     }
   }
@@ -155,7 +241,7 @@ export default function InputArea({ onSend, onStop, isStreaming, disabled }: Inp
 
     const droppedFiles = e.dataTransfer.files
     if (droppedFiles.length > 0) {
-      processFiles(droppedFiles)
+      void processFiles(droppedFiles)
     }
   }
 
@@ -243,6 +329,22 @@ export default function InputArea({ onSend, onStop, isStreaming, disabled }: Inp
             </div>
           )}
 
+          {isProcessingFiles && (
+            <div className="flex items-center gap-2 px-2 pb-2 text-xs text-surface-400">
+              <Loader2 size={14} className="animate-spin text-primary-400" />
+              <span className="truncate">
+                正在提取文档文本：
+                {pendingFiles.length === 1 ? pendingFiles[0] : `${pendingFiles.length} 个文件`}
+              </span>
+            </div>
+          )}
+
+          {attachmentError && (
+            <div className="px-2 pb-2 text-xs text-red-400 break-all">
+              {attachmentError}
+            </div>
+          )}
+
           {/* Input row */}
           <div className="flex items-end gap-2">
             {/* Search toggle button */}
@@ -326,11 +428,11 @@ export default function InputArea({ onSend, onStop, isStreaming, disabled }: Inp
             ) : (
               <button
                 onClick={handleSend}
-                disabled={(!input.trim() && images.length === 0 && files.length === 0) || disabled}
+                disabled={(!input.trim() && images.length === 0 && files.length === 0) || disabled || isProcessingFiles}
                 className="shrink-0 p-2 bg-primary-600 hover:bg-primary-500 text-white
                            rounded-lg transition-all duration-200 active:scale-95
                            disabled:opacity-30 disabled:cursor-not-allowed"
-                title="发送"
+                title={isProcessingFiles ? '请等待文档提取完成' : '发送'}
               >
                 <Send size={18} />
               </button>

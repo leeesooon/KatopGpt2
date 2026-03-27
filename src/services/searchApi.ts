@@ -73,7 +73,6 @@ export async function webSearch(
   // Check cache first
   const cached = searchCache.get(query)
   if (cached) {
-    console.log('%c[Search Cache] %c✓ %s', 'color:#10b981;font-weight:bold', 'color:#64748b', query)
     return cached.slice(0, maxResults)
   }
 
@@ -86,11 +85,6 @@ export async function webSearch(
   const lrParam = lang === 'zh-CN' ? 'lang_zh-CN' : 
                   lang === 'zh-TW' ? 'lang_zh-TW' : 
                   `lang_${lang}`
-
-  console.group('%c[Search Request] %c→ %s', 'color:#5c7cfa;font-weight:bold', 'color:#64748b', query)
-  console.log('%cLanguage: %c%s', 'color:#8494b2', 'color:#e8ecf4', lrParam)
-  console.log('%cMax results: %c%d', 'color:#8494b2', 'color:#e8ecf4', maxResults)
-  console.groupEnd()
 
   try {
     const response = await fetch('https://google.serper.dev/search', {
@@ -114,9 +108,6 @@ export async function webSearch(
       } catch {
         // ignore parse error
       }
-      console.group('%c[Search Error] %c← %s', 'color:#ef4444;font-weight:bold', 'color:#64748b', response.status)
-      console.log(errorMsg)
-      console.groupEnd()
       throw new SearchApiError(errorMsg, response.status)
     }
 
@@ -132,12 +123,6 @@ export async function webSearch(
       snippet: item.snippet,
       date: item.date,
     }))
-
-    console.group('%c[Search Response] %c← %d results', 'color:#10b981;font-weight:bold', 'color:#64748b', results.length)
-    console.log('%cQuery: %c%s', 'color:#8494b2', 'color:#e8ecf4', query)
-    console.log('%cResults:', 'color:#8494b2')
-    console.dir(results.slice(0, 3), { depth: null })
-    console.groupEnd()
 
     // Cache results
     searchCache.set(query, results)
@@ -179,7 +164,6 @@ async function tavilySearch(
   // Check cache first
   const cached = searchCache.get(query)
   if (cached) {
-    console.log('%c[Search Cache] %c✓ %s', 'color:#10b981;font-weight:bold', 'color:#64748b', query)
     return cached.slice(0, maxResults)
   }
 
@@ -187,10 +171,6 @@ async function tavilySearch(
   if (!apiKey || apiKey.trim() === '') {
     throw new SearchApiError('Tavily API key 未配置')
   }
-
-  console.group('%c[Search Request] %c→ %s (Tavily)', 'color:#5c7cfa;font-weight:bold', 'color:#64748b', query)
-  console.log('%cMax results: %c%d', 'color:#8494b2', 'color:#e8ecf4', maxResults)
-  console.groupEnd()
 
   try {
     const response = await fetch('https://api.tavily.com/search', {
@@ -216,9 +196,6 @@ async function tavilySearch(
       } catch {
         // ignore parse error
       }
-      console.group('%c[Search Error] %c← %s', 'color:#ef4444;font-weight:bold', 'color:#64748b', response.status)
-      console.log(errorMsg)
-      console.groupEnd()
       throw new SearchApiError(errorMsg, response.status)
     }
 
@@ -234,12 +211,6 @@ async function tavilySearch(
       snippet: item.content.slice(0, 500), // Truncate long content
       date: item.published_date,
     }))
-
-    console.group('%c[Search Response] %c← %d results (Tavily)', 'color:#10b981;font-weight:bold', 'color:#64748b', results.length)
-    console.log('%cQuery: %c%s', 'color:#8494b2', 'color:#e8ecf4', query)
-    console.log('%cResults:', 'color:#8494b2')
-    console.dir(results.slice(0, 3), { depth: null })
-    console.groupEnd()
 
     // Cache results
     searchCache.set(query, results)

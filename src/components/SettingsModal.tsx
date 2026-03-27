@@ -16,6 +16,11 @@ interface ProviderFormData {
   modelInput: string
 }
 
+interface ConnectionTestState {
+  status: 'success' | 'error'
+  message?: string
+}
+
 function emptyForm(): ProviderFormData {
   return { name: '', baseUrl: '', apiKey: '', models: [], modelInput: '' }
 }
@@ -34,7 +39,7 @@ export default function SettingsModal() {
   const [editForms, setEditForms] = useState<Record<string, ProviderFormData>>({})
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({})
   const [testing, setTesting] = useState<Record<string, boolean>>({})
-  const [testResults, setTestResults] = useState<Record<string, 'success' | 'error'>>({})
+  const [testResults, setTestResults] = useState<Record<string, ConnectionTestState>>({})
 
   // New provider form
   const [isAdding, setIsAdding] = useState(false)
@@ -139,10 +144,21 @@ export default function SettingsModal() {
     setTesting((p) => ({ ...p, [key]: true }))
     setTestResults((p) => { const n = { ...p }; delete n[key]; return n })
     try {
-      const ok = await testApiConnection({ baseUrl, apiKey })
-      setTestResults((p) => ({ ...p, [key]: ok ? 'success' : 'error' }))
-    } catch {
-      setTestResults((p) => ({ ...p, [key]: 'error' }))
+      const result = await testApiConnection({ baseUrl, apiKey })
+      setTestResults((p) => ({
+        ...p,
+        [key]: result.ok
+          ? { status: 'success' }
+          : { status: 'error', message: result.error ?? '连接失败' },
+      }))
+    } catch (error) {
+      setTestResults((p) => ({
+        ...p,
+        [key]: {
+          status: 'error',
+          message: error instanceof Error ? error.message : '连接失败',
+        },
+      }))
     } finally {
       setTesting((p) => ({ ...p, [key]: false }))
     }
@@ -226,7 +242,10 @@ export default function SettingsModal() {
     form: ProviderFormData,
     setFn: (f: ProviderFormData) => void,
     keyId: string,
-  ) => (
+  ) => {
+    const testResult = testResults[keyId]
+
+    return (
     <div className="space-y-3">
       <div className="space-y-1.5">
         <label className="text-xs font-medium text-surface-400">名称</label>
@@ -277,25 +296,33 @@ export default function SettingsModal() {
       <div className="flex items-center gap-3 pt-1">
         <button
           onClick={() => handleTest(form.baseUrl, form.apiKey, keyId)}
-          disabled={testing[keyId] || !form.apiKey}
+          disabled={testing[keyId] || !form.apiKey.trim() || !form.baseUrl.trim()}
           className="btn-ghost border border-surface-600/50 flex items-center gap-2 text-xs disabled:opacity-40"
         >
           {testing[keyId] ? <Loader2 size={13} className="animate-spin" /> : null}
           测试连接
         </button>
-        {testResults[keyId] === 'success' && (
+        {testResult?.status === 'success' && (
           <span className="flex items-center gap-1 text-xs text-emerald-400">
             <CheckCircle size={13} /> 连接成功
           </span>
         )}
-        {testResults[keyId] === 'error' && (
-          <span className="flex items-center gap-1 text-xs text-red-400">
-            <AlertCircle size={13} /> 连接失败
-          </span>
+        {testResult?.status === 'error' && (
+          <div className="flex flex-col gap-1 text-xs text-red-400 min-w-0">
+            <span className="flex items-center gap-1">
+              <AlertCircle size={13} /> 连接失败
+            </span>
+            {testResult.message && (
+              <span className="text-[11px] text-red-300/80 break-all">
+                {testResult.message}
+              </span>
+            )}
+          </div>
         )}
       </div>
     </div>
-  )
+    )
+  }
 
   return (
     <div

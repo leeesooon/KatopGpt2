@@ -23,6 +23,27 @@ interface ParsedStreamLine {
   isDone: boolean
 }
 
+interface ApiConnectionTestResult {
+  ok: boolean
+  status?: number
+  error?: string
+}
+
+interface ElectronChatStreamRequest {
+  baseUrl: string
+  apiKey: string
+  model: string
+  messages: Array<{ role: string; content: string | ContentPart[] }>
+  temperature: number
+  maxTokens: number
+}
+
+type ElectronChatStreamEvent =
+  | { streamId: string; type: 'chunk'; chunk: string }
+  | { streamId: string; type: 'done' }
+  | { streamId: string; type: 'error'; message: string; status?: number }
+  | { streamId: string; type: 'aborted' }
+
 type ContentPart =
   | { type: 'text'; text: string }
   | { type: 'image_url'; image_url: { url: string } }
@@ -76,6 +97,108 @@ function buildApiMessages(
   return result
 }
 
+async function parseApiErrorResponse(response: Response) {
+  let message = `API 请求失败 (${response.status})`
+  let errorBody: unknown = null
+
+  try {
+    const contentType = response.headers.get('content-type') ?? ''
+    if (contentType.includes('application/json')) {
+      errorBody = await response.json()
+      message = (errorBody as Record<string, Record<string, string>>)?.error?.message ?? message
+    } else {
+      const text = (await response.text()).trim()
+      if (text) {
+        message = text.length > 300 ? `${text.slice(0, 300).trimEnd()}...` : text
+      }
+    }
+  } catch {
+    // ignore parse error
+  }
+
+  return { message, errorBody }
+}
+
+function createAbortError() {
+  return new DOMException('The operation was aborted.', 'AbortError')
+}
+
+async function* streamChatViaElectron(
+  request: ElectronChatStreamRequest,
+  signal?: AbortSignal
+): AsyncGenerator<string, void, unknown> {
+  const electronAPI = window.electronAPI
+  if (!electronAPI) {
+    throw new Error('Electron API 不可用')
+  }
+
+  const streamId = crypto.randomUUID()
+  const pendingEvents: ElectronChatStreamEvent[] = []
+  let resolveNextEvent: ((event: ElectronChatStreamEvent) => void) | null = null
+
+  const pushEvent = (event: ElectronChatStreamEvent) => {
+    if (resolveNextEvent) {
+      const resolve = resolveNextEvent
+      resolveNextEvent = null
+      resolve(event)
+      return
+    }
+
+    pendingEvents.push(event)
+  }
+
+  const nextEvent = () => {
+    if (pendingEvents.length > 0) {
+      return Promise.resolve(pendingEvents.shift()!)
+    }
+
+    return new Promise<ElectronChatStreamEvent>((resolve) => {
+      resolveNextEvent = resolve
+    })
+  }
+
+  const subscriptionId = electronAPI.subscribeChatStreamEvents((event) => {
+    if (event.streamId !== streamId) return
+    pushEvent(event)
+  })
+
+  const handleAbort = () => {
+    void electronAPI.cancelChatStream(streamId)
+  }
+
+  signal?.addEventListener('abort', handleAbort)
+
+  try {
+    if (signal?.aborted) {
+      throw createAbortError()
+    }
+
+    await electronAPI.startChatStream({ streamId, ...request })
+
+    while (true) {
+      const event = await nextEvent()
+
+      if (event.type === 'chunk') {
+        yield event.chunk
+        continue
+      }
+
+      if (event.type === 'done') {
+        return
+      }
+
+      if (event.type === 'aborted') {
+        throw createAbortError()
+      }
+
+      throw new ChatApiError(event.message, event.status)
+    }
+  } finally {
+    electronAPI.unsubscribeChatStreamEvents(subscriptionId)
+    signal?.removeEventListener('abort', handleAbort)
+  }
+}
+
 export async function* streamChat(
   config: ApiConfig,
   messages: Message[],
@@ -100,12 +223,20 @@ export async function* streamChat(
     requestBody.max_tokens = maxTokens
   }
 
-  // Log request
-  console.group('%c[API Request] %c→ %s', 'color:#5c7cfa;font-weight:bold', 'color:#64748b', `${config.model} @ ${baseUrl}`)
-  console.log('%cURL:   %c%s', 'color:#8494b2', 'color:#e8ecf4', url)
-  console.log('%cBody:', 'color:#8494b2')
-  console.dir(requestBody, { depth: null })
-  console.groupEnd()
+  if (window.electronAPI?.startChatStream) {
+    yield* streamChatViaElectron(
+      {
+        baseUrl,
+        apiKey: config.apiKey,
+        model: config.model,
+        messages: apiMessages,
+        temperature,
+        maxTokens,
+      },
+      signal
+    )
+    return
+  }
 
   const response = await fetch(url, {
     method: 'POST',
@@ -118,18 +249,7 @@ export async function* streamChat(
   })
 
   if (!response.ok) {
-    let errorMsg = `API 请求失败 (${response.status})`
-    let errorBody: unknown = null
-    try {
-      errorBody = await response.json()
-      errorMsg = (errorBody as Record<string, Record<string, string>>)?.error?.message ?? errorMsg
-    } catch {
-      // ignore parse error
-    }
-    console.group('%c[API Error] %c← %s', 'color:#ef4444;font-weight:bold', 'color:#64748b', response.status)
-    if (errorBody) console.dir(errorBody, { depth: null })
-    else console.log(errorMsg)
-    console.groupEnd()
+    const { message: errorMsg } = await parseApiErrorResponse(response)
     throw new ChatApiError(errorMsg, response.status)
   }
 
@@ -140,8 +260,6 @@ export async function* streamChat(
 
   const decoder = new TextDecoder()
   let buffer = ''
-  let fullResponse = ''
-  const chunks: ChatCompletionChunk[] = []
 
   const parseStreamLine = (line: string): ParsedStreamLine | null => {
     const trimmed = line.trim()
@@ -178,22 +296,11 @@ export async function* streamChat(
         if (!parsed) continue
 
         if (parsed.isDone) {
-          // Log complete response
-          console.group('%c[API Response] %c← %s %c(%d chunks)', 'color:#10b981;font-weight:bold', 'color:#64748b', config.model, 'color:#8494b2', chunks.length)
-          console.log('%cFull content:', 'color:#8494b2')
-          console.log(fullResponse)
-          console.log('%cLast chunk:', 'color:#8494b2')
-          if (chunks.length > 0) console.dir(chunks[chunks.length - 1], { depth: null })
-          console.groupEnd()
           streamEnded = true
           break
         }
 
-        if (parsed.chunk) {
-          chunks.push(parsed.chunk)
-        }
         if (parsed.content) {
-          fullResponse += parsed.content
           yield parsed.content
         }
       }
@@ -205,30 +312,12 @@ export async function* streamChat(
     const trailingLine = buffer.trim()
     if (trailingLine) {
       const parsed = parseStreamLine(trailingLine)
-      if (parsed?.chunk) {
-        chunks.push(parsed.chunk)
-      }
       if (parsed?.content) {
-        fullResponse += parsed.content
         yield parsed.content
       }
       if (parsed?.isDone) {
-        console.group('%c[API Response] %c← %s %c(%d chunks)', 'color:#10b981;font-weight:bold', 'color:#64748b', config.model, 'color:#8494b2', chunks.length)
-        console.log('%cFull content:', 'color:#8494b2')
-        console.log(fullResponse)
-        console.log('%cLast chunk:', 'color:#8494b2')
-        if (chunks.length > 0) console.dir(chunks[chunks.length - 1], { depth: null })
-        console.groupEnd()
         return
       }
-    }
-
-    // Stream ended without [DONE] — still log
-    if (fullResponse) {
-      console.group('%c[API Response] %c← %s %c(%d chunks, no [DONE])', 'color:#f59e0b;font-weight:bold', 'color:#64748b', config.model, 'color:#8494b2', chunks.length)
-      console.log('%cFull content:', 'color:#8494b2')
-      console.log(fullResponse)
-      console.groupEnd()
     }
   } finally {
     reader.releaseLock()
@@ -236,16 +325,36 @@ export async function* streamChat(
 }
 
 /** Non-streaming test call to verify API config */
-export async function testApiConnection(config: { baseUrl: string; apiKey: string }): Promise<boolean> {
+export async function testApiConnection(config: { baseUrl: string; apiKey: string }): Promise<ApiConnectionTestResult> {
+  if (window.electronAPI?.testApiConnection) {
+    return window.electronAPI.testApiConnection(config)
+  }
+
   const baseUrl = config.baseUrl.replace(/\/+$/, '')
   const url = `${baseUrl}/models`
 
-  const response = await fetch(url, {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${config.apiKey}`,
-    },
-  })
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+      },
+    })
 
-  return response.ok
+    if (response.ok) {
+      return { ok: true, status: response.status }
+    }
+
+    const { message } = await parseApiErrorResponse(response)
+    return {
+      ok: false,
+      status: response.status,
+      error: message,
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : '连接失败',
+    }
+  }
 }
