@@ -4,10 +4,10 @@
   "description": "A beautiful LLM chat desktop application",
   "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build && electron-builder",
-    "preview": "vite preview",
-    "electron:dev": "vite build && electron ."
+    "dev": "vite --config vite.config.ts",
+    "build": "tsc && vite build --config vite.config.ts && electron-builder",
+    "preview": "vite preview --config vite.config.ts",
+    "electron:dev": "vite build --config vite.config.ts && electron ."
   },
   "dependencies": {
     "jszip": "^3.10.1",

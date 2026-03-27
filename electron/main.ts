@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, shell, type WebContents } from 'electron'
 import path from 'path'
-import { extractDocumentText, type ExtractDocumentTextRequest } from './documentExtraction'
+import { extractDocumentText, type ExtractDocumentTextRequest } from './documentExtraction.ts'
 
 let mainWindow: BrowserWindow | null = null
 const activeApiStreams = new Map<string, AbortController>()
