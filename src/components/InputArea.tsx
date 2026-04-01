@@ -1,9 +1,10 @@
-import { useState, useRef, useEffect } from 'react'
-import { Send, Square, ImagePlus, Paperclip, X, FileText, Search, Loader2 } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Send, Square, ImagePlus, Paperclip, X, FileText, Search, Loader2, BookOpenText, SquareArrowOutUpRight } from 'lucide-react'
 import { v4 as uuidv4 } from 'uuid'
 import ModelSelector from './ModelSelector'
 import { useChatStore } from '../store/chatStore'
-import type { ImageAttachment, FileAttachment } from '../types'
+import { useWorkspaceStore } from '../store/workspaceStore'
+import type { DocumentAgentMode, ImageAttachment, FileAttachment } from '../types'
 
 const EXTRACTABLE_DOCUMENT_EXTENSIONS = ['.pptx', '.pdf', '.docx']
 
@@ -30,11 +31,30 @@ interface InputAreaProps {
   onStop: () => void
   isStreaming: boolean
   disabled: boolean
+  contextStats: {
+    messageCount: number
+    messageChars: number
+  }
 }
 
-export default function InputArea({ onSend, onStop, isStreaming, disabled }: InputAreaProps) {
+export default function InputArea({ onSend, onStop, isStreaming, disabled, contextStats }: InputAreaProps) {
   const { searchEnabled, setSearchEnabled, settings } = useChatStore()
+  const {
+    currentWorkspace,
+    activeDocumentPath,
+    documents,
+    pendingAction,
+    composerDraft,
+    consumeComposerDraft,
+    clearPendingAction,
+    closeActiveDocument,
+    cancelDocumentWorkflow,
+    exitWorkspaceAssistant,
+    isPanelVisible,
+    setPanelVisible,
+  } = useWorkspaceStore()
   const [input, setInput] = useState('')
+  const [workspaceWindowOpen, setWorkspaceWindowOpen] = useState(false)
   const [images, setImages] = useState<ImageAttachment[]>([])
   const [files, setFiles] = useState<FileAttachment[]>([])
   const [pendingFiles, setPendingFiles] = useState<string[]>([])
@@ -51,6 +71,32 @@ export default function InputArea({ onSend, onStop, isStreaming, disabled }: Inp
       textareaRef.current.focus()
     }
   }, [isStreaming])
+
+  useEffect(() => {
+    if (!composerDraft) return
+    setInput((currentInput) => currentInput.trim() ? currentInput : composerDraft.text)
+    requestAnimationFrame(() => {
+      adjustHeight()
+      textareaRef.current?.focus()
+      textareaRef.current?.setSelectionRange(composerDraft.text.length, composerDraft.text.length)
+    })
+    consumeComposerDraft()
+  }, [composerDraft, consumeComposerDraft])
+
+  useEffect(() => {
+    if (!window.electronAPI?.getWorkspaceWindowState) return
+
+    let listenerId: number | null = null
+
+    void window.electronAPI.getWorkspaceWindowState().then((state) => setWorkspaceWindowOpen(state.open))
+    listenerId = window.electronAPI.subscribeWorkspaceWindowState((state) => setWorkspaceWindowOpen(state.open))
+
+    return () => {
+      if (listenerId !== null) {
+        window.electronAPI?.unsubscribeWorkspaceWindowState(listenerId)
+      }
+    }
+  }, [])
 
   const adjustHeight = () => {
     const el = textareaRef.current
@@ -246,6 +292,52 @@ export default function InputArea({ onSend, onStop, isStreaming, disabled }: Inp
   }
 
   const hasAttachments = images.length > 0 || files.length > 0
+  const activeDocument = activeDocumentPath ? documents[activeDocumentPath] : null
+
+  const actionLabelMap: Record<DocumentAgentMode, string> = {
+    chat: '普通对话',
+    create: '生成初稿',
+    rewrite: '改写文档',
+    expand: '扩写文档',
+    summarize: '总结文档',
+  }
+
+  const placeholder = pendingAction === 'chat'
+    ? '输入消息... (Enter 发送, Shift+Enter 换行, 可拖拽文件)'
+    : `当前模式：${actionLabelMap[pendingAction]}，继续补充你的要求后发送`
+
+  const contextIndicator = useMemo(() => {
+    const draftChars = input.trim().length
+    const systemChars = settings.systemPrompt.trim().length
+    const totalChars = systemChars + contextStats.messageChars + draftChars
+    const estimatedTokens = Math.max(1, Math.round(totalChars / 2))
+
+    return {
+      messageCount: contextStats.messageCount,
+      totalChars,
+      estimatedTokens,
+    }
+  }, [contextStats.messageChars, contextStats.messageCount, input, settings.systemPrompt])
+
+  const isDocumentAssistantOpen = isPanelVisible || workspaceWindowOpen
+
+  const handleToggleDocumentAssistant = async () => {
+    if (isDocumentAssistantOpen) {
+      if (workspaceWindowOpen && window.electronAPI?.closeWorkspaceWindow) {
+        await window.electronAPI.closeWorkspaceWindow()
+      }
+      setPanelVisible(false)
+      return
+    }
+
+    if (window.electronAPI?.openWorkspaceWindow) {
+      await window.electronAPI.openWorkspaceWindow()
+      setPanelVisible(false)
+      return
+    }
+
+    setPanelVisible(true)
+  }
 
   return (
     <div
@@ -267,11 +359,70 @@ export default function InputArea({ onSend, onStop, isStreaming, disabled }: Inp
       )}
 
       <div className="max-w-3xl mx-auto">
+        <div className="mb-2 flex items-center gap-2">
+          <button
+            onClick={() => void handleToggleDocumentAssistant()}
+            className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs transition ${
+              isDocumentAssistantOpen
+                ? 'border-amber-300/20 bg-amber-300/10 text-amber-100'
+                : 'border-white/10 bg-white/5 text-surface-300 hover:bg-white/10 hover:text-white'
+            }`}
+            title={isDocumentAssistantOpen ? '关闭文档助手' : '打开文档助手'}
+          >
+            {isDocumentAssistantOpen ? <BookOpenText size={14} /> : <SquareArrowOutUpRight size={14} />}
+            <span>{isDocumentAssistantOpen ? '文档助手已开启' : '打开文档助手'}</span>
+          </button>
+          {currentWorkspace && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-surface-400">
+              绑定到当前对话
+            </span>
+          )}
+        </div>
         <div className="glass-panel rounded-xl p-2">
           {/* Model selector row */}
-          <div className="flex items-center px-1 pb-1.5 mb-1 border-b border-surface-700/30">
+          <div className="mb-1 flex items-center justify-between gap-2 border-b border-surface-700/30 px-1 pb-1.5">
             <ModelSelector />
+            {currentWorkspace && (
+              <div className="flex items-center gap-2 text-[11px] text-surface-400">
+                <span className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-2 py-1">
+                  <span>工作区: {currentWorkspace.name}</span>
+                  <button
+                    onClick={() => {
+                      exitWorkspaceAssistant()
+                    }}
+                    className="rounded-full p-0.5 text-surface-500 transition hover:bg-white/10 hover:text-surface-100"
+                    title="退出编写助手"
+                  >
+                    <X size={11} />
+                  </button>
+                </span>
+                {activeDocument && (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-amber-300/15 bg-amber-300/10 px-2 py-1 text-amber-100/90">
+                    <span>当前文档: {activeDocument.title}</span>
+                    <button
+                      onClick={closeActiveDocument}
+                      className="rounded-full p-0.5 text-amber-100/60 transition hover:bg-amber-100/10 hover:text-amber-50"
+                      title="关闭当前文档"
+                    >
+                      <X size={11} />
+                    </button>
+                  </span>
+                )}
+              </div>
+            )}
           </div>
+
+          {pendingAction !== 'chat' && (
+            <div className="mb-2 flex items-center justify-between gap-3 rounded-xl border border-amber-300/15 bg-amber-300/10 px-3 py-2 text-xs text-amber-100">
+              <div>
+                <span className="font-medium">文档模式:</span> {actionLabelMap[pendingAction]}
+                {activeDocument && <span className="text-amber-100/70"> · {activeDocument.title}</span>}
+              </div>
+              <button onClick={clearPendingAction} className="rounded-full border border-amber-200/15 px-2 py-1 text-[11px] text-amber-100/80 transition hover:bg-amber-200/10">
+                取消
+              </button>
+            </div>
+          )}
 
           {/* Image previews */}
           {images.length > 0 && (
@@ -410,7 +561,7 @@ export default function InputArea({ onSend, onStop, isStreaming, disabled }: Inp
               }}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
-              placeholder="输入消息... (Enter 发送, Shift+Enter 换行, 可拖拽文件)"
+              placeholder={placeholder}
               rows={1}
               disabled={disabled}
               className="flex-1 bg-transparent text-surface-100 placeholder-surface-500 text-sm
@@ -439,9 +590,12 @@ export default function InputArea({ onSend, onStop, isStreaming, disabled }: Inp
             )}
           </div>
         </div>
-        <p className="text-[11px] text-surface-500 text-center mt-2">
-          AI 可能会犯错，请核实重要信息
-        </p>
+        <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-surface-500">
+          <div className="truncate">
+            当前上下文约 {contextIndicator.estimatedTokens} tokens / {contextIndicator.totalChars} chars / {contextIndicator.messageCount} 条消息
+          </div>
+          <p className="text-right">AI 可能会犯错，请核实重要信息</p>
+        </div>
       </div>
     </div>
   )

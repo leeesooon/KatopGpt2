@@ -1,8 +1,10 @@
-import { app, BrowserWindow, ipcMain, shell, type WebContents } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, shell, type WebContents } from 'electron'
+import { promises as fs } from 'fs'
 import path from 'path'
 import { extractDocumentText, type ExtractDocumentTextRequest } from './documentExtraction.ts'
 
 let mainWindow: BrowserWindow | null = null
+let workspaceWindow: BrowserWindow | null = null
 const activeApiStreams = new Map<string, AbortController>()
 
 const APP_AMPERSAND_RE = /&(?:amp(?:;|%3[Bb])|#38;)/gi
@@ -10,6 +12,7 @@ const ALLOWED_EXTERNAL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:'])
 const READABLE_WEB_CONTENT_TYPES = ['text/html', 'application/xhtml+xml', 'text/plain']
 const MAX_WEB_PAGE_CHARS = 500000
 const WEB_FETCH_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) KatopGPT/1.0 Chrome/124.0.0.0 Safari/537.36'
+const ALLOWED_WORKSPACE_EXTENSIONS = new Set(['.md', '.markdown', '.txt'])
 
 type ApiContentPart =
   | { type: 'text'; text: string }
@@ -23,6 +26,12 @@ interface ApiChatMessage {
 interface ApiConnectionConfig {
   baseUrl: string
   apiKey: string
+}
+
+interface WorkspaceHandle {
+  id: string
+  name: string
+  rootPath: string
 }
 
 interface ApiConnectionTestResult {
@@ -96,6 +105,117 @@ function openExternalUrl(rawUrl: string) {
 
 function normalizeApiBaseUrl(baseUrl: string) {
   return baseUrl.trim().replace(/\/+$/, '')
+}
+
+function normalizeRelativeWorkspacePath(relativePath: string) {
+  const normalized = relativePath.replace(/\\/g, '/').replace(/^\/+/, '').trim()
+  if (!normalized) {
+    throw new Error('文档路径不能为空')
+  }
+
+  return normalized
+}
+
+function ensureWorkspacePath(rootPath: string, relativePath: string) {
+  const normalizedRelativePath = normalizeRelativeWorkspacePath(relativePath)
+  const absoluteRoot = path.resolve(rootPath)
+  const absoluteTarget = path.resolve(absoluteRoot, normalizedRelativePath)
+  const relative = path.relative(absoluteRoot, absoluteTarget)
+
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error('禁止访问工作区外部路径')
+  }
+
+  const extension = path.extname(absoluteTarget).toLowerCase()
+  if (!ALLOWED_WORKSPACE_EXTENSIONS.has(extension)) {
+    throw new Error('当前仅支持 Markdown 或纯文本文件')
+  }
+
+  return {
+    normalizedRelativePath,
+    absoluteTarget,
+  }
+}
+
+async function collectWorkspaceDocuments(rootPath: string, currentRelativePath = ''): Promise<string[]> {
+  const currentAbsolutePath = path.join(rootPath, currentRelativePath)
+  const entries = await fs.readdir(currentAbsolutePath, { withFileTypes: true })
+  const documents: string[] = []
+
+  for (const entry of entries) {
+    const entryRelativePath = currentRelativePath
+      ? `${currentRelativePath}/${entry.name}`
+      : entry.name
+
+    if (entry.isDirectory()) {
+      documents.push(...await collectWorkspaceDocuments(rootPath, entryRelativePath))
+      continue
+    }
+
+    const extension = path.extname(entry.name).toLowerCase()
+    if (ALLOWED_WORKSPACE_EXTENSIONS.has(extension)) {
+      documents.push(entryRelativePath.replace(/\\/g, '/'))
+    }
+  }
+
+  return documents.sort((left, right) => left.localeCompare(right, 'zh-CN'))
+}
+
+async function selectWorkspace(): Promise<WorkspaceHandle | null> {
+  if (!mainWindow) return null
+
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'],
+    title: '选择 Markdown 工作区',
+  })
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return null
+  }
+
+  const rootPath = result.filePaths[0]
+  return {
+    id: rootPath,
+    name: path.basename(rootPath),
+    rootPath,
+  }
+}
+
+async function listWorkspaceDocuments(rootPath: string) {
+  return collectWorkspaceDocuments(rootPath)
+}
+
+async function readWorkspaceDocument(rootPath: string, relativePath: string) {
+  const { absoluteTarget } = ensureWorkspacePath(rootPath, relativePath)
+  return fs.readFile(absoluteTarget, 'utf8')
+}
+
+async function writeWorkspaceDocument(rootPath: string, relativePath: string, content: string) {
+  const { absoluteTarget } = ensureWorkspacePath(rootPath, relativePath)
+  await fs.mkdir(path.dirname(absoluteTarget), { recursive: true })
+  await fs.writeFile(absoluteTarget, content, 'utf8')
+  return true
+}
+
+async function createWorkspaceDocument(rootPath: string, relativePath: string, content: string) {
+  const { absoluteTarget } = ensureWorkspacePath(rootPath, relativePath)
+  await fs.mkdir(path.dirname(absoluteTarget), { recursive: true })
+  await fs.writeFile(absoluteTarget, content, { encoding: 'utf8', flag: 'wx' })
+  return true
+}
+
+async function renameWorkspaceDocument(rootPath: string, oldRelativePath: string, newRelativePath: string) {
+  const { absoluteTarget: oldAbsoluteTarget } = ensureWorkspacePath(rootPath, oldRelativePath)
+  const { absoluteTarget: newAbsoluteTarget } = ensureWorkspacePath(rootPath, newRelativePath)
+  await fs.mkdir(path.dirname(newAbsoluteTarget), { recursive: true })
+  await fs.rename(oldAbsoluteTarget, newAbsoluteTarget)
+  return true
+}
+
+async function deleteWorkspaceDocument(rootPath: string, relativePath: string) {
+  const { absoluteTarget } = ensureWorkspacePath(rootPath, relativePath)
+  await fs.unlink(absoluteTarget)
+  return true
 }
 
 function extractApiErrorMessage(errorBody: unknown, fallback: string) {
@@ -505,6 +625,95 @@ function isAppUrl(url: string) {
   return false
 }
 
+function getRendererUrl(searchParams?: URLSearchParams) {
+  if (process.env.VITE_DEV_SERVER_URL) {
+    const url = new URL(process.env.VITE_DEV_SERVER_URL)
+    if (searchParams) {
+      url.search = searchParams.toString()
+    }
+    return url.toString()
+  }
+
+  return null
+}
+
+function attachCommonWindowHandlers(window: BrowserWindow) {
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    if (openExternalUrl(url)) {
+      return { action: 'deny' }
+    }
+
+    if (url.startsWith('data:') || url === 'about:blank') {
+      return { action: 'allow' }
+    }
+
+    return { action: 'deny' }
+  })
+
+  window.webContents.on('will-navigate', (event, url) => {
+    if (isAppUrl(url)) return
+
+    event.preventDefault()
+    openExternalUrl(url)
+  })
+}
+
+function broadcastWorkspaceWindowState() {
+  const payload = { open: Boolean(workspaceWindow && !workspaceWindow.isDestroyed()) }
+  BrowserWindow.getAllWindows().forEach((window) => {
+    window.webContents.send('workspace:windowState', payload)
+  })
+}
+
+function createWorkspaceWindow() {
+  if (workspaceWindow && !workspaceWindow.isDestroyed()) {
+    workspaceWindow.focus()
+    broadcastWorkspaceWindowState()
+    return workspaceWindow
+  }
+
+  workspaceWindow = new BrowserWindow({
+    width: 980,
+    height: 780,
+    minWidth: 720,
+    minHeight: 520,
+    title: 'KatopGPT Workspace',
+    backgroundColor: '#0f172a',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+    show: false,
+  })
+
+  attachCommonWindowHandlers(workspaceWindow)
+
+  workspaceWindow.once('ready-to-show', () => {
+    workspaceWindow?.show()
+    broadcastWorkspaceWindowState()
+  })
+
+  workspaceWindow.on('closed', () => {
+    workspaceWindow = null
+    broadcastWorkspaceWindowState()
+  })
+
+  const searchParams = new URLSearchParams({ workspaceWindow: '1' })
+  const devUrl = getRendererUrl(searchParams)
+
+  if (devUrl) {
+    void workspaceWindow.loadURL(devUrl)
+  } else {
+    void workspaceWindow.loadFile(path.join(__dirname, '../dist-renderer/index.html'), {
+      search: searchParams.toString(),
+    })
+  }
+
+  return workspaceWindow
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -522,27 +731,11 @@ function createWindow() {
     show: false,
   })
 
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (openExternalUrl(url)) {
-      return { action: 'deny' }
-    }
-
-    if (url.startsWith('data:') || url === 'about:blank') {
-      return { action: 'allow' }
-    }
-
-    return { action: 'deny' }
-  })
-
-  mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (isAppUrl(url)) return
-
-    event.preventDefault()
-    openExternalUrl(url)
-  })
+  attachCommonWindowHandlers(mainWindow)
 
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show()
+    broadcastWorkspaceWindowState()
   })
 
   if (process.env.VITE_DEV_SERVER_URL) {
@@ -580,7 +773,26 @@ ipcMain.on('window:maximize', () => {
 ipcMain.on('window:close', () => mainWindow?.close())
 ipcMain.handle('window:isMaximized', () => mainWindow?.isMaximized())
 ipcMain.handle('shell:openExternal', (_event, url: string) => openExternalUrl(url))
+ipcMain.handle('workspaceWindow:open', () => {
+  createWorkspaceWindow()
+  return true
+})
+ipcMain.handle('workspaceWindow:close', () => {
+  if (!workspaceWindow || workspaceWindow.isDestroyed()) return false
+  workspaceWindow.close()
+  return true
+})
+ipcMain.handle('workspaceWindow:getState', () => ({
+  open: Boolean(workspaceWindow && !workspaceWindow.isDestroyed()),
+}))
 ipcMain.handle('web:fetchPage', (_event, url: string) => fetchWebPage(url))
+ipcMain.handle('workspace:select', () => selectWorkspace())
+ipcMain.handle('workspace:listDocuments', (_event, rootPath: string) => listWorkspaceDocuments(rootPath))
+ipcMain.handle('workspace:readDocument', (_event, rootPath: string, relativePath: string) => readWorkspaceDocument(rootPath, relativePath))
+ipcMain.handle('workspace:writeDocument', (_event, rootPath: string, relativePath: string, content: string) => writeWorkspaceDocument(rootPath, relativePath, content))
+ipcMain.handle('workspace:createDocument', (_event, rootPath: string, relativePath: string, content: string) => createWorkspaceDocument(rootPath, relativePath, content))
+ipcMain.handle('workspace:renameDocument', (_event, rootPath: string, oldRelativePath: string, newRelativePath: string) => renameWorkspaceDocument(rootPath, oldRelativePath, newRelativePath))
+ipcMain.handle('workspace:deleteDocument', (_event, rootPath: string, relativePath: string) => deleteWorkspaceDocument(rootPath, relativePath))
 ipcMain.handle('files:extractDocumentText', (_event, request: ExtractDocumentTextRequest) => extractDocumentText(request))
 ipcMain.handle('api:testConnection', (_event, config: ApiConnectionConfig) => testApiConnection(config))
 ipcMain.handle('api:startChatStream', (event, request: StartChatStreamRequest) => {

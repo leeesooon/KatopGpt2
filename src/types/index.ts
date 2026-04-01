@@ -21,6 +21,31 @@ export interface FileAttachment {
   content: string
 }
 
+export type DocumentAgentMode = 'chat' | 'create' | 'rewrite' | 'expand' | 'summarize'
+
+export type DocumentEditorMode = 'write' | 'preview' | 'split'
+
+export interface DocumentSelection {
+  start: number
+  end: number
+  text: string
+}
+
+export interface WorkspaceHandle {
+  id: string
+  name: string
+  rootPath: string
+}
+
+export interface WorkspaceDocument {
+  relativePath: string
+  title: string
+  content: string
+  isDirty: boolean
+  lastLoadedAt: number
+  lastSavedAt?: number
+}
+
 /** Web search result from search API */
 export interface SearchResult {
   title: string

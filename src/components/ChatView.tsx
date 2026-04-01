@@ -1,14 +1,21 @@
 import { useRef, useEffect, useCallback, useState } from 'react'
 import { MessageSquarePlus, Sparkles, ArrowDown } from 'lucide-react'
 import { useChatStore } from '../store/chatStore'
+import { useWorkspaceStore } from '../store/workspaceStore'
 import { streamChat, ChatApiError } from '../services/chatApi'
 import { recognizeImages } from '../services/ocr'
 import { resolveApiConfig } from '../types'
+import { prepareDocumentAgentRequest } from '../services/agentOrchestrator'
 import { webSearch, formatSearchContext, shouldTriggerSearch, SearchApiError } from '../services/searchApi'
 import { readWebPagesFromText, formatWebPageContext } from '../services/webpage'
 import type { ImageAttachment, FileAttachment, SearchResult } from '../types'
 import MessageBubble from './MessageBubble'
 import InputArea from './InputArea'
+
+interface ContextStats {
+  messageCount: number
+  messageChars: number
+}
 
 export default function ChatView() {
   const {
@@ -32,23 +39,43 @@ export default function ChatView() {
   const scrollPositionsRef = useRef<Map<string, number>>(new Map())
   const prevConvIdRef = useRef<string | null>(null)
   const isRestoringScrollRef = useRef(false)
+  const shouldAutoStickRef = useRef(true)
   const [showScrollBottom, setShowScrollBottom] = useState(false)
+  const [streamingDrafts, setStreamingDrafts] = useState<Record<string, string>>({})
 
   const activeConversation = conversations.find((c) => c.id === activeConversationId)
   const messages = activeConversation?.messages ?? []
+  const renderedMessages = messages.map((message) => {
+    const draftContent = streamingDrafts[message.id]
+    return draftContent == null ? message : { ...message, content: draftContent }
+  })
   const isCurrentStreaming = activeConversationId ? streamingConvIds.includes(activeConversationId) : false
+  const workspaceTaskState = useWorkspaceStore((state) => state.taskState)
+  const workspaceDocument = useWorkspaceStore((state) => {
+    if (!state.activeDocumentPath) return null
+    return state.documents[state.activeDocumentPath] ?? null
+  })
 
-  const scrollToBottom = useCallback(() => {
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
     if (scrollRafRef.current || isRestoringScrollRef.current) return
     scrollRafRef.current = requestAnimationFrame(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+      const container = scrollContainerRef.current
+      if (container) {
+        if (behavior === 'smooth') {
+          container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
+        } else {
+          container.scrollTop = container.scrollHeight
+        }
+      }
       scrollRafRef.current = 0
     })
   }, [])
 
   useEffect(() => {
-    scrollToBottom()
-  }, [messages.length, messages[messages.length - 1]?.content, scrollToBottom])
+    if (shouldAutoStickRef.current) {
+      scrollToBottom('auto')
+    }
+  }, [renderedMessages.length, renderedMessages[renderedMessages.length - 1]?.content, scrollToBottom])
 
   useEffect(() => {
     return () => {
@@ -62,7 +89,9 @@ export default function ChatView() {
     if (!container) return
     const handleScroll = () => {
       const { scrollTop, scrollHeight, clientHeight } = container
-      setShowScrollBottom(scrollHeight - scrollTop - clientHeight > 120)
+      const awayFromBottom = scrollHeight - scrollTop - clientHeight > 120
+      shouldAutoStickRef.current = !awayFromBottom
+      setShowScrollBottom(awayFromBottom)
       if (activeConversationId) {
         scrollPositionsRef.current.set(activeConversationId, scrollTop)
       }
@@ -97,12 +126,36 @@ export default function ChatView() {
   }, [activeConversationId])
 
   const handleScrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    shouldAutoStickRef.current = true
+    scrollToBottom('smooth')
   }
+
+  const contextStats: ContextStats = messages.reduce(
+    (stats, message) => {
+      const imageChars = message.images?.length ? message.images.length * 120 : 0
+      const fileChars = message.files?.reduce((total, file) => total + file.content.length, 0) ?? 0
+      return {
+        messageCount: stats.messageCount + 1,
+        messageChars: stats.messageChars + message.content.length + imageChars + fileChars,
+      }
+    },
+    { messageCount: 0, messageChars: 0 }
+  )
 
   const handleSend = async (content: string, images: ImageAttachment[], files: FileAttachment[]) => {
     const apiConfig = resolveApiConfig(settings.providers, settings.activeModel)
     if (!apiConfig) return
+
+    const workspaceState = useWorkspaceStore.getState()
+    const documentRequest = prepareDocumentAgentRequest({
+      mode: workspaceState.pendingAction,
+      userPrompt: content,
+      document: workspaceState.activeDocumentPath
+        ? workspaceState.documents[workspaceState.activeDocumentPath] ?? null
+        : null,
+      selection: workspaceState.selection,
+    })
+    const isDocumentAction = workspaceState.pendingAction !== 'chat'
 
     let convId = activeConversationId
     if (!convId) {
@@ -131,7 +184,7 @@ export default function ChatView() {
     }
 
     // Add user message
-    addMessage(convId, {
+    const userMessage = addMessage(convId, {
       role: 'user',
       content: messageContent,
       images: messageImages,
@@ -186,9 +239,14 @@ export default function ChatView() {
     }
 
     const assistantMsg = addMessage(convId, { role: 'assistant', content: '' })
+    setStreamingDrafts((state) => ({ ...state, [assistantMsg.id]: '' }))
     let fullContent = ''
     let rafPending = false
     let pendingFrame = 0
+
+    if (isDocumentAction) {
+      workspaceState.startTask(documentRequest.title)
+    }
 
     const cancelPendingMessageUpdate = () => {
       if (pendingFrame) {
@@ -206,9 +264,16 @@ export default function ChatView() {
 
       // Sliding window: only send the last N messages as context
       const windowSize = settings.contextWindowSize
-      const currentMessages = allMessages.length > windowSize
+      const currentMessages = (allMessages.length > windowSize
         ? allMessages.slice(-windowSize)
         : allMessages
+      ).map((message) => {
+        if (message.id !== userMessage.id) return message
+        return {
+          ...message,
+          content: documentRequest.prompt,
+        }
+      })
       const referenceContext = referenceSections.join('\n\n')
 
       const stream = streamChat(
@@ -227,7 +292,7 @@ export default function ChatView() {
         if (!rafPending) {
           rafPending = true
           pendingFrame = requestAnimationFrame(() => {
-            updateMessage(convId!, assistantMsg.id, fullContent)
+            setStreamingDrafts((state) => ({ ...state, [assistantMsg.id]: fullContent }))
             pendingFrame = 0
             rafPending = false
           })
@@ -241,6 +306,15 @@ export default function ChatView() {
         assistantMsg.id,
         fullContent.trim() ? fullContent : '⚠️ 模型未返回可显示内容，请重试一次'
       )
+      setStreamingDrafts((state) => {
+        const next = { ...state }
+        delete next[assistantMsg.id]
+        return next
+      })
+
+      if (isDocumentAction && fullContent.trim()) {
+        useWorkspaceStore.getState().completeTask(fullContent, workspaceState.pendingAction, assistantMsg.id, documentRequest.title)
+      }
 
       // Attach reference sources if any
       if (referenceSources.length > 0) {
@@ -250,16 +324,26 @@ export default function ChatView() {
       cancelPendingMessageUpdate()
 
       if (err instanceof Error && err.name === 'AbortError') {
-        if (!fullContent) {
-          updateMessage(convId!, assistantMsg.id, '*(已停止生成)*')
-        }
+        updateMessage(
+          convId!,
+          assistantMsg.id,
+          fullContent.trim() ? fullContent : '*(已停止生成)*'
+        )
       } else {
         const errorMsg =
           err instanceof ChatApiError
             ? `⚠️ API 错误: ${err.message}`
             : `⚠️ 请求失败: ${err instanceof Error ? err.message : '未知错误'}`
         updateMessage(convId!, assistantMsg.id, errorMsg)
+        if (isDocumentAction) {
+          useWorkspaceStore.getState().failTask(errorMsg, documentRequest.title)
+        }
       }
+      setStreamingDrafts((state) => {
+        const next = { ...state }
+        delete next[assistantMsg.id]
+        return next
+      })
     } finally {
       cancelPendingMessageUpdate()
       setConversationStreaming(convId!, false)
@@ -304,16 +388,33 @@ export default function ChatView() {
 
   return (
     <div className="flex-1 flex flex-col min-w-0">
+      {(workspaceDocument || workspaceTaskState.status !== 'idle') && (
+        <div className="border-b border-white/8 bg-white/[0.03] px-5 py-3 backdrop-blur-sm">
+          <div className="mx-auto flex max-w-4xl items-center justify-between gap-4 text-xs text-surface-400">
+            <div className="flex items-center gap-2">
+              <span className="rounded-full border border-amber-300/15 bg-amber-300/10 px-2.5 py-1 text-amber-100/90">
+                {workspaceDocument ? `当前文档: ${workspaceDocument.title}` : '文档工作区未选中文档'}
+              </span>
+              {workspaceDocument?.isDirty && (
+                <span className="rounded-full border border-white/10 px-2.5 py-1 text-surface-300">存在未保存修改</span>
+              )}
+            </div>
+            <div className="rounded-full border border-white/10 px-2.5 py-1 text-surface-300">
+              {workspaceTaskState.title}
+            </div>
+          </div>
+        </div>
+      )}
       {/* Messages */}
       <div className="flex-1 overflow-y-auto relative" ref={scrollContainerRef}>
         <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
-          {messages.length === 0 && (
+          {renderedMessages.length === 0 && (
             <div className="text-center py-20 animate-fade-in">
               <Sparkles size={24} className="text-primary-400 mx-auto mb-3" />
               <p className="text-surface-400 text-sm">发送消息开始对话</p>
             </div>
           )}
-          {messages.map((msg) => (
+          {renderedMessages.map((msg) => (
             <MessageBubble key={msg.id} message={msg} />
           ))}
 
@@ -343,6 +444,7 @@ export default function ChatView() {
         onStop={handleStop}
         isStreaming={isCurrentStreaming}
         disabled={!apiConfigured}
+        contextStats={contextStats}
       />
     </div>
   )

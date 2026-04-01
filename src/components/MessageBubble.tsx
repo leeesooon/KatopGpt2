@@ -16,6 +16,8 @@ import { Copy, Check, User, Bot, FileText } from 'lucide-react'
 import type { Message } from '../types'
 import SourcesPanel from './SourcesPanel'
 import { normalizeExternalUrl, openExternalUrl } from '../utils/externalLinks'
+import MermaidBlock from './MermaidBlock'
+import { useWorkspaceStore } from '../store/workspaceStore'
 
 interface MessageBubbleProps {
   message: Message
@@ -68,6 +70,12 @@ function CodeBlock({ language, value }: { language: string; value: string }) {
       </SyntaxHighlighter>
     </div>
   )
+}
+
+function inferMarkdownFileName(content: string) {
+  const headingMatch = content.match(/^#{1,3}\s+(.+)$/m)
+  const baseName = headingMatch?.[1] ?? content.split(/\r?\n/).find((line) => line.trim()) ?? 'conversation-doc'
+  return baseName.slice(0, 40).trim() || 'conversation-doc'
 }
 
 
@@ -147,7 +155,9 @@ const MessageBubble = memo(function MessageBubble({ message }: MessageBubbleProp
   const isUser = message.role === 'user'
   const [showCopyButton, setShowCopyButton] = useState(false)
   const [copiedMessage, setCopiedMessage] = useState(false)
+  const [isConverting, setIsConverting] = useState(false)
   const contentRef = useRef<HTMLDivElement>(null)
+  const createDocumentFromContent = useWorkspaceStore((state) => state.createDocumentFromContent)
 
   const renderedContent = useMemo(
     () => unwrapOuterMarkdownFence(message.content),
@@ -170,6 +180,9 @@ const MessageBubble = memo(function MessageBubble({ message }: MessageBubbleProp
         const value = String(children).replace(/\n$/, '')
 
         if (match) {
+          if (match[1] === 'mermaid') {
+            return <MermaidBlock chart={value} variant="dark" />
+          }
           return <CodeBlock language={match[1]} value={value} />
         }
 
@@ -214,6 +227,19 @@ const MessageBubble = memo(function MessageBubble({ message }: MessageBubbleProp
     setTimeout(() => setCopiedMessage(false), 2000)
   }
 
+  const handleConvertToMarkdown = async () => {
+    if (!message.content.trim()) return
+    setIsConverting(true)
+    try {
+      const created = await createDocumentFromContent(renderedContent, inferMarkdownFileName(renderedContent))
+      if (!created) {
+        setCopiedMessage(false)
+      }
+    } finally {
+      setIsConverting(false)
+    }
+  }
+
   return (
     <div className={`flex gap-3 animate-fade-in ${isUser ? 'flex-row-reverse' : ''}`}>
       {/* Avatar */}
@@ -247,13 +273,23 @@ const MessageBubble = memo(function MessageBubble({ message }: MessageBubbleProp
       >
         {/* 复制按钮 - 仅在 AI 消息上显示 */}
         {!isUser && showCopyButton && message.content && (
-          <button
-            onClick={handleCopyMessage}
-            className="absolute top-2 right-2 p-1.5 rounded-lg bg-surface-700/80 hover:bg-surface-600/80 text-surface-300 hover:text-surface-100 transition-all opacity-90 hover:opacity-100 backdrop-blur-sm z-10"
-            title={copiedMessage ? '已复制' : '复制消息'}
-          >
-            {copiedMessage ? <Check size={14} /> : <Copy size={14} />}
-          </button>
+          <div className="absolute top-2 right-2 flex items-center gap-1.5 z-10">
+            <button
+              onClick={() => void handleConvertToMarkdown()}
+              disabled={isConverting}
+              className="px-2.5 py-1.5 rounded-lg bg-surface-700/80 hover:bg-surface-600/80 text-surface-300 hover:text-surface-100 transition-all opacity-90 hover:opacity-100 backdrop-blur-sm text-xs disabled:opacity-50"
+              title="转为 Markdown 文档"
+            >
+              {isConverting ? '转换中...' : '转为文档'}
+            </button>
+            <button
+              onClick={handleCopyMessage}
+              className="p-1.5 rounded-lg bg-surface-700/80 hover:bg-surface-600/80 text-surface-300 hover:text-surface-100 transition-all opacity-90 hover:opacity-100 backdrop-blur-sm"
+              title={copiedMessage ? '已复制' : '复制消息'}
+            >
+              {copiedMessage ? <Check size={14} /> : <Copy size={14} />}
+            </button>
+          </div>
         )}
         {isUser ? (
           <>
