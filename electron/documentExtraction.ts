@@ -15,6 +15,7 @@ export interface ExtractDocumentTextResult {
   error?: string
   fileType?: 'pptx' | 'pdf' | 'docx' | 'xlsx' | 'csv'
   spreadsheetSessionId?: string
+  spreadsheetSchema?: SpreadsheetWorkbookSchema
 }
 
 export interface ExecuteSpreadsheetInstructionRequest {
@@ -29,11 +30,14 @@ export interface SpreadsheetPlanFilter {
 }
 
 export interface SpreadsheetExecutionPlan {
-  intent: 'count' | 'sum' | 'avg' | 'chart' | 'export' | 'script'
+  intent: 'count' | 'sum' | 'avg' | 'chart' | 'export' | 'script' | 'filter_rows'
   sourceSheetName?: string
   groupByColumns?: string[]
   valueColumn?: string
   filters?: SpreadsheetPlanFilter[]
+  selectColumns?: string[]
+  sortBy?: string
+  sortDirection?: 'asc' | 'desc'
   chartType?: SpreadsheetChartType
   targetSheetName?: string
   useLastCreatedSheet?: boolean
@@ -64,6 +68,22 @@ export interface ExportSpreadsheetSessionResult {
   chartPaths?: string[]
 }
 
+export interface SpreadsheetColumnSchema {
+  name: string
+  inferredType: 'string' | 'number' | 'boolean' | 'date' | 'mixed' | 'empty'
+}
+
+export interface SpreadsheetSheetSchema {
+  name: string
+  rowCount: number
+  columnCount: number
+  columns: SpreadsheetColumnSchema[]
+}
+
+export interface SpreadsheetWorkbookSchema {
+  sheets: SpreadsheetSheetSchema[]
+}
+
 type SupportedDocumentType = 'pptx' | 'pdf' | 'docx' | 'xlsx' | 'csv'
 type SpreadsheetDocumentType = 'xlsx' | 'csv'
 
@@ -81,6 +101,7 @@ interface SpreadsheetSession {
   fileName: string
   fileType: SpreadsheetDocumentType
   workbook: XLSX.WorkBook
+  schema: SpreadsheetWorkbookSchema
   generatedCharts: GeneratedChart[]
   lastCreatedSheetName?: string
   createdAt: number
@@ -389,6 +410,46 @@ function parseWorkbook(buffer: Buffer, fileType: SpreadsheetDocumentType) {
   })
 }
 
+function inferColumnType(values: string[]): SpreadsheetColumnSchema['inferredType'] {
+  const samples = values.filter(Boolean).slice(0, 20)
+  if (samples.length === 0) return 'empty'
+
+  const kinds = new Set(samples.map((value) => {
+    if (/^(true|false)$/i.test(value)) return 'boolean'
+    if (!Number.isNaN(Date.parse(value)) && /[-/:年月日T]/.test(value)) return 'date'
+    if (parseNumericValue(value) !== null) return 'number'
+    return 'string'
+  }))
+
+  return kinds.size === 1 ? Array.from(kinds)[0] as SpreadsheetColumnSchema['inferredType'] : 'mixed'
+}
+
+function buildWorkbookSchema(workbook: XLSX.WorkBook): SpreadsheetWorkbookSchema {
+  return {
+    sheets: workbook.SheetNames.map((sheetName) => {
+      const rows = getSheetRows(workbook.Sheets[sheetName]).map((row) => row.map((cell) => formatSpreadsheetCell(cell)))
+      const nonEmptyRows = rows.filter((row) => row.some(Boolean))
+      const headerRow = nonEmptyRows[0] ?? []
+      const columnCount = nonEmptyRows.reduce((count, row) => Math.max(count, row.length), 0)
+      const columns = Array.from({ length: columnCount }, (_, index) => {
+        const name = headerRow[index] || `列${index + 1}`
+        const values = nonEmptyRows.slice(1).map((row) => row[index] ?? '')
+        return {
+          name,
+          inferredType: inferColumnType(values),
+        }
+      })
+
+      return {
+        name: sheetName,
+        rowCount: Math.max(0, nonEmptyRows.length - 1),
+        columnCount,
+        columns,
+      }
+    }),
+  }
+}
+
 function buildWorkbookSummary(workbook: XLSX.WorkBook, fileTypeLabel: string) {
   const sheetSummaries = workbook.SheetNames.map((sheetName) => {
     const sheet = workbook.Sheets[sheetName]
@@ -402,21 +463,24 @@ function buildWorkbookSummary(workbook: XLSX.WorkBook, fileTypeLabel: string) {
 
 async function extractSpreadsheetSummary(buffer: Buffer, fileName: string, fileType: SpreadsheetDocumentType) {
   const workbook = parseWorkbook(buffer, fileType)
-  const sessionId = registerSpreadsheetSession(fileName, fileType, workbook)
+  const schema = buildWorkbookSchema(workbook)
+  const sessionId = registerSpreadsheetSession(fileName, fileType, workbook, schema)
 
   return {
     content: buildWorkbookSummary(workbook, fileType.toUpperCase()),
     spreadsheetSessionId: sessionId,
+    spreadsheetSchema: schema,
   }
 }
 
-function registerSpreadsheetSession(fileName: string, fileType: SpreadsheetDocumentType, workbook: XLSX.WorkBook) {
+function registerSpreadsheetSession(fileName: string, fileType: SpreadsheetDocumentType, workbook: XLSX.WorkBook, schema: SpreadsheetWorkbookSchema) {
   const sessionId = randomUUID()
   spreadsheetSessions.set(sessionId, {
     sessionId,
     fileName,
     fileType,
     workbook,
+    schema,
     generatedCharts: [],
     lastCreatedSheetName: undefined,
     createdAt: Date.now(),
@@ -572,7 +636,7 @@ function resolveSheetHeaders(workbook: XLSX.WorkBook, sheetName?: string) {
 }
 
 function resolvePlanToOperation(workbook: XLSX.WorkBook, plan: SpreadsheetExecutionPlan): SpreadsheetOperation | null {
-  if (plan.intent === 'chart' || plan.intent === 'export' || plan.intent === 'script') {
+  if (plan.intent === 'chart' || plan.intent === 'export' || plan.intent === 'script' || plan.intent === 'filter_rows') {
     return null
   }
 
@@ -985,6 +1049,115 @@ function createChartForSheet(session: SpreadsheetSession, sheetName: string, cha
   }
 }
 
+function matchesFilter(record: Record<string, unknown>, filter: SpreadsheetFilter) {
+  const actualValue = formatSpreadsheetCell(record[filter.column]).trim()
+  const expectedValue = filter.value.trim()
+
+  if (filter.operator === 'contains') {
+    return actualValue.includes(expectedValue)
+  }
+
+  if (filter.operator === 'eq') {
+    return actualValue === expectedValue
+  }
+
+  const actualNumericValue = parseNumericValue(actualValue)
+  const expectedNumericValue = parseNumericValue(expectedValue)
+  if (actualNumericValue === null || expectedNumericValue === null) {
+    return false
+  }
+
+  if (filter.operator === 'gt') return actualNumericValue > expectedNumericValue
+  if (filter.operator === 'gte') return actualNumericValue >= expectedNumericValue
+  if (filter.operator === 'lt') return actualNumericValue < expectedNumericValue
+  if (filter.operator === 'lte') return actualNumericValue <= expectedNumericValue
+  return false
+}
+
+function resolveSelectedColumns(headers: string[], requested?: string[]) {
+  if (!requested || requested.length === 0) {
+    return headers
+  }
+
+  const resolved = requested
+    .map((column) => resolveHeader(column, headers))
+    .filter((column): column is string => Boolean(column))
+
+  return resolved.length > 0 ? resolved : headers
+}
+
+function executeFilterRowsPlan(session: SpreadsheetSession, plan: SpreadsheetExecutionPlan) {
+  const { resolvedSheetName, headers } = resolveSheetHeaders(session.workbook, plan.sourceSheetName)
+  const sheet = session.workbook.Sheets[resolvedSheetName]
+  const records = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
+    raw: false,
+    defval: '',
+  })
+
+  const filters = (plan.filters ?? [])
+    .map((filter) => {
+      const resolvedColumn = resolveHeader(filter.column, headers)
+      if (!resolvedColumn) return null
+      return { column: resolvedColumn, operator: filter.operator, value: filter.value }
+    })
+    .filter((filter): filter is SpreadsheetFilter => Boolean(filter))
+
+  let filteredRecords = filters.length > 0
+    ? records.filter((record) => filters.every((filter) => matchesFilter(record, filter)))
+    : records
+
+  if (plan.sortBy) {
+    const sortColumn = resolveHeader(plan.sortBy, headers)
+    if (sortColumn) {
+      const direction = plan.sortDirection === 'asc' ? 1 : -1
+      filteredRecords = [...filteredRecords].sort((left, right) => {
+        const leftValue = formatSpreadsheetCell(left[sortColumn])
+        const rightValue = formatSpreadsheetCell(right[sortColumn])
+        const leftNumeric = parseNumericValue(leftValue)
+        const rightNumeric = parseNumericValue(rightValue)
+        if (leftNumeric !== null && rightNumeric !== null && leftNumeric !== rightNumeric) {
+          return (leftNumeric - rightNumeric) * direction
+        }
+        return leftValue.localeCompare(rightValue, 'zh-CN') * direction
+      })
+    }
+  }
+
+  if (plan.topN && plan.topN > 0) {
+    filteredRecords = filteredRecords.slice(0, Math.floor(plan.topN))
+  }
+
+  const selectedColumns = resolveSelectedColumns(headers, plan.selectColumns)
+  const rows: string[][] = [selectedColumns]
+  filteredRecords.forEach((record) => {
+    rows.push(selectedColumns.map((column) => formatSpreadsheetCell(record[column])))
+  })
+
+  const targetSheetName = plan.targetSheetName || `筛选结果_${Date.now()}`
+  const written = writeRowsToSheet(session, targetSheetName, rows)
+  const filterLabel = filters.length > 0
+    ? filters.map((filter) => `${filter.column}${filter.operator}${filter.value}`).join('，')
+    : '无'
+
+  return {
+    createdSheetName: written.sheetName,
+    message: [
+      `已筛选并生成工作表《${written.sheetName}》。`,
+      '',
+      `- 来源工作表：${resolvedSheetName}`,
+      `- 筛选条件：${filterLabel}`,
+      `- 保留列：${selectedColumns.join(' | ')}`,
+      `- 输出行数：${filteredRecords.length}`,
+      ...(plan.sortBy ? [`- 排序：${plan.sortBy} ${plan.sortDirection === 'asc' ? '升序' : '降序'}`] : []),
+      ...(plan.topN ? [`- 结果范围：前 ${Math.floor(plan.topN)} 行`] : []),
+      '',
+      '**结果预览**',
+      '',
+      written.preview,
+    ].join('\n'),
+  }
+}
+
 function executeSpreadsheetOperation(session: SpreadsheetSession, operation: SpreadsheetOperation) {
   const sheet = session.workbook.Sheets[operation.sourceSheetName]
   const records = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
@@ -992,30 +1165,7 @@ function executeSpreadsheetOperation(session: SpreadsheetSession, operation: Spr
     defval: '',
   })
   const filteredRecords = operation.filters.length > 0
-    ? records.filter((record) => operation.filters.every((filter) => {
-      const actualValue = formatSpreadsheetCell(record[filter.column]).trim()
-      const expectedValue = filter.value.trim()
-
-      if (filter.operator === 'contains') {
-        return actualValue.includes(expectedValue)
-      }
-
-      if (filter.operator === 'eq') {
-        return actualValue === expectedValue
-      }
-
-      const actualNumericValue = parseNumericValue(actualValue)
-      const expectedNumericValue = parseNumericValue(expectedValue)
-      if (actualNumericValue === null || expectedNumericValue === null) {
-        return false
-      }
-
-      if (filter.operator === 'gt') return actualNumericValue > expectedNumericValue
-      if (filter.operator === 'gte') return actualNumericValue >= expectedNumericValue
-      if (filter.operator === 'lt') return actualNumericValue < expectedNumericValue
-      if (filter.operator === 'lte') return actualNumericValue <= expectedNumericValue
-      return false
-    }))
+    ? records.filter((record) => operation.filters.every((filter) => matchesFilter(record, filter)))
     : records
 
   if (filteredRecords.length === 0) {
@@ -1324,6 +1474,16 @@ export async function executeSpreadsheetPlan(
         performed: true,
         createdSheetName: scriptResult.createdSheetName,
         message: scriptResult.message,
+      }
+    }
+
+    if (request.plan.intent === 'filter_rows') {
+      const result = executeFilterRowsPlan(session, request.plan)
+      return {
+        ok: true,
+        performed: true,
+        createdSheetName: result.createdSheetName,
+        message: result.message,
       }
     }
 

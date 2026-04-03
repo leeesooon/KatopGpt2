@@ -232,6 +232,7 @@ export default function InputArea({
         content,
         fileType: result.fileType,
         spreadsheetSessionId: result.spreadsheetSessionId,
+        spreadsheetSchema: result.spreadsheetSchema,
       },
     ])
   }

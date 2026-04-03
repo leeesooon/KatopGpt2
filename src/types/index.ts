@@ -12,6 +12,22 @@ export interface ImageAttachment {
   name: string
 }
 
+export interface SpreadsheetColumnSchema {
+  name: string
+  inferredType: 'string' | 'number' | 'boolean' | 'date' | 'mixed' | 'empty'
+}
+
+export interface SpreadsheetSheetSchema {
+  name: string
+  rowCount: number
+  columnCount: number
+  columns: SpreadsheetColumnSchema[]
+}
+
+export interface SpreadsheetWorkbookSchema {
+  sheets: SpreadsheetSheetSchema[]
+}
+
 /** File attached to a message */
 export interface FileAttachment {
   id: string
@@ -21,6 +37,7 @@ export interface FileAttachment {
   content: string
   fileType?: 'text' | 'pdf' | 'pptx' | 'docx' | 'xlsx' | 'csv'
   spreadsheetSessionId?: string
+  spreadsheetSchema?: SpreadsheetWorkbookSchema
 }
 
 export type DocumentAgentMode = 'chat' | 'create' | 'rewrite' | 'expand' | 'summarize'

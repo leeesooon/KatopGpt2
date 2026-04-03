@@ -67,6 +67,15 @@ function summarizeSpreadsheetPlan(plan: SpreadsheetExecutionPlan) {
   if (plan.intent === 'chart') {
     return `基于${plan.useLastCreatedSheet ? '最近结果表' : '指定工作表'}生成${plan.chartType ?? 'bar'}图表`
   }
+  if (plan.intent === 'filter_rows') {
+    const filterText = plan.filters?.length
+      ? plan.filters.map((filter) => `${filter.column}${filter.operator}${filter.value}`).join('，')
+      : '无筛选条件'
+    const selectText = plan.selectColumns?.length ? `，保留列 ${plan.selectColumns.join(' + ')}` : ''
+    const sortText = plan.sortBy ? `，按 ${plan.sortBy} ${plan.sortDirection === 'asc' ? '升序' : '降序'}` : ''
+    const topNText = plan.topN ? `，取前 ${plan.topN} 行` : ''
+    return `筛选明细：${filterText}${selectText}${sortText}${topNText}`
+  }
   if (plan.intent === 'script') {
     return plan.script?.summary ? `执行脚本计划：${plan.script.summary}` : '执行脚本计划'
   }
@@ -315,6 +324,7 @@ export default function ChatView() {
           apiConfig,
           content,
           latestSpreadsheet.content,
+          latestSpreadsheet.spreadsheetSchema,
           recentContext
         )
 

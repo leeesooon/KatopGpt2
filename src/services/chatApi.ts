@@ -29,6 +29,22 @@ interface ApiConnectionTestResult {
   error?: string
 }
 
+export interface SpreadsheetColumnSchema {
+  name: string
+  inferredType: 'string' | 'number' | 'boolean' | 'date' | 'mixed' | 'empty'
+}
+
+export interface SpreadsheetSheetSchema {
+  name: string
+  rowCount: number
+  columnCount: number
+  columns: SpreadsheetColumnSchema[]
+}
+
+export interface SpreadsheetWorkbookSchema {
+  sheets: SpreadsheetSheetSchema[]
+}
+
 export interface SpreadsheetPlannerFilter {
   column: string
   operator: 'eq' | 'contains' | 'gt' | 'gte' | 'lt' | 'lte'
@@ -36,11 +52,14 @@ export interface SpreadsheetPlannerFilter {
 }
 
 export interface SpreadsheetExecutionPlan {
-  intent: 'count' | 'sum' | 'avg' | 'chart' | 'export' | 'script'
+  intent: 'count' | 'sum' | 'avg' | 'chart' | 'export' | 'script' | 'filter_rows'
   sourceSheetName?: string
   groupByColumns?: string[]
   valueColumn?: string
   filters?: SpreadsheetPlannerFilter[]
+  selectColumns?: string[]
+  sortBy?: string
+  sortDirection?: 'asc' | 'desc'
   chartType?: 'bar' | 'line' | 'pie' | 'horizontalBar'
   targetSheetName?: string
   useLastCreatedSheet?: boolean
@@ -385,6 +404,7 @@ export async function parseSpreadsheetIntent(
   config: ApiConfig,
   userInstruction: string,
   spreadsheetSummary: string,
+  spreadsheetSchema?: SpreadsheetWorkbookSchema,
   recentContext?: string,
   signal?: AbortSignal
 ): Promise<SpreadsheetIntentParseResult | null> {
@@ -392,7 +412,7 @@ export async function parseSpreadsheetIntent(
     '你是一个表格指令解析器。',
     '你的任务是把用户针对 CSV/XLSX 的自然语言请求，转成可执行的规范化中文指令。',
     '优先利用已有上下文理解用户口语、省略、指代和续问。',
-    '如果用户是在要求筛选、分组、统计、求和、平均、计数、生成新工作表、生成图表、导出、或复杂表格改造，则 shouldExecute=true。',
+    '如果用户是在要求筛选、分组、统计、求和、平均、计数、生成新工作表、生成图表、导出、排序、选列、或复杂表格改造，则 shouldExecute=true。',
     '如果只是普通问答、解释结果、闲聊，则 shouldExecute=false。',
     '如果用户用了口语化表达，比如“有多少”“做个图”“顺便画个图”“按刚才那个结果画一下”“导出来”，也要尽量改写成可执行指令。',
     '如果用户提到“人数”“多少人”“每个部门多少人”，通常应理解为 count 计数。',
@@ -400,16 +420,18 @@ export async function parseSpreadsheetIntent(
     '如果用户没有重复说明分组字段，但最近上下文里已有刚生成的统计结果，可以沿用最近那次统计意图。',
     '只输出 JSON，不要输出额外解释。',
     'JSON 结构必须是：{"shouldExecute":boolean,"normalizedInstruction":string,"plan":{...}}',
-    'plan 字段用于结构化执行，字段可包括：intent, sourceSheetName, groupByColumns, valueColumn, filters, chartType, targetSheetName, useLastCreatedSheet, topN, script。',
+    'plan 字段用于结构化执行，字段可包括：intent, sourceSheetName, groupByColumns, valueColumn, filters, selectColumns, sortBy, sortDirection, chartType, targetSheetName, useLastCreatedSheet, topN, script。',
     'filters 里的 operator 只能是 eq / contains / gt / gte / lt / lte。',
-    'intent 只能是 count / sum / avg / chart / export / script。',
+    'intent 只能是 count / sum / avg / chart / export / script / filter_rows。',
     '只有当内建操作明显不够时，才使用 script。script.language 只能是 javascript。',
     'script 只能基于受限 API 操作当前表格，会话外文件、网络、系统命令都不可用。',
     'normalizedInstruction 要尽量改写成这种格式：',
     '- 单据状态=单据未完成，按责任人计数，生成柱状图',
     '- 金额>1000，按部门+责任人汇总金额，生成新工作表',
     '- 备注包含返工，按责任人统计金额平均值',
+    '- 客户原因包含客户待下，筛选完整明细，输出新工作表',
     'plan 示例：{"intent":"count","groupByColumns":["责任人"],"filters":[{"column":"单据状态","operator":"eq","value":"单据未完成"}],"chartType":"bar"}',
+    '筛选明细示例：{"intent":"filter_rows","filters":[{"column":"客户原因","operator":"contains","value":"客户待下"}],"targetSheetName":"客户待下明细"}',
     '如果用户说“把部门人数最多的前三个列出来并生成图表”，优先输出原生计划：{"intent":"count","groupByColumns":["部门"],"topN":3,"chartType":"bar"}，不要用 script。',
     '如果用户说“把刚才那个结果画成饼图”，可以输出：{"intent":"chart","chartType":"pie","useLastCreatedSheet":true}',
     '如果用户说“导出这个结果”，可以输出：{"intent":"export","useLastCreatedSheet":true}',
@@ -420,6 +442,7 @@ export async function parseSpreadsheetIntent(
     `用户原始请求：${userInstruction}`,
     '',
     ...(recentContext ? ['最近上下文：', recentContext, ''] : []),
+    ...(spreadsheetSchema ? ['表格结构(JSON)：', JSON.stringify(spreadsheetSchema), ''] : []),
     '表格摘要：',
     spreadsheetSummary,
   ].join('\n')

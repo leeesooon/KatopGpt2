@@ -30,12 +30,29 @@ interface ExtractDocumentTextRequest {
   data: ArrayBuffer
 }
 
+interface SpreadsheetColumnSchema {
+  name: string
+  inferredType: 'string' | 'number' | 'boolean' | 'date' | 'mixed' | 'empty'
+}
+
+interface SpreadsheetSheetSchema {
+  name: string
+  rowCount: number
+  columnCount: number
+  columns: SpreadsheetColumnSchema[]
+}
+
+interface SpreadsheetWorkbookSchema {
+  sheets: SpreadsheetSheetSchema[]
+}
+
 interface ExtractDocumentTextResult {
   ok: boolean
   content?: string
   error?: string
   fileType?: 'pptx' | 'pdf' | 'docx' | 'xlsx' | 'csv'
   spreadsheetSessionId?: string
+  spreadsheetSchema?: SpreadsheetWorkbookSchema
 }
 
 interface ExecuteSpreadsheetInstructionRequest {
@@ -50,11 +67,14 @@ interface SpreadsheetPlanFilter {
 }
 
 interface SpreadsheetExecutionPlan {
-  intent: 'count' | 'sum' | 'avg' | 'chart' | 'export' | 'script'
+  intent: 'count' | 'sum' | 'avg' | 'chart' | 'export' | 'script' | 'filter_rows'
   sourceSheetName?: string
   groupByColumns?: string[]
   valueColumn?: string
   filters?: SpreadsheetPlanFilter[]
+  selectColumns?: string[]
+  sortBy?: string
+  sortDirection?: 'asc' | 'desc'
   chartType?: 'bar' | 'line' | 'pie' | 'horizontalBar'
   targetSheetName?: string
   useLastCreatedSheet?: boolean
