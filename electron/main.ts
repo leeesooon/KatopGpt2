@@ -1,7 +1,16 @@
 import { app, BrowserWindow, dialog, ipcMain, shell, type WebContents } from 'electron'
 import { promises as fs } from 'fs'
 import path from 'path'
-import { extractDocumentText, type ExtractDocumentTextRequest } from './documentExtraction.ts'
+import {
+  extractDocumentText,
+  executeSpreadsheetInstruction,
+  executeSpreadsheetPlan,
+  exportSpreadsheetSession,
+  type ExportSpreadsheetSessionResult,
+  type ExecuteSpreadsheetPlanRequest,
+  type ExecuteSpreadsheetInstructionRequest,
+  type ExtractDocumentTextRequest,
+} from './documentExtraction.ts'
 
 let mainWindow: BrowserWindow | null = null
 let workspaceWindow: BrowserWindow | null = null
@@ -40,8 +49,61 @@ interface ApiConnectionTestResult {
   error?: string
 }
 
+async function exportSpreadsheetSessionToFile(sessionId: string): Promise<ExportSpreadsheetSessionResult> {
+  try {
+    const { buffer, defaultFileName, charts } = exportSpreadsheetSession(sessionId)
+    const result = await dialog.showSaveDialog(mainWindow ?? undefined, {
+      title: '导出表格结果',
+      defaultPath: path.join(app.getPath('documents'), defaultFileName),
+      filters: [
+        { name: 'Excel 文件', extensions: ['xlsx'] },
+      ],
+    })
+
+    if (result.canceled || !result.filePath) {
+      return {
+        ok: false,
+        message: '已取消导出。',
+      }
+    }
+
+    await fs.writeFile(result.filePath, buffer)
+    const chartPaths: string[] = []
+    const exportDir = path.dirname(result.filePath)
+    const exportBaseName = path.basename(result.filePath, path.extname(result.filePath))
+    for (const chart of charts) {
+      const chartPath = path.join(exportDir, `${exportBaseName}_${chart.fileName}`)
+      await fs.writeFile(chartPath, chart.svgContent, 'utf8')
+      chartPaths.push(chartPath)
+    }
+
+    return {
+      ok: true,
+      message: chartPaths.length > 0
+        ? `已导出 Excel：${result.filePath}\n已导出图表：\n${chartPaths.map((item) => `- ${item}`).join('\n')}`
+        : `已导出到：${result.filePath}`,
+      filePath: result.filePath,
+      chartPaths,
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : '导出表格失败',
+    }
+  }
+}
+
 interface StartChatStreamRequest {
   streamId: string
+  baseUrl: string
+  apiKey: string
+  model: string
+  messages: ApiChatMessage[]
+  temperature: number
+  maxTokens: number
+}
+
+interface CompleteChatRequest {
   baseUrl: string
   apiKey: string
   model: string
@@ -397,6 +459,55 @@ async function relayNonStreamCompletionResponse(sender: WebContents, streamId: s
 
   sendChatStreamEvent(sender, { streamId, type: 'chunk', chunk: text })
   sendChatStreamEvent(sender, { streamId, type: 'done' })
+}
+
+async function completeChat(request: CompleteChatRequest) {
+  const baseUrl = normalizeApiBaseUrl(request.baseUrl)
+  const url = `${baseUrl}/chat/completions`
+  const requestBody: Record<string, unknown> = {
+    model: request.model,
+    messages: request.messages,
+    stream: false,
+    temperature: request.temperature,
+  }
+
+  if (request.maxTokens > 0) {
+    requestBody.max_tokens = request.maxTokens
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${request.apiKey}`,
+    },
+    body: JSON.stringify(requestBody),
+  })
+
+  if (!response.ok) {
+    const { message } = await readApiError(response)
+    throw new Error(message)
+  }
+
+  const contentType = response.headers.get('content-type') ?? ''
+  const rawText = await response.text()
+
+  if (contentType.includes('application/json')) {
+    try {
+      const payload = JSON.parse(rawText)
+      const text = extractCompletionText(payload)
+      if (text) return text
+    } catch {
+      // ignore and fallback below
+    }
+  }
+
+  const text = extractCompletionTextFromRaw(rawText)
+  if (!text) {
+    throw new Error(buildUnparsedResponseError(rawText))
+  }
+
+  return text
 }
 
 function sendChatStreamEvent(sender: WebContents, payload: ChatStreamEvent) {
@@ -794,7 +905,11 @@ ipcMain.handle('workspace:createDocument', (_event, rootPath: string, relativePa
 ipcMain.handle('workspace:renameDocument', (_event, rootPath: string, oldRelativePath: string, newRelativePath: string) => renameWorkspaceDocument(rootPath, oldRelativePath, newRelativePath))
 ipcMain.handle('workspace:deleteDocument', (_event, rootPath: string, relativePath: string) => deleteWorkspaceDocument(rootPath, relativePath))
 ipcMain.handle('files:extractDocumentText', (_event, request: ExtractDocumentTextRequest) => extractDocumentText(request))
+ipcMain.handle('files:executeSpreadsheetInstruction', (_event, request: ExecuteSpreadsheetInstructionRequest) => executeSpreadsheetInstruction(request))
+ipcMain.handle('files:executeSpreadsheetPlan', (_event, request: ExecuteSpreadsheetPlanRequest) => executeSpreadsheetPlan(request))
+ipcMain.handle('files:exportSpreadsheetSession', (_event, sessionId: string) => exportSpreadsheetSessionToFile(sessionId))
 ipcMain.handle('api:testConnection', (_event, config: ApiConnectionConfig) => testApiConnection(config))
+ipcMain.handle('api:completeChat', (_event, request: CompleteChatRequest) => completeChat(request))
 ipcMain.handle('api:startChatStream', (event, request: StartChatStreamRequest) => {
   if (activeApiStreams.has(request.streamId)) {
     throw new Error('聊天流已存在')

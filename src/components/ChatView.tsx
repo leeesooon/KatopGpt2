@@ -2,7 +2,8 @@ import { useRef, useEffect, useCallback, useState } from 'react'
 import { MessageSquarePlus, Sparkles, ArrowDown } from 'lucide-react'
 import { useChatStore } from '../store/chatStore'
 import { useWorkspaceStore } from '../store/workspaceStore'
-import { streamChat, ChatApiError } from '../services/chatApi'
+import { streamChat, parseSpreadsheetIntent, ChatApiError } from '../services/chatApi'
+import type { SpreadsheetExecutionPlan } from '../services/chatApi'
 import { recognizeImages } from '../services/ocr'
 import { resolveApiConfig } from '../types'
 import { prepareDocumentAgentRequest } from '../services/agentOrchestrator'
@@ -15,6 +16,72 @@ import InputArea from './InputArea'
 interface ContextStats {
   messageCount: number
   messageChars: number
+}
+
+const MAX_CONTEXT_COUNTED_FILE_CHARS = 12000
+
+function findLatestSpreadsheetAttachment(messages: Array<{ files?: FileAttachment[] }>, currentFiles: FileAttachment[]) {
+  const currentMatch = currentFiles.find(
+    (file) => (file.fileType === 'xlsx' || file.fileType === 'csv') && file.spreadsheetSessionId
+  )
+  if (currentMatch) return currentMatch
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const files = messages[index].files ?? []
+    const matchedFile = files.find(
+      (file) => (file.fileType === 'xlsx' || file.fileType === 'csv') && file.spreadsheetSessionId
+    )
+    if (matchedFile) {
+      return matchedFile
+    }
+  }
+
+  return null
+}
+
+function shouldExecuteSpreadsheetInstruction(content: string) {
+  const trimmed = content.trim()
+  if (!trimmed) return false
+
+  return /(生成.*(?:sheet|工作表|图表|柱状图|折线图|饼图|条形图)|新\s*(?:sheet|工作表)|汇总|合计|求和|平均|均值|计数|条数|个数|数量|人数|多少人|有多少|分组|统计|柱状图|折线图|饼图|条形图|图表)/i.test(trimmed)
+    && /(excel|xlsx|csv|表格|工作表|sheet|按|列|图表|画图|统计图|可视化)/i.test(trimmed)
+}
+
+function shouldExportSpreadsheetSession(content: string) {
+  const trimmed = content.trim()
+  if (!trimmed) return false
+
+  return /(导出|另存为|保存为|导出为)/i.test(trimmed)
+    && /(excel|xlsx|表格|工作表|sheet|文件)/i.test(trimmed)
+}
+
+function buildSpreadsheetRecentContext(messages: Array<{ role: string; content: string }>) {
+  return messages
+    .slice(-6)
+    .map((message) => `${message.role === 'user' ? '用户' : '助手'}: ${message.content}`)
+    .join('\n\n')
+}
+
+function summarizeSpreadsheetPlan(plan: SpreadsheetExecutionPlan) {
+  if (plan.intent === 'export') return '导出当前表格结果'
+  if (plan.intent === 'chart') {
+    return `基于${plan.useLastCreatedSheet ? '最近结果表' : '指定工作表'}生成${plan.chartType ?? 'bar'}图表`
+  }
+  if (plan.intent === 'script') {
+    return plan.script?.summary ? `执行脚本计划：${plan.script.summary}` : '执行脚本计划'
+  }
+
+  const metricLabel = plan.intent === 'count'
+    ? '计数'
+    : plan.intent === 'sum'
+      ? `汇总 ${plan.valueColumn ?? '数值列'}`
+      : `统计 ${plan.valueColumn ?? '数值列'} 平均值`
+  const groups = plan.groupByColumns?.join(' + ') || '未指定分组'
+  const filterText = plan.filters?.length
+    ? `，筛选 ${plan.filters.map((filter) => `${filter.column}${filter.operator}${filter.value}`).join('，')}`
+    : ''
+  const topNText = plan.topN ? `，取前 ${plan.topN} 项` : ''
+  return `按 ${groups} ${metricLabel}${filterText}${topNText}`
 }
 
 export default function ChatView() {
@@ -42,6 +109,7 @@ export default function ChatView() {
   const shouldAutoStickRef = useRef(true)
   const [showScrollBottom, setShowScrollBottom] = useState(false)
   const [streamingDrafts, setStreamingDrafts] = useState<Record<string, string>>({})
+  const [isExportingSpreadsheet, setIsExportingSpreadsheet] = useState(false)
 
   const activeConversation = conversations.find((c) => c.id === activeConversationId)
   const messages = activeConversation?.messages ?? []
@@ -133,7 +201,10 @@ export default function ChatView() {
   const contextStats: ContextStats = messages.reduce(
     (stats, message) => {
       const imageChars = message.images?.length ? message.images.length * 120 : 0
-      const fileChars = message.files?.reduce((total, file) => total + file.content.length, 0) ?? 0
+      const fileChars = message.files?.reduce(
+        (total, file) => total + Math.min(file.content.length, MAX_CONTEXT_COUNTED_FILE_CHARS),
+        0
+      ) ?? 0
       return {
         messageCount: stats.messageCount + 1,
         messageChars: stats.messageChars + message.content.length + imageChars + fileChars,
@@ -141,6 +212,25 @@ export default function ChatView() {
     },
     { messageCount: 0, messageChars: 0 }
   )
+  const latestSpreadsheet = findLatestSpreadsheetAttachment(messages, [])
+
+  const handleExportSpreadsheet = useCallback(async () => {
+    if (!latestSpreadsheet?.spreadsheetSessionId || !window.electronAPI?.exportSpreadsheetSession || isExportingSpreadsheet) {
+      return
+    }
+
+    setIsExportingSpreadsheet(true)
+    try {
+      const exportResult = await window.electronAPI.exportSpreadsheetSession(latestSpreadsheet.spreadsheetSessionId)
+      const convId = activeConversationId ?? createConversation()
+      addMessage(convId, {
+        role: 'assistant',
+        content: exportResult.message,
+      })
+    } finally {
+      setIsExportingSpreadsheet(false)
+    }
+  }, [activeConversationId, addMessage, createConversation, isExportingSpreadsheet, latestSpreadsheet])
 
   const handleSend = async (content: string, images: ImageAttachment[], files: FileAttachment[]) => {
     const apiConfig = resolveApiConfig(settings.providers, settings.activeModel)
@@ -161,6 +251,8 @@ export default function ChatView() {
     if (!convId) {
       convId = createConversation()
     }
+
+    const previousMessages = useChatStore.getState().conversations.find((c) => c.id === convId)?.messages ?? []
 
     // Build message content — file contents are injected at API call time, not stored in message
     let messageContent = content
@@ -197,6 +289,106 @@ export default function ChatView() {
       const titleSource = content || (files.length > 0 ? files[0].name : '图片对话')
       const title = titleSource.length > 30 ? titleSource.slice(0, 30) + '...' : titleSource
       updateConversationTitle(convId, title)
+    }
+
+    const latestSpreadsheet = findLatestSpreadsheetAttachment(previousMessages, files)
+    if (
+      latestSpreadsheet?.spreadsheetSessionId
+      && shouldExportSpreadsheetSession(content)
+      && window.electronAPI?.exportSpreadsheetSession
+    ) {
+      const exportResult = await window.electronAPI.exportSpreadsheetSession(latestSpreadsheet.spreadsheetSessionId)
+      addMessage(convId, {
+        role: 'assistant',
+        content: exportResult.message,
+      })
+      return
+    }
+
+    if (
+      latestSpreadsheet?.spreadsheetSessionId
+      && window.electronAPI?.executeSpreadsheetInstruction
+    ) {
+      try {
+        const recentContext = buildSpreadsheetRecentContext(previousMessages)
+        const intentResult = await parseSpreadsheetIntent(
+          apiConfig,
+          content,
+          latestSpreadsheet.content,
+          recentContext
+        )
+
+        if (intentResult?.shouldExecute) {
+          if (intentResult.plan && window.electronAPI?.executeSpreadsheetPlan) {
+            if (intentResult.plan.intent === 'export' && window.electronAPI?.exportSpreadsheetSession) {
+              const exportResult = await window.electronAPI.exportSpreadsheetSession(latestSpreadsheet.spreadsheetSessionId)
+              addMessage(convId, {
+                role: 'assistant',
+                content: exportResult.message,
+              })
+              return
+            }
+
+            const plannedResult = await window.electronAPI.executeSpreadsheetPlan({
+              sessionId: latestSpreadsheet.spreadsheetSessionId,
+              plan: intentResult.plan,
+            })
+
+            addMessage(convId, {
+              role: 'assistant',
+              content: `已理解为：${summarizeSpreadsheetPlan(intentResult.plan)}\n\n${plannedResult.message}`,
+            })
+            return
+          }
+
+          if (!intentResult.normalizedInstruction) {
+            return
+          }
+
+          const spreadsheetResult = await window.electronAPI.executeSpreadsheetInstruction({
+            sessionId: latestSpreadsheet.spreadsheetSessionId,
+            instruction: intentResult.normalizedInstruction,
+          })
+
+          addMessage(convId, {
+            role: 'assistant',
+            content: spreadsheetResult.message,
+          })
+          return
+        }
+        if (shouldExecuteSpreadsheetInstruction(content)) {
+          addMessage(convId, {
+            role: 'assistant',
+            content: '表格助手没有成功解析这条请求，所以没有走本地执行链路。请换一种更明确的说法，或重试一次。',
+          })
+          return
+        }
+      } catch {
+        if (shouldExecuteSpreadsheetInstruction(content)) {
+          addMessage(convId, {
+            role: 'assistant',
+            content: '表格助手在规划这条请求时失败了，所以没有执行统计。请重试一次；如果还不行，我建议把需求拆得更具体一些，比如“按部门计数，并生成柱状图”。',
+          })
+          return
+        }
+      }
+    }
+
+    if (
+      latestSpreadsheet?.spreadsheetSessionId
+      && shouldExecuteSpreadsheetInstruction(content)
+      && window.electronAPI?.executeSpreadsheetInstruction
+    ) {
+      const spreadsheetResult = await window.electronAPI.executeSpreadsheetInstruction({
+        sessionId: latestSpreadsheet.spreadsheetSessionId,
+        instruction: content,
+      })
+
+      addMessage(convId, {
+        role: 'assistant',
+        content: spreadsheetResult.message,
+      })
+      return
     }
 
     // Start streaming
@@ -442,6 +634,10 @@ export default function ChatView() {
       <InputArea
         onSend={handleSend}
         onStop={handleStop}
+        onExportSpreadsheet={handleExportSpreadsheet}
+        hasSpreadsheetSession={Boolean(latestSpreadsheet?.spreadsheetSessionId)}
+        spreadsheetName={latestSpreadsheet?.name ?? null}
+        isExportingSpreadsheet={isExportingSpreadsheet}
         isStreaming={isCurrentStreaming}
         disabled={!apiConfigured}
         contextStats={contextStats}

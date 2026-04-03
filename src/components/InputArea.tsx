@@ -1,12 +1,40 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Send, Square, ImagePlus, Paperclip, X, FileText, Search, Loader2, BookOpenText, SquareArrowOutUpRight } from 'lucide-react'
+import { Send, Square, ImagePlus, Paperclip, X, FileText, Search, Loader2, BookOpenText, SquareArrowOutUpRight, Download } from 'lucide-react'
 import { v4 as uuidv4 } from 'uuid'
 import ModelSelector from './ModelSelector'
 import { useChatStore } from '../store/chatStore'
 import { useWorkspaceStore } from '../store/workspaceStore'
 import type { DocumentAgentMode, ImageAttachment, FileAttachment } from '../types'
 
-const EXTRACTABLE_DOCUMENT_EXTENSIONS = ['.pptx', '.pdf', '.docx']
+const EXTRACTABLE_DOCUMENT_EXTENSIONS = ['.pptx', '.pdf', '.docx', '.xlsx', '.csv']
+
+const EXTRACTABLE_DOCUMENT_MIME_TYPES = [
+  'application/pdf',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'text/csv',
+]
+
+const FILE_INPUT_ACCEPT = '.txt,.md,.markdown,.json,.csv,.pdf,.pptx,.docx,.xlsx'
+
+function looksLikeBinaryText(content: string) {
+  if (!content) return false
+
+  const sample = content.slice(0, 4000)
+  let suspiciousChars = 0
+
+  for (const char of sample) {
+    const code = char.charCodeAt(0)
+    const isAllowedControl = code === 9 || code === 10 || code === 13
+    const isSuspiciousControl = code === 0 || (code < 32 && !isAllowedControl)
+    if (isSuspiciousControl || char === '\u0000' || char === '\u001a' || char === '\u0003') {
+      suspiciousChars += 1
+    }
+  }
+
+  return suspiciousChars > Math.max(8, sample.length * 0.02)
+}
 
 function getFileExtension(fileName: string) {
   const lastDotIndex = fileName.lastIndexOf('.')
@@ -19,16 +47,16 @@ function isExtractableDocument(file: File) {
     return true
   }
 
-  return [
-    'application/pdf',
-    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  ].includes(file.type)
+  return EXTRACTABLE_DOCUMENT_MIME_TYPES.includes(file.type)
 }
 
 interface InputAreaProps {
   onSend: (content: string, images: ImageAttachment[], files: FileAttachment[]) => void
   onStop: () => void
+  onExportSpreadsheet?: () => void
+  hasSpreadsheetSession?: boolean
+  spreadsheetName?: string | null
+  isExportingSpreadsheet?: boolean
   isStreaming: boolean
   disabled: boolean
   contextStats: {
@@ -37,7 +65,17 @@ interface InputAreaProps {
   }
 }
 
-export default function InputArea({ onSend, onStop, isStreaming, disabled, contextStats }: InputAreaProps) {
+export default function InputArea({
+  onSend,
+  onStop,
+  onExportSpreadsheet,
+  hasSpreadsheetSession = false,
+  spreadsheetName = null,
+  isExportingSpreadsheet = false,
+  isStreaming,
+  disabled,
+  contextStats,
+}: InputAreaProps) {
   const { searchEnabled, setSearchEnabled, settings } = useChatStore()
   const {
     currentWorkspace,
@@ -157,9 +195,13 @@ export default function InputArea({ onSend, onStop, isStreaming, disabled, conte
 
   const addTextFile = async (file: File) => {
     const content = await readFileAsText(file)
+    if (looksLikeBinaryText(content)) {
+      throw new Error('该文件看起来是二进制内容，请使用可解析的文本文件或表格文件（.csv/.xlsx）')
+    }
+
     setFiles((prev) => [
       ...prev,
-      { id: uuidv4(), name: file.name, size: file.size, content },
+      { id: uuidv4(), name: file.name, size: file.size, content, fileType: 'text' },
     ])
   }
 
@@ -183,7 +225,14 @@ export default function InputArea({ onSend, onStop, isStreaming, disabled, conte
 
     setFiles((prev) => [
       ...prev,
-      { id: uuidv4(), name: file.name, size: file.size, content },
+      {
+        id: uuidv4(),
+        name: file.name,
+        size: file.size,
+        content,
+        fileType: result.fileType,
+        spreadsheetSessionId: result.spreadsheetSessionId,
+      },
     ])
   }
 
@@ -377,6 +426,17 @@ export default function InputArea({ onSend, onStop, isStreaming, disabled, conte
               绑定到当前对话
             </span>
           )}
+          {hasSpreadsheetSession && onExportSpreadsheet && (
+            <button
+              onClick={onExportSpreadsheet}
+              disabled={disabled || isExportingSpreadsheet}
+              className="inline-flex items-center gap-2 rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1.5 text-xs text-emerald-100 transition hover:bg-emerald-300/15 disabled:cursor-not-allowed disabled:opacity-50"
+              title={spreadsheetName ? `导出当前表格：${spreadsheetName}` : '导出当前表格'}
+            >
+              {isExportingSpreadsheet ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+              <span>{isExportingSpreadsheet ? '导出中...' : '导出表格'}</span>
+            </button>
+          )}
         </div>
         <div className="glass-panel rounded-xl p-2">
           {/* Model selector row */}
@@ -547,6 +607,7 @@ export default function InputArea({ onSend, onStop, isStreaming, disabled, conte
             <input
               ref={fileInputRef}
               type="file"
+              accept={FILE_INPUT_ACCEPT}
               multiple
               onChange={handleFileSelect}
               className="hidden"

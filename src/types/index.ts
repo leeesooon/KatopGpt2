@@ -19,6 +19,8 @@ export interface FileAttachment {
   size: number
   /** Text content of the file */
   content: string
+  fileType?: 'text' | 'pdf' | 'pptx' | 'docx' | 'xlsx' | 'csv'
+  spreadsheetSessionId?: string
 }
 
 export type DocumentAgentMode = 'chat' | 'create' | 'rewrite' | 'expand' | 'summarize'

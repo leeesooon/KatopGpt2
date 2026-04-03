@@ -40,7 +40,55 @@ interface ExtractDocumentTextResult {
   ok: boolean
   content?: string
   error?: string
-  fileType?: 'pptx' | 'pdf' | 'docx'
+  fileType?: 'pptx' | 'pdf' | 'docx' | 'xlsx' | 'csv'
+  spreadsheetSessionId?: string
+}
+
+interface ExecuteSpreadsheetInstructionRequest {
+  sessionId: string
+  instruction: string
+}
+
+interface SpreadsheetPlanFilter {
+  column: string
+  operator: 'eq' | 'contains' | 'gt' | 'gte' | 'lt' | 'lte'
+  value: string
+}
+
+interface SpreadsheetExecutionPlan {
+  intent: 'count' | 'sum' | 'avg' | 'chart' | 'export' | 'script'
+  sourceSheetName?: string
+  groupByColumns?: string[]
+  valueColumn?: string
+  filters?: SpreadsheetPlanFilter[]
+  chartType?: 'bar' | 'line' | 'pie' | 'horizontalBar'
+  targetSheetName?: string
+  useLastCreatedSheet?: boolean
+  topN?: number
+  script?: {
+    language: 'javascript'
+    code: string
+    summary?: string
+  }
+}
+
+interface ExecuteSpreadsheetPlanRequest {
+  sessionId: string
+  plan: SpreadsheetExecutionPlan
+}
+
+interface ExecuteSpreadsheetInstructionResult {
+  ok: boolean
+  performed: boolean
+  message: string
+  createdSheetName?: string
+}
+
+interface ExportSpreadsheetSessionResult {
+  ok: boolean
+  message: string
+  filePath?: string
+  chartPaths?: string[]
 }
 
 interface ApiConnectionTestResult {
@@ -51,6 +99,15 @@ interface ApiConnectionTestResult {
 
 interface StartChatStreamRequest {
   streamId: string
+  baseUrl: string
+  apiKey: string
+  model: string
+  messages: ApiChatMessage[]
+  temperature: number
+  maxTokens: number
+}
+
+interface CompleteChatRequest {
   baseUrl: string
   apiKey: string
   model: string
@@ -85,7 +142,11 @@ interface ElectronAPI {
   renameWorkspaceDocument: (rootPath: string, oldRelativePath: string, newRelativePath: string) => Promise<boolean>
   deleteWorkspaceDocument: (rootPath: string, relativePath: string) => Promise<boolean>
   extractDocumentText: (request: ExtractDocumentTextRequest) => Promise<ExtractDocumentTextResult>
+  executeSpreadsheetInstruction: (request: ExecuteSpreadsheetInstructionRequest) => Promise<ExecuteSpreadsheetInstructionResult>
+  executeSpreadsheetPlan: (request: ExecuteSpreadsheetPlanRequest) => Promise<ExecuteSpreadsheetInstructionResult>
+  exportSpreadsheetSession: (sessionId: string) => Promise<ExportSpreadsheetSessionResult>
   testApiConnection: (config: ApiConnectionConfig) => Promise<ApiConnectionTestResult>
+  completeChat: (request: CompleteChatRequest) => Promise<string>
   startChatStream: (request: StartChatStreamRequest) => Promise<boolean>
   cancelChatStream: (streamId: string) => Promise<boolean>
   subscribeChatStreamEvents: (listener: (event: ChatStreamEvent) => void) => number

@@ -35,6 +35,14 @@ function handleExternalAnchorClick(event: React.MouseEvent<HTMLAnchorElement>, r
   openExternalUrl(rawUrl ?? '')
 }
 
+function transformMarkdownUrl(url: string) {
+  if (/^data:image\//i.test(url)) {
+    return url
+  }
+
+  return url
+}
+
 function CodeBlock({ language, value }: { language: string; value: string }) {
   const [copied, setCopied] = useState(false)
 
@@ -207,6 +215,16 @@ const MessageBubble = memo(function MessageBubble({ message }: MessageBubbleProp
           </a>
         )
       },
+      img({ src, alt, ...props }: any) {
+        return (
+          <img
+            {...props}
+            src={src}
+            alt={alt ?? '图表预览'}
+            className="my-3 w-full max-w-3xl rounded-xl border border-surface-700/40 bg-surface-900/60 p-2"
+          />
+        )
+      },
       blockquote: createCitationContainer('blockquote'),
       h1: createCitationContainer('h1'),
       h2: createCitationContainer('h2'),
@@ -333,6 +351,7 @@ const MessageBubble = memo(function MessageBubble({ message }: MessageBubbleProp
               <ReactMarkdown 
                 remarkPlugins={[remarkGfm]} 
                 components={markdownComponents}
+                urlTransform={transformMarkdownUrl}
               >
                 {renderedContent}
               </ReactMarkdown>

@@ -34,7 +34,55 @@ interface ExtractDocumentTextResult {
   ok: boolean
   content?: string
   error?: string
-  fileType?: 'pptx' | 'pdf' | 'docx'
+  fileType?: 'pptx' | 'pdf' | 'docx' | 'xlsx' | 'csv'
+  spreadsheetSessionId?: string
+}
+
+interface ExecuteSpreadsheetInstructionRequest {
+  sessionId: string
+  instruction: string
+}
+
+interface SpreadsheetPlanFilter {
+  column: string
+  operator: 'eq' | 'contains' | 'gt' | 'gte' | 'lt' | 'lte'
+  value: string
+}
+
+interface SpreadsheetExecutionPlan {
+  intent: 'count' | 'sum' | 'avg' | 'chart' | 'export' | 'script'
+  sourceSheetName?: string
+  groupByColumns?: string[]
+  valueColumn?: string
+  filters?: SpreadsheetPlanFilter[]
+  chartType?: 'bar' | 'line' | 'pie' | 'horizontalBar'
+  targetSheetName?: string
+  useLastCreatedSheet?: boolean
+  topN?: number
+  script?: {
+    language: 'javascript'
+    code: string
+    summary?: string
+  }
+}
+
+interface ExecuteSpreadsheetPlanRequest {
+  sessionId: string
+  plan: SpreadsheetExecutionPlan
+}
+
+interface ExecuteSpreadsheetInstructionResult {
+  ok: boolean
+  performed: boolean
+  message: string
+  createdSheetName?: string
+}
+
+interface ExportSpreadsheetSessionResult {
+  ok: boolean
+  message: string
+  filePath?: string
+  chartPaths?: string[]
 }
 
 interface ApiConnectionTestResult {
@@ -45,6 +93,15 @@ interface ApiConnectionTestResult {
 
 interface StartChatStreamRequest {
   streamId: string
+  baseUrl: string
+  apiKey: string
+  model: string
+  messages: ApiChatMessage[]
+  temperature: number
+  maxTokens: number
+}
+
+interface CompleteChatRequest {
   baseUrl: string
   apiKey: string
   model: string
@@ -110,7 +167,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   renameWorkspaceDocument: (rootPath: string, oldRelativePath: string, newRelativePath: string) => ipcRenderer.invoke('workspace:renameDocument', rootPath, oldRelativePath, newRelativePath),
   deleteWorkspaceDocument: (rootPath: string, relativePath: string) => ipcRenderer.invoke('workspace:deleteDocument', rootPath, relativePath),
   extractDocumentText: (request: ExtractDocumentTextRequest) => ipcRenderer.invoke('files:extractDocumentText', request),
+  executeSpreadsheetInstruction: (request: ExecuteSpreadsheetInstructionRequest) => ipcRenderer.invoke('files:executeSpreadsheetInstruction', request),
+  executeSpreadsheetPlan: (request: ExecuteSpreadsheetPlanRequest) => ipcRenderer.invoke('files:executeSpreadsheetPlan', request),
+  exportSpreadsheetSession: (sessionId: string) => ipcRenderer.invoke('files:exportSpreadsheetSession', sessionId),
   testApiConnection: (config: ApiConnectionConfig) => ipcRenderer.invoke('api:testConnection', config),
+  completeChat: (request: CompleteChatRequest) => ipcRenderer.invoke('api:completeChat', request),
   startChatStream: (request: StartChatStreamRequest) => ipcRenderer.invoke('api:startChatStream', request),
   cancelChatStream: (streamId: string) => ipcRenderer.invoke('api:cancelChatStream', streamId),
   subscribeChatStreamEvents: (listener: (event: ChatStreamEvent) => void) => {
