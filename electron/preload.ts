@@ -33,6 +33,7 @@ interface ExtractDocumentTextRequest {
 interface SpreadsheetColumnSchema {
   name: string
   inferredType: 'string' | 'number' | 'boolean' | 'date' | 'mixed' | 'empty'
+  aliases?: string[]
 }
 
 interface SpreadsheetSheetSchema {
@@ -67,7 +68,7 @@ interface SpreadsheetPlanFilter {
 }
 
 interface SpreadsheetExecutionPlan {
-  intent: 'count' | 'sum' | 'avg' | 'chart' | 'export' | 'script' | 'filter_rows'
+  intent: 'count' | 'sum' | 'avg' | 'chart' | 'export' | 'script' | 'filter_rows' | 'analysis' | 'detail_filter' | 'aggregation'
   sourceSheetName?: string
   groupByColumns?: string[]
   valueColumn?: string
@@ -79,12 +80,24 @@ interface SpreadsheetExecutionPlan {
   targetSheetName?: string
   useLastCreatedSheet?: boolean
   topN?: number
+  steps?: SpreadsheetPlanStep[]
+  explanation?: string
   script?: {
     language: 'javascript'
     code: string
     summary?: string
   }
 }
+
+type SpreadsheetPlanStep =
+  | { op: 'filter'; conditions: SpreadsheetPlanFilter[] }
+  | { op: 'group_by'; columns: string[] }
+  | { op: 'aggregate'; metrics: Array<{ type: 'count' | 'sum' | 'avg'; column?: string; as?: string }> }
+  | { op: 'sort'; by: string; direction: 'asc' | 'desc' }
+  | { op: 'top_n'; value: number }
+  | { op: 'select_columns'; columns: string[] }
+  | { op: 'chart'; chartType: 'bar' | 'line' | 'pie' | 'horizontalBar' }
+  | { op: 'export'; target: 'new_sheet' | 'excel_file'; sheetName?: string }
 
 interface ExecuteSpreadsheetPlanRequest {
   sessionId: string

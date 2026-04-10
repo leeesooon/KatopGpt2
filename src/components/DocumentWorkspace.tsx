@@ -36,6 +36,7 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
     filePaths,
     documents,
     activeDocumentPath,
+    pendingRenamePath,
     isPanelVisible,
     panelWidth,
     editorMode,
@@ -331,6 +332,7 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
             <WorkspaceFileTree
               filePaths={filePaths}
               activePath={activeDocumentPath}
+              pendingRenamePath={pendingRenamePath}
               onSelect={(relativePath) => void openDocument(relativePath)}
               onCreate={(relativePath) => createDocument(relativePath, '')}
               onRename={renameDocument}

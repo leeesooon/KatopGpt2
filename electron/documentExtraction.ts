@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto'
 import JSZip from 'jszip'
 import { Script, createContext } from 'vm'
 import * as XLSX from 'xlsx'
+import { z } from 'zod'
 
 export interface ExtractDocumentTextRequest {
   fileName: string
@@ -30,7 +31,7 @@ export interface SpreadsheetPlanFilter {
 }
 
 export interface SpreadsheetExecutionPlan {
-  intent: 'count' | 'sum' | 'avg' | 'chart' | 'export' | 'script' | 'filter_rows'
+  intent: 'count' | 'sum' | 'avg' | 'chart' | 'export' | 'script' | 'filter_rows' | 'analysis' | 'detail_filter' | 'aggregation'
   sourceSheetName?: string
   groupByColumns?: string[]
   valueColumn?: string
@@ -42,11 +43,70 @@ export interface SpreadsheetExecutionPlan {
   targetSheetName?: string
   useLastCreatedSheet?: boolean
   topN?: number
+  steps?: SpreadsheetPlanStep[]
+  explanation?: string
   script?: {
     language: 'javascript'
     code: string
     summary?: string
   }
+}
+
+export type SpreadsheetPlanStep =
+  | {
+      op: 'filter'
+      conditions: SpreadsheetPlanFilter[]
+    }
+  | {
+      op: 'group_by'
+      columns: string[]
+    }
+  | {
+      op: 'aggregate'
+      metrics: Array<{
+        type: 'count' | 'sum' | 'avg'
+        column?: string
+        as?: string
+      }>
+    }
+  | {
+      op: 'sort'
+      by: string
+      direction: 'asc' | 'desc'
+    }
+  | {
+      op: 'top_n'
+      value: number
+    }
+  | {
+      op: 'select_columns'
+      columns: string[]
+    }
+  | {
+      op: 'chart'
+      chartType: SpreadsheetChartType
+    }
+  | {
+      op: 'export'
+      target: 'new_sheet' | 'excel_file'
+      sheetName?: string
+    }
+
+type SpreadsheetToolName = SpreadsheetPlanStep['op']
+
+interface SpreadsheetToolExecutionState {
+  intent: SpreadsheetExecutionPlan['intent']
+  filters: SpreadsheetPlanFilter[]
+  groupByColumns: string[]
+  valueColumn?: string
+  selectColumns: string[]
+  sortBy?: string
+  sortDirection?: 'asc' | 'desc'
+  chartType?: SpreadsheetChartType
+  targetSheetName?: string
+  exportTarget?: 'new_sheet' | 'excel_file'
+  topN?: number
+  explanation?: string
 }
 
 export interface ExecuteSpreadsheetPlanRequest {
@@ -71,6 +131,7 @@ export interface ExportSpreadsheetSessionResult {
 export interface SpreadsheetColumnSchema {
   name: string
   inferredType: 'string' | 'number' | 'boolean' | 'date' | 'mixed' | 'empty'
+  aliases?: string[]
 }
 
 export interface SpreadsheetSheetSchema {
@@ -410,6 +471,24 @@ function parseWorkbook(buffer: Buffer, fileType: SpreadsheetDocumentType) {
   })
 }
 
+function buildColumnAliases(name: string) {
+  const aliases = new Set<string>()
+  const trimmed = name.trim()
+  if (!trimmed) return []
+
+  aliases.add(trimmed)
+  aliases.add(trimmed.replace(/[\s_\-()（）【】\[\]：:]/g, ''))
+
+  if (trimmed.includes('岗位')) aliases.add('职位')
+  if (trimmed.includes('职位')) aliases.add('岗位')
+  if (trimmed.includes('部门')) aliases.add('所属部门')
+  if (trimmed.includes('所属部门')) aliases.add('部门')
+  if (trimmed.includes('姓名')) aliases.add('人员')
+  if (trimmed.includes('责任人')) aliases.add('负责人')
+
+  return Array.from(aliases).filter(Boolean)
+}
+
 function inferColumnType(values: string[]): SpreadsheetColumnSchema['inferredType'] {
   const samples = values.filter(Boolean).slice(0, 20)
   if (samples.length === 0) return 'empty'
@@ -437,6 +516,7 @@ function buildWorkbookSchema(workbook: XLSX.WorkBook): SpreadsheetWorkbookSchema
         return {
           name,
           inferredType: inferColumnType(values),
+          aliases: buildColumnAliases(name),
         }
       })
 
@@ -635,20 +715,206 @@ function resolveSheetHeaders(workbook: XLSX.WorkBook, sheetName?: string) {
   return { resolvedSheetName, headers }
 }
 
+const spreadsheetPlanFilterSchema = z.object({
+  column: z.string().min(1),
+  operator: z.enum(['eq', 'contains', 'gt', 'gte', 'lt', 'lte']),
+  value: z.string(),
+})
+
+const spreadsheetToolStepSchemas = {
+  filter: z.object({
+    op: z.literal('filter'),
+    conditions: z.array(spreadsheetPlanFilterSchema).min(1),
+  }),
+  group_by: z.object({
+    op: z.literal('group_by'),
+    columns: z.array(z.string().min(1)).min(1),
+  }),
+  aggregate: z.object({
+    op: z.literal('aggregate'),
+    metrics: z.array(z.object({
+      type: z.enum(['count', 'sum', 'avg']),
+      column: z.string().optional(),
+      as: z.string().optional(),
+    })).min(1),
+  }),
+  sort: z.object({
+    op: z.literal('sort'),
+    by: z.string().min(1),
+    direction: z.enum(['asc', 'desc']),
+  }),
+  top_n: z.object({
+    op: z.literal('top_n'),
+    value: z.number().int().positive(),
+  }),
+  select_columns: z.object({
+    op: z.literal('select_columns'),
+    columns: z.array(z.string().min(1)).min(1),
+  }),
+  chart: z.object({
+    op: z.literal('chart'),
+    chartType: z.enum(['bar', 'line', 'pie', 'horizontalBar']),
+  }),
+  export: z.object({
+    op: z.literal('export'),
+    target: z.enum(['new_sheet', 'excel_file']),
+    sheetName: z.string().optional(),
+  }),
+} satisfies Record<SpreadsheetToolName, z.ZodTypeAny>
+
+type SpreadsheetToolHandler<Name extends SpreadsheetToolName> = {
+  schema: typeof spreadsheetToolStepSchemas[Name]
+  apply: (state: SpreadsheetToolExecutionState, step: z.infer<typeof spreadsheetToolStepSchemas[Name]>) => void
+}
+
+const spreadsheetToolRegistry: { [K in SpreadsheetToolName]: SpreadsheetToolHandler<K> } = {
+  filter: {
+    schema: spreadsheetToolStepSchemas.filter,
+    apply: (state, step) => {
+      state.filters.push(...step.conditions)
+    },
+  },
+  group_by: {
+    schema: spreadsheetToolStepSchemas.group_by,
+    apply: (state, step) => {
+      state.groupByColumns = step.columns
+    },
+  },
+  aggregate: {
+    schema: spreadsheetToolStepSchemas.aggregate,
+    apply: (state, step) => {
+      const primaryMetric = step.metrics[0]
+      state.intent = primaryMetric.type
+      state.valueColumn = primaryMetric.column
+    },
+  },
+  sort: {
+    schema: spreadsheetToolStepSchemas.sort,
+    apply: (state, step) => {
+      state.sortBy = step.by
+      state.sortDirection = step.direction
+    },
+  },
+  top_n: {
+    schema: spreadsheetToolStepSchemas.top_n,
+    apply: (state, step) => {
+      state.topN = step.value
+    },
+  },
+  select_columns: {
+    schema: spreadsheetToolStepSchemas.select_columns,
+    apply: (state, step) => {
+      state.selectColumns = step.columns
+    },
+  },
+  chart: {
+    schema: spreadsheetToolStepSchemas.chart,
+    apply: (state, step) => {
+      state.chartType = step.chartType
+      if (state.intent === 'analysis') {
+        state.intent = 'chart'
+      }
+    },
+  },
+  export: {
+    schema: spreadsheetToolStepSchemas.export,
+    apply: (state, step) => {
+      state.exportTarget = step.target
+      if (step.sheetName) {
+        state.targetSheetName = step.sheetName
+      }
+      if (step.target === 'excel_file') {
+        state.intent = 'export'
+      } else if (state.intent === 'analysis' || state.intent === 'detail_filter') {
+        state.intent = 'filter_rows'
+      }
+    },
+  },
+}
+
+function applySpreadsheetToolSteps(plan: SpreadsheetExecutionPlan) {
+  const state: SpreadsheetToolExecutionState = {
+    intent: plan.intent,
+    filters: [...(plan.filters ?? [])],
+    groupByColumns: [...(plan.groupByColumns ?? [])],
+    valueColumn: plan.valueColumn,
+    selectColumns: [...(plan.selectColumns ?? [])],
+    sortBy: plan.sortBy,
+    sortDirection: plan.sortDirection,
+    chartType: plan.chartType,
+    targetSheetName: plan.targetSheetName,
+    exportTarget: undefined,
+    topN: plan.topN,
+    explanation: plan.explanation,
+  }
+
+  for (const rawStep of plan.steps ?? []) {
+    const handler = spreadsheetToolRegistry[rawStep.op]
+    const step = handler.schema.parse(rawStep)
+    handler.apply(state, step as never)
+  }
+
+  return state
+}
+
+function normalizeStepBasedPlan(plan: SpreadsheetExecutionPlan): SpreadsheetExecutionPlan {
+  if (!plan.steps || plan.steps.length === 0) {
+    return plan
+  }
+
+  const toolState = applySpreadsheetToolSteps(plan)
+
+  const normalized: SpreadsheetExecutionPlan = {
+    ...plan,
+    intent: toolState.intent,
+    filters: toolState.filters,
+    groupByColumns: toolState.groupByColumns,
+    valueColumn: toolState.valueColumn,
+    selectColumns: toolState.selectColumns,
+    sortBy: toolState.sortBy,
+    sortDirection: toolState.sortDirection,
+    chartType: toolState.chartType,
+    targetSheetName: toolState.targetSheetName,
+    topN: toolState.topN,
+    explanation: toolState.explanation,
+  }
+
+  if (plan.intent === 'analysis' || plan.intent === 'aggregation') {
+    if (normalized.groupByColumns?.length) {
+      normalized.intent = normalized.valueColumn ? (normalized.intent === 'aggregation' ? 'sum' : normalized.intent) : 'count'
+    }
+  }
+
+  if (plan.intent === 'detail_filter' && !normalized.groupByColumns?.length) {
+    normalized.intent = 'filter_rows'
+  }
+
+  return normalized
+}
+
 function resolvePlanToOperation(workbook: XLSX.WorkBook, plan: SpreadsheetExecutionPlan): SpreadsheetOperation | null {
-  if (plan.intent === 'chart' || plan.intent === 'export' || plan.intent === 'script' || plan.intent === 'filter_rows') {
+  const normalizedPlan = normalizeStepBasedPlan(plan)
+  if (
+    normalizedPlan.intent === 'chart'
+    || normalizedPlan.intent === 'export'
+    || normalizedPlan.intent === 'script'
+    || normalizedPlan.intent === 'filter_rows'
+    || normalizedPlan.intent === 'analysis'
+    || normalizedPlan.intent === 'detail_filter'
+    || normalizedPlan.intent === 'aggregation'
+  ) {
     return null
   }
 
-  const { resolvedSheetName, headers } = resolveSheetHeaders(workbook, plan.sourceSheetName)
-  const groupByColumns = (plan.groupByColumns ?? [])
+  const { resolvedSheetName, headers } = resolveSheetHeaders(workbook, normalizedPlan.sourceSheetName)
+  const groupByColumns = (normalizedPlan.groupByColumns ?? [])
     .map((column) => resolveHeader(column, headers))
     .filter((column): column is string => Boolean(column))
   if (groupByColumns.length === 0) {
     throw new Error('未识别到有效的分组列')
   }
 
-  const filters = (plan.filters ?? [])
+  const filters = (normalizedPlan.filters ?? [])
     .map((filter) => {
       const resolvedColumn = resolveHeader(filter.column, headers)
       if (!resolvedColumn) return null
@@ -660,13 +926,14 @@ function resolvePlanToOperation(workbook: XLSX.WorkBook, plan: SpreadsheetExecut
     })
     .filter((filter): filter is SpreadsheetFilter => Boolean(filter))
 
-  const chartType = plan.chartType
-  const targetSheetName = plan.targetSheetName || buildDefaultTargetSheetName(plan.intent)
-  const topN = typeof plan.topN === 'number' && Number.isFinite(plan.topN) && plan.topN > 0
-    ? Math.max(1, Math.floor(plan.topN))
+  const chartType = normalizedPlan.chartType
+  const operationIntent = normalizedPlan.intent as SpreadsheetOperation['kind']
+  const targetSheetName = normalizedPlan.targetSheetName || buildDefaultTargetSheetName(operationIntent)
+  const topN = typeof normalizedPlan.topN === 'number' && Number.isFinite(normalizedPlan.topN) && normalizedPlan.topN > 0
+    ? Math.max(1, Math.floor(normalizedPlan.topN))
     : undefined
 
-  if (plan.intent === 'count') {
+  if (normalizedPlan.intent === 'count') {
     return {
       kind: 'count',
       sourceSheetName: resolvedSheetName,
@@ -678,13 +945,13 @@ function resolvePlanToOperation(workbook: XLSX.WorkBook, plan: SpreadsheetExecut
     }
   }
 
-  const valueColumn = plan.valueColumn ? resolveHeader(plan.valueColumn, headers) : null
+  const valueColumn = normalizedPlan.valueColumn ? resolveHeader(normalizedPlan.valueColumn, headers) : null
   if (!valueColumn) {
     throw new Error('未识别到有效的数值列')
   }
 
   return {
-    kind: plan.intent,
+    kind: operationIntent,
     sourceSheetName: resolvedSheetName,
     groupByColumns,
     valueColumn,
@@ -1459,7 +1726,9 @@ export async function executeSpreadsheetPlan(
   }
 
   try {
-    if (request.plan.intent === 'export') {
+    const normalizedPlan = normalizeStepBasedPlan(request.plan)
+
+    if (normalizedPlan.intent === 'export') {
       return {
         ok: true,
         performed: false,
@@ -1467,8 +1736,8 @@ export async function executeSpreadsheetPlan(
       }
     }
 
-    if (request.plan.intent === 'script') {
-      const scriptResult = await runSpreadsheetScriptPlan(session, request.plan)
+    if (normalizedPlan.intent === 'script') {
+      const scriptResult = await runSpreadsheetScriptPlan(session, normalizedPlan)
       return {
         ok: true,
         performed: true,
@@ -1477,8 +1746,8 @@ export async function executeSpreadsheetPlan(
       }
     }
 
-    if (request.plan.intent === 'filter_rows') {
-      const result = executeFilterRowsPlan(session, request.plan)
+    if (normalizedPlan.intent === 'filter_rows' || normalizedPlan.intent === 'detail_filter') {
+      const result = executeFilterRowsPlan(session, normalizedPlan)
       return {
         ok: true,
         performed: true,
@@ -1487,11 +1756,11 @@ export async function executeSpreadsheetPlan(
       }
     }
 
-    if (request.plan.intent === 'chart') {
-      const chartType = request.plan.chartType ?? 'bar'
-      const sheetName = request.plan.useLastCreatedSheet
+    if (normalizedPlan.intent === 'chart') {
+      const chartType = normalizedPlan.chartType ?? 'bar'
+      const sheetName = normalizedPlan.useLastCreatedSheet
         ? session.lastCreatedSheetName
-        : request.plan.sourceSheetName ?? session.lastCreatedSheetName
+        : normalizedPlan.sourceSheetName ?? session.lastCreatedSheetName
       if (!sheetName) {
         return {
           ok: false,
@@ -1519,7 +1788,7 @@ export async function executeSpreadsheetPlan(
       }
     }
 
-    const operation = resolvePlanToOperation(session.workbook, request.plan)
+    const operation = resolvePlanToOperation(session.workbook, normalizedPlan)
     if (!operation) {
       return {
         ok: false,

@@ -43,8 +43,8 @@ function shouldExecuteSpreadsheetInstruction(content: string) {
   const trimmed = content.trim()
   if (!trimmed) return false
 
-  return /(生成.*(?:sheet|工作表|图表|柱状图|折线图|饼图|条形图)|新\s*(?:sheet|工作表)|汇总|合计|求和|平均|均值|计数|条数|个数|数量|人数|多少人|有多少|分组|统计|柱状图|折线图|饼图|条形图|图表)/i.test(trimmed)
-    && /(excel|xlsx|csv|表格|工作表|sheet|按|列|图表|画图|统计图|可视化)/i.test(trimmed)
+  return /(生成.*(?:sheet|工作表|图表|柱状图|折线图|饼图|条形图)|新\s*(?:sheet|工作表)|汇总|合计|求和|平均|均值|计数|条数|个数|数量|人数|多少人|有多少|分组|统计|分析|分布|占比|柱状图|折线图|饼图|条形图|图表)/i.test(trimmed)
+    && /(excel|xlsx|csv|表格|工作表|sheet|按|列|字段|图表|画图|统计图|可视化|岗位|部门)/i.test(trimmed)
 }
 
 function shouldExportSpreadsheetSession(content: string) {
@@ -63,6 +63,7 @@ function buildSpreadsheetRecentContext(messages: Array<{ role: string; content: 
 }
 
 function summarizeSpreadsheetPlan(plan: SpreadsheetExecutionPlan) {
+  if (plan.explanation) return plan.explanation
   if (plan.intent === 'export') return '导出当前表格结果'
   if (plan.intent === 'chart') {
     return `基于${plan.useLastCreatedSheet ? '最近结果表' : '指定工作表'}生成${plan.chartType ?? 'bar'}图表`

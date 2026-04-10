@@ -15,6 +15,7 @@ export interface ImageAttachment {
 export interface SpreadsheetColumnSchema {
   name: string
   inferredType: 'string' | 'number' | 'boolean' | 'date' | 'mixed' | 'empty'
+  aliases?: string[]
 }
 
 export interface SpreadsheetSheetSchema {
@@ -27,6 +28,50 @@ export interface SpreadsheetSheetSchema {
 export interface SpreadsheetWorkbookSchema {
   sheets: SpreadsheetSheetSchema[]
 }
+
+export type SpreadsheetPlanStep =
+  | {
+      op: 'filter'
+      conditions: Array<{
+        column: string
+        operator: 'eq' | 'contains' | 'gt' | 'gte' | 'lt' | 'lte'
+        value: string
+      }>
+    }
+  | {
+      op: 'group_by'
+      columns: string[]
+    }
+  | {
+      op: 'aggregate'
+      metrics: Array<{
+        type: 'count' | 'sum' | 'avg'
+        column?: string
+        as?: string
+      }>
+    }
+  | {
+      op: 'sort'
+      by: string
+      direction: 'asc' | 'desc'
+    }
+  | {
+      op: 'top_n'
+      value: number
+    }
+  | {
+      op: 'select_columns'
+      columns: string[]
+    }
+  | {
+      op: 'chart'
+      chartType: 'bar' | 'line' | 'pie' | 'horizontalBar'
+    }
+  | {
+      op: 'export'
+      target: 'new_sheet' | 'excel_file'
+      sheetName?: string
+    }
 
 /** File attached to a message */
 export interface FileAttachment {
@@ -63,6 +108,8 @@ export interface WorkspaceDocument {
   isDirty: boolean
   lastLoadedAt: number
   lastSavedAt?: number
+  isPendingNaming?: boolean
+  pendingInitialContent?: string
 }
 
 /** Web search result from search API */
