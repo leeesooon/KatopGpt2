@@ -29,6 +29,8 @@ const MARKDOWN_WRAPPER_RE = /^\s*```[ \t]*(?:markdown|md)\s*\r?\n/i
 const TRAILING_FENCE_RE = /\r?\n```[ \t]*$/
 const CITATION_RE = /(\[\d+\])/g
 const SKIP_CITATION_TAGS = new Set(['a', 'code', 'pre'])
+const DEFAULT_PREVIEW_COLUMNS = 6
+const CELL_TEXT_PREVIEW_LENGTH = 48
 
 function handleExternalAnchorClick(event: React.MouseEvent<HTMLAnchorElement>, rawUrl?: string | null) {
   event.preventDefault()
@@ -159,6 +161,105 @@ function injectCitations(children: ReactNode, sources: { url: string }[] = [], k
   })
 }
 
+function truncateCellText(children: ReactNode) {
+  const fullText = Children.toArray(children)
+    .map((child) => {
+      if (typeof child === 'string' || typeof child === 'number') {
+        return String(child)
+      }
+      return ''
+    })
+    .join('')
+    .trim()
+
+  if (!fullText) {
+    return { text: '', fullText: '', truncated: false }
+  }
+
+  if (fullText.length <= CELL_TEXT_PREVIEW_LENGTH) {
+    return { text: fullText, fullText, truncated: false }
+  }
+
+  return {
+    text: `${fullText.slice(0, CELL_TEXT_PREVIEW_LENGTH).trimEnd()}...`,
+    fullText,
+    truncated: true,
+  }
+}
+
+function sliceTableRow(children: ReactNode, visibleColumns: number) {
+  return Children.toArray(children).slice(0, visibleColumns)
+}
+
+function MarkdownTable({ children, sources }: { children: ReactNode; sources: { url: string }[] }) {
+  const [expanded, setExpanded] = useState(false)
+
+  const tableChildren = useMemo(() => {
+    const nodes = Children.toArray(children)
+    let totalColumns = 0
+
+    const nextNodes = nodes.map((node, sectionIndex) => {
+      if (!isValidElement(node)) {
+        return node
+      }
+
+      const sectionProps = node.props as { children?: ReactNode }
+      const rowNodes = Children.toArray(sectionProps.children)
+      const firstRow = rowNodes.find((rowNode) => isValidElement(rowNode))
+      if (firstRow && totalColumns === 0) {
+        const firstRowProps = (firstRow as any).props as { children?: ReactNode }
+        totalColumns = Children.toArray(firstRowProps.children).length
+      }
+
+      const nextRows = rowNodes.map((rowNode, rowIndex) => {
+        if (!isValidElement(rowNode)) {
+          return rowNode
+        }
+
+        const rowProps = rowNode.props as { children?: ReactNode }
+        const cellNodes = expanded
+          ? Children.toArray(rowProps.children)
+          : sliceTableRow(rowProps.children, DEFAULT_PREVIEW_COLUMNS)
+
+        return cloneElement(rowNode, { key: `table-row-${sectionIndex}-${rowIndex}` }, cellNodes)
+      })
+
+      return cloneElement(node, { key: `table-section-${sectionIndex}` }, nextRows)
+    })
+
+    return {
+      nodes: nextNodes,
+      totalColumns,
+      hasHiddenColumns: totalColumns > DEFAULT_PREVIEW_COLUMNS,
+    }
+  }, [children, expanded])
+
+  return (
+    <div className="my-3 w-full">
+      {tableChildren.hasHiddenColumns && (
+        <div className="mb-2 flex items-center justify-between gap-3 text-xs text-surface-400">
+          <span>默认预览前 {DEFAULT_PREVIEW_COLUMNS} 列</span>
+          <button
+            type="button"
+            onClick={() => setExpanded((current) => !current)}
+            className="rounded-lg border border-surface-600/50 bg-surface-800/70 px-2.5 py-1 text-surface-200 transition hover:bg-surface-700/80"
+          >
+            {expanded ? '收起预览' : '查看完整表格'}
+          </button>
+        </div>
+      )}
+      <div className="w-full overflow-x-auto rounded-xl border border-surface-700/40 bg-surface-900/40">
+        <table className="min-w-max border-collapse text-left text-sm">
+          {tableChildren.nodes}
+        </table>
+      </div>
+      {tableChildren.hasHiddenColumns && !expanded && (
+        <p className="mt-2 text-xs text-surface-500">其余列已折叠，点击“查看完整表格”展开。</p>
+      )}
+    </div>
+  )
+}
+
 const MessageBubble = memo(function MessageBubble({ message }: MessageBubbleProps) {
   const isUser = message.role === 'user'
   const [showCopyButton, setShowCopyButton] = useState(false)
@@ -225,6 +326,40 @@ const MessageBubble = memo(function MessageBubble({ message }: MessageBubbleProp
           />
         )
       },
+      table({ children, ...props }: any) {
+        return <MarkdownTable {...props} sources={message.searchResults ?? []}>{children}</MarkdownTable>
+      },
+      thead({ children, ...props }: any) {
+        return <thead {...props} className="bg-surface-800/80">{children}</thead>
+      },
+      tbody({ children, ...props }: any) {
+        return <tbody {...props} className="divide-y divide-surface-700/30">{children}</tbody>
+      },
+      tr({ children, ...props }: any) {
+        return <tr {...props} className="align-top">{children}</tr>
+      },
+      th({ children, ...props }: any) {
+        return (
+          <th
+            {...props}
+            className="whitespace-nowrap border-r border-surface-700/40 px-3 py-2 font-medium text-surface-100 last:border-r-0"
+          >
+            {injectCitations(children, message.searchResults)}
+          </th>
+        )
+      },
+      td({ children, ...props }: any) {
+        const { text, fullText, truncated } = truncateCellText(children)
+        return (
+          <td
+            {...props}
+            title={truncated ? fullText : undefined}
+            className="min-w-[96px] max-w-[240px] border-r border-surface-700/30 px-3 py-2 whitespace-normal break-words text-surface-200 last:border-r-0"
+          >
+            {truncated ? text : injectCitations(children, message.searchResults)}
+          </td>
+        )
+      },
       blockquote: createCitationContainer('blockquote'),
       h1: createCitationContainer('h1'),
       h2: createCitationContainer('h2'),
@@ -234,8 +369,6 @@ const MessageBubble = memo(function MessageBubble({ message }: MessageBubbleProp
       h6: createCitationContainer('h6'),
       li: createCitationContainer('li'),
       p: createCitationContainer('p'),
-      td: createCitationContainer('td'),
-      th: createCitationContainer('th'),
     }
   }, [message.searchResults])
 
@@ -283,7 +416,7 @@ const MessageBubble = memo(function MessageBubble({ message }: MessageBubbleProp
           setShowCopyButton(false)
           setCopiedMessage(false)
         }}
-        className={`relative max-w-[75%] rounded-2xl px-4 py-3 ${
+        className={`relative ${isUser ? 'max-w-[75%]' : 'max-w-[90%]'} rounded-2xl px-4 py-3 ${
           isUser
             ? 'bg-primary-600/20 border border-primary-500/20 text-surface-100'
             : 'bg-surface-800/50 border border-surface-700/30 text-surface-200'

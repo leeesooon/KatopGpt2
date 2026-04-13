@@ -1492,6 +1492,31 @@ function matchesFilter(record: Record<string, unknown>, filter: SpreadsheetFilte
   return false
 }
 
+function matchesFilters(record: Record<string, unknown>, filters: SpreadsheetFilter[]) {
+  if (filters.length === 0) return true
+
+  const groupedFilters = new Map<string, SpreadsheetFilter[]>()
+  for (const filter of filters) {
+    const groupKey = `${filter.column}::${filter.operator}`
+    const group = groupedFilters.get(groupKey) ?? []
+    group.push(filter)
+    groupedFilters.set(groupKey, group)
+  }
+
+  return Array.from(groupedFilters.values()).every((group) => {
+    if (group.length === 1) {
+      return matchesFilter(record, group[0])
+    }
+
+    const operator = group[0].operator
+    if (operator === 'contains' || operator === 'eq') {
+      return group.some((filter) => matchesFilter(record, filter))
+    }
+
+    return group.every((filter) => matchesFilter(record, filter))
+  })
+}
+
 function resolveSelectedColumns(headers: string[], requested?: string[]) {
   if (!requested || requested.length === 0) {
     return headers
@@ -1521,7 +1546,7 @@ function executeFilterRowsPlan(session: SpreadsheetSession, plan: SpreadsheetExe
     .filter((filter): filter is SpreadsheetFilter => Boolean(filter))
 
   let filteredRecords = filters.length > 0
-    ? records.filter((record) => filters.every((filter) => matchesFilter(record, filter)))
+    ? records.filter((record) => matchesFilters(record, filters))
     : records
 
   if (plan.sortBy) {
@@ -1583,7 +1608,7 @@ function executeSpreadsheetOperation(session: SpreadsheetSession, operation: Spr
     defval: '',
   })
   const filteredRecords = operation.filters.length > 0
-    ? records.filter((record) => operation.filters.every((filter) => matchesFilter(record, filter)))
+    ? records.filter((record) => matchesFilters(record, operation.filters))
     : records
 
   if (filteredRecords.length === 0) {
