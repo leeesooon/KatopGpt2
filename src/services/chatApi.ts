@@ -58,7 +58,7 @@ export interface SpreadsheetExecutionPlan {
   steps?: SpreadsheetPlanStep[]
   explanation?: string
   script?: {
-    language: 'javascript'
+    language: 'python' | 'javascript'
     code: string
     summary?: string
   }
@@ -422,8 +422,10 @@ export async function parseSpreadsheetIntent(
     '如果需要兼容旧执行器，也可补充 groupByColumns/valueColumn/filters/selectColumns/sortBy/topN/chartType 等顶层字段，但 steps 是首选。',
     'filters 里的 operator 只能是 eq / contains / gt / gte / lt / lte。',
     'intent 只能是 analysis / detail_filter / aggregation / chart / export / script。',
-    '只有当内建操作明显不够时，才使用 script。script.language 只能是 javascript。',
-    'script 只能基于受限 API 操作当前表格，会话外文件、网络、系统命令都不可用。',
+    '只有当内建操作明显不够时，才使用 script。script.language 优先使用 python，只有兼容旧能力时才允许 javascript。',
+    'python script 会收到这些预定义变量：INPUT_WORKBOOK, SCHEMA_PATH, OUTPUT_DIR, RESULT_PATH, SESSION_INFO。脚本必须把标准 JSON 结果写入 RESULT_PATH。',
+    'RESULT_PATH JSON 推荐结构：{"ok":true,"message":"...","createdSheetNames":["..."],"exportedFilePath":"...xlsx","chartPaths":["...png"],"preview":{"headers":[...],"rows":[...]}}。失败时写 {"ok": false, "error": "..."}。',
+    'script 只能基于当前表格临时副本和输出目录操作，会话外文件、网络、系统命令都不可用。',
     'normalizedInstruction 要尽量改写成这种格式：',
     '- 单据状态=单据未完成，按责任人计数，生成柱状图',
     '- 金额>1000，按部门+责任人汇总金额，生成新工作表',
@@ -436,7 +438,7 @@ export async function parseSpreadsheetIntent(
     '如果用户说“把部门人数最多的前三个列出来并生成图表”，优先输出 steps：filter/group_by/aggregate/sort/top_n/chart，不要用 script。',
     '如果用户说“把刚才那个结果画成饼图”，可以输出：{"intent":"chart","useLastCreatedSheet":true,"steps":[{"op":"chart","chartType":"pie"}]}',
     '如果用户说“导出这个结果”，可以输出：{"intent":"export","useLastCreatedSheet":true,"steps":[{"op":"export","target":"excel_file"}]}',
-    '如果用户要复杂改造，可输出 script，例如：{"intent":"script","script":{"language":"javascript","summary":"清洗部门列并输出新表","code":"const rows = api.readSheet(); const header = rows[0]; ...; return { message: \"已完成\" }"}}',
+    '如果用户要复杂改造，可输出 python script，例如：{"intent":"script","script":{"language":"python","summary":"清洗部门列并输出新表","code":"import json\nimport pandas as pd\nfrom pathlib import Path\nresult_path = Path(RESULT_PATH)\n...\nresult_path.write_text(json.dumps({\"ok\": True, \"message\": \"已完成\"}, ensure_ascii=False), encoding=\"utf-8\")"}}',
   ].join('\n')
 
   const userPrompt = [

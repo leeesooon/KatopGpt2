@@ -1,5 +1,9 @@
 import { randomUUID } from 'crypto'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'fs/promises'
 import JSZip from 'jszip'
+import os from 'os'
+import path from 'path'
+import { spawn } from 'child_process'
 import { Script, createContext } from 'vm'
 import * as XLSX from 'xlsx'
 import { z } from 'zod'
@@ -46,7 +50,7 @@ export interface SpreadsheetExecutionPlan {
   steps?: SpreadsheetPlanStep[]
   explanation?: string
   script?: {
-    language: 'javascript'
+    language: 'python' | 'javascript'
     code: string
     summary?: string
   }
@@ -156,6 +160,7 @@ const MAX_SPREADSHEET_SAMPLE_ROWS = 6
 const MAX_SPREADSHEET_SAMPLE_COLUMNS = 10
 const MAX_SPREADSHEET_PREVIEW_ROWS = 8
 const SCRIPT_EXECUTION_TIMEOUT_MS = 1500
+const PYTHON_SCRIPT_TIMEOUT_MS = 20000
 
 interface SpreadsheetSession {
   sessionId: string
@@ -1177,8 +1182,16 @@ function writeRowsToSheet(session: SpreadsheetSession, baseSheetName: string, ro
 
 async function runSpreadsheetScriptPlan(session: SpreadsheetSession, plan: SpreadsheetExecutionPlan) {
   const script = plan.script
-  if (!script || script.language !== 'javascript' || !script.code.trim()) {
-    throw new Error('脚本计划缺少可执行的 JavaScript 代码')
+  if (!script || !script.code.trim()) {
+    throw new Error('脚本计划缺少可执行代码')
+  }
+
+  if (script.language === 'python') {
+    return runSpreadsheetPythonScriptPlan(session, plan)
+  }
+
+  if (script.language !== 'javascript') {
+    throw new Error(`暂不支持脚本语言：${script.language}`)
   }
 
   const api = {
@@ -1271,6 +1284,144 @@ async function runSpreadsheetScriptPlan(session: SpreadsheetSession, plan: Sprea
       ...(chart ? ['', buildChartMarkdown(chart.title, chart.svgContent), '', `已生成图表文件：${chart.fileName}，导出表格时会一并导出。`] : []),
     ].filter(Boolean).join('\n'),
   }
+}
+
+async function runSpreadsheetPythonScriptPlan(session: SpreadsheetSession, plan: SpreadsheetExecutionPlan) {
+  const script = plan.script
+  if (!script || script.language !== 'python' || !script.code.trim()) {
+    throw new Error('脚本计划缺少可执行的 Python 代码')
+  }
+
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'katop-excel-agent-'))
+  const workbookPath = path.join(tempRoot, 'input.xlsx')
+  const schemaPath = path.join(tempRoot, 'schema.json')
+  const resultPath = path.join(tempRoot, 'result.json')
+  const outputDir = path.join(tempRoot, 'output')
+  const scriptPath = path.join(tempRoot, 'agent_script.py')
+
+  try {
+    await mkdir(outputDir, { recursive: true })
+    const workbookBuffer = XLSX.write(session.workbook, {
+      type: 'buffer',
+      bookType: 'xlsx',
+      compression: true,
+    })
+    await writeFile(workbookPath, Buffer.isBuffer(workbookBuffer) ? workbookBuffer : Buffer.from(workbookBuffer))
+    await writeFile(schemaPath, JSON.stringify(session.schema, null, 2), 'utf8')
+
+    const pythonCode = [
+      'import json',
+      'from pathlib import Path',
+      `INPUT_WORKBOOK = r'''${workbookPath}'''`,
+      `SCHEMA_PATH = r'''${schemaPath}'''`,
+      `OUTPUT_DIR = r'''${outputDir}'''`,
+      `RESULT_PATH = r'''${resultPath}'''`,
+      `SESSION_INFO = json.loads(r'''${JSON.stringify({
+        sessionId: session.sessionId,
+        fileName: session.fileName,
+        fileType: session.fileType,
+        lastCreatedSheetName: session.lastCreatedSheetName,
+      }).replace(/\\/g, '\\\\').replace(/'''/g, "\\'\\'\\'")}''')`,
+      '',
+      script.code,
+      '',
+      'result_file = Path(RESULT_PATH)',
+      'if not result_file.exists():',
+      '    raise RuntimeError("Python 脚本未写出 RESULT_PATH 结果文件")',
+    ].join('\n')
+    await writeFile(scriptPath, pythonCode, 'utf8')
+
+    const execution = await runPythonProcess(scriptPath, tempRoot)
+    const rawResult = JSON.parse(await readFile(resultPath, 'utf8')) as {
+      ok?: boolean
+      message?: string
+      createdSheetNames?: string[]
+      exportedFilePath?: string
+      chartPaths?: string[]
+      preview?: { headers?: string[]; rows?: Array<Array<string | number | boolean | null>> }
+      error?: string
+    }
+
+    if (!rawResult.ok) {
+      throw new Error(rawResult.error || rawResult.message || execution.stderr || 'Python 脚本执行失败')
+    }
+
+    const exportedFilePath = rawResult.exportedFilePath
+    if (exportedFilePath) {
+      const nextWorkbook = XLSX.readFile(exportedFilePath, {
+        cellDates: true,
+        dense: false,
+        raw: false,
+      })
+      session.workbook = nextWorkbook
+      session.schema = buildWorkbookSchema(nextWorkbook)
+      const lastSheet = rawResult.createdSheetNames?.[rawResult.createdSheetNames.length - 1]
+      if (lastSheet) {
+        session.lastCreatedSheetName = lastSheet
+      }
+    }
+
+    const previewRows = rawResult.preview?.headers
+      ? [
+        rawResult.preview.headers.map((item) => String(item)),
+        ...(rawResult.preview.rows ?? []).map((row) => row.map((item) => formatSpreadsheetCell(item))),
+      ]
+      : null
+
+    return {
+      createdSheetName: rawResult.createdSheetNames?.[rawResult.createdSheetNames.length - 1],
+      chartFileName: rawResult.chartPaths?.[0] ? path.basename(rawResult.chartPaths[0]) : undefined,
+      message: [
+        `已执行 Python 脚本计划${script.summary ? `：${script.summary}` : ''}`,
+        '',
+        rawResult.message || '已完成脚本执行。',
+        ...(rawResult.createdSheetNames?.length ? ['', `- 输出工作表：${rawResult.createdSheetNames.join('、')}`] : []),
+        ...(previewRows ? ['', '**结果预览**', '', renderSpreadsheetPreview(previewRows)] : []),
+        ...(rawResult.chartPaths?.length ? ['', `- 生成图表：${rawResult.chartPaths.map((item) => path.basename(item)).join('、')}`] : []),
+      ].join('\n'),
+    }
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true })
+  }
+}
+
+async function runPythonProcess(scriptPath: string, cwd: string) {
+  return await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn('python', [scriptPath], {
+      cwd,
+      windowsHide: true,
+    })
+    let stdout = ''
+    let stderr = ''
+    let finished = false
+    const timer = setTimeout(() => {
+      if (finished) return
+      child.kill()
+      reject(new Error('Python 脚本执行超时'))
+    }, PYTHON_SCRIPT_TIMEOUT_MS)
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString()
+    })
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString()
+    })
+    child.on('error', (error) => {
+      clearTimeout(timer)
+      finished = true
+      reject(error)
+    })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      if (finished) return
+      finished = true
+      if (code === 0) {
+        resolve({ stdout, stderr })
+        return
+      }
+      reject(new Error(stderr.trim() || stdout.trim() || `Python 脚本执行失败，退出码 ${code}`))
+    })
+  })
 }
 
 function createChartForSheet(session: SpreadsheetSession, sheetName: string, chartType: SpreadsheetChartType) {

@@ -83,7 +83,7 @@ interface SpreadsheetExecutionPlan {
   steps?: SpreadsheetPlanStep[]
   explanation?: string
   script?: {
-    language: 'javascript'
+    language: 'python' | 'javascript'
     code: string
     summary?: string
   }
