@@ -2,6 +2,25 @@
 export interface ModelConfig {
   name: string
   multimodal: boolean
+  capabilities?: {
+    chat?: boolean
+    vision?: boolean
+    imageGeneration?: boolean
+  }
+}
+
+export type ChatInputMode = 'chat' | 'image'
+
+export type ImageGenerationSize = '1024x1024' | '1024x1536' | '1536x1024'
+
+export type ImageGenerationQuality = 'auto' | 'low' | 'medium' | 'high'
+
+export interface ImageGenerationSettings {
+  providerId?: string
+  model?: string
+  size: ImageGenerationSize
+  quality: ImageGenerationQuality
+  count: 1
 }
 
 /** Image attached to a message */
@@ -92,6 +111,10 @@ export interface Message {
   content: string
   images?: ImageAttachment[]
   files?: FileAttachment[]
+  metadata?: {
+    kind?: 'chat' | 'image_generation'
+    revisedPrompt?: string
+  }
   /** Search results attached to this message (for assistant responses) */
   searchResults?: SearchResult[]
   timestamp: number
@@ -144,6 +167,8 @@ export interface AppSettings {
   tavilyApiKey: string
   /** Enable web search by default */
   enableSearchByDefault: boolean
+  /** Image generation defaults */
+  imageGeneration: ImageGenerationSettings
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -157,6 +182,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
   serperApiKey: '',
   tavilyApiKey: '',
   enableSearchByDefault: false,
+  imageGeneration: {
+    size: '1024x1024',
+    quality: 'auto',
+    count: 1,
+  },
 }
 
 /** Resolve a ModelSelection into a flat ApiConfig for API calls */
@@ -174,4 +204,12 @@ export function resolveApiConfig(
     model: selection.model,
     multimodal: modelConfig?.multimodal ?? false,
   }
+}
+
+export function supportsImageGeneration(model: ModelConfig | undefined) {
+  return model?.capabilities?.imageGeneration ?? false
+}
+
+export function supportsVision(model: ModelConfig | undefined) {
+  return model?.capabilities?.vision ?? model?.multimodal ?? false
 }

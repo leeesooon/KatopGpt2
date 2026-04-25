@@ -1,15 +1,15 @@
-import { useRef, useEffect, useCallback, useState } from 'react'
+﻿import { useRef, useEffect, useCallback, useState } from 'react'
 import { MessageSquarePlus, Sparkles, ArrowDown } from 'lucide-react'
 import { useChatStore } from '../store/chatStore'
 import { useWorkspaceStore } from '../store/workspaceStore'
-import { streamChat, parseSpreadsheetIntent, ChatApiError } from '../services/chatApi'
+import { streamChat, parseSpreadsheetIntent, generateImage, ChatApiError } from '../services/chatApi'
 import type { SpreadsheetExecutionPlan } from '../services/chatApi'
 import { recognizeImages } from '../services/ocr'
-import { resolveApiConfig } from '../types'
+import { resolveApiConfig, supportsImageGeneration } from '../types'
 import { prepareDocumentAgentRequest } from '../services/agentOrchestrator'
 import { webSearch, formatSearchContext, shouldTriggerSearch, SearchApiError } from '../services/searchApi'
 import { readWebPagesFromText, formatWebPageContext } from '../services/webpage'
-import type { ImageAttachment, FileAttachment, SearchResult } from '../types'
+import type { ApiConfig, ChatInputMode, ImageAttachment, FileAttachment, SearchResult } from '../types'
 import MessageBubble from './MessageBubble'
 import InputArea from './InputArea'
 
@@ -93,6 +93,29 @@ function summarizeSpreadsheetPlan(plan: SpreadsheetExecutionPlan) {
   return `按 ${groups} ${metricLabel}${filterText}${topNText}`
 }
 
+function resolveImageGenerationConfig(settings: ReturnType<typeof useChatStore.getState>['settings']): ApiConfig | null {
+  const imageSettings = settings.imageGeneration
+  const explicitSelection = imageSettings.providerId && imageSettings.model
+    ? { providerId: imageSettings.providerId, model: imageSettings.model }
+    : null
+  const explicitConfig = resolveApiConfig(settings.providers, explicitSelection)
+  if (explicitConfig) return explicitConfig
+
+  for (const provider of settings.providers) {
+    const model = provider.models.find((item) => supportsImageGeneration(item))
+    if (model) {
+      return {
+        baseUrl: provider.baseUrl,
+        apiKey: provider.apiKey,
+        model: model.name,
+        multimodal: model.multimodal,
+      }
+    }
+  }
+
+  return null
+}
+
 export default function ChatView() {
   const {
     conversations,
@@ -119,6 +142,7 @@ export default function ChatView() {
   const [showScrollBottom, setShowScrollBottom] = useState(false)
   const [streamingDrafts, setStreamingDrafts] = useState<Record<string, string>>({})
   const [isExportingSpreadsheet, setIsExportingSpreadsheet] = useState(false)
+  const [inputMode, setInputMode] = useState<ChatInputMode>('chat')
 
   const activeConversation = conversations.find((c) => c.id === activeConversationId)
   const messages = activeConversation?.messages ?? []
@@ -127,6 +151,7 @@ export default function ChatView() {
     return draftContent == null ? message : { ...message, content: draftContent }
   })
   const isCurrentStreaming = activeConversationId ? streamingConvIds.includes(activeConversationId) : false
+  const isImageGenerating = inputMode === 'image' && isCurrentStreaming
   const workspaceTaskState = useWorkspaceStore((state) => state.taskState)
   const workspaceDocument = useWorkspaceStore((state) => {
     if (!state.activeDocumentPath) return null
@@ -242,6 +267,72 @@ export default function ChatView() {
   }, [activeConversationId, addMessage, createConversation, isExportingSpreadsheet, latestSpreadsheet])
 
   const handleSend = async (content: string, images: ImageAttachment[], files: FileAttachment[]) => {
+    let convId = activeConversationId
+    if (!convId) {
+      convId = createConversation()
+    }
+
+    const previousMessages = useChatStore.getState().conversations.find((c) => c.id === convId)?.messages ?? []
+
+    if (inputMode === 'image') {
+      const imageConfig = resolveImageGenerationConfig(settings)
+      if (!imageConfig) {
+        addMessage(convId, {
+          role: 'assistant',
+          content: '请先在设置中为至少一个模型开启“生图”能力，或配置默认生图模型。',
+        })
+        return
+      }
+
+      addMessage(convId, {
+        role: 'user',
+        content,
+        metadata: { kind: 'image_generation' },
+      })
+
+      const conv = useChatStore.getState().conversations.find((c) => c.id === convId)
+      if (conv && conv.messages.length === 1) {
+        const title = content.length > 30 ? content.slice(0, 30) + '...' : content
+        updateConversationTitle(convId, title || '生图对话')
+      }
+
+      setConversationStreaming(convId, true)
+      try {
+        const result = await generateImage(imageConfig, {
+          prompt: content,
+          size: settings.imageGeneration.size,
+          quality: settings.imageGeneration.quality,
+        })
+
+        if (!result.ok || !result.imageBase64) {
+          addMessage(convId, {
+            role: 'assistant',
+            content: result.error || '生成图片失败，请稍后重试。',
+            metadata: { kind: 'image_generation' },
+          })
+          return
+        }
+
+        const generatedAt = Date.now()
+        addMessage(convId, {
+          role: 'assistant',
+          content: result.revisedPrompt ? `已生成图片。\n\n优化后的提示词：${result.revisedPrompt}` : '已生成图片。',
+          images: [{
+            id: `generated-${generatedAt}`,
+            base64: result.imageBase64,
+            name: `generated-${generatedAt}.png`,
+          }],
+          metadata: {
+            kind: 'image_generation',
+            revisedPrompt: result.revisedPrompt,
+          },
+        })
+      } finally {
+        setConversationStreaming(convId, false)
+      }
+      return
+    }
+
     const apiConfig = resolveApiConfig(settings.providers, settings.activeModel)
     if (!apiConfig) return
 
@@ -255,13 +346,6 @@ export default function ChatView() {
       selection: workspaceState.selection,
     })
     const isDocumentAction = workspaceState.pendingAction !== 'chat'
-
-    let convId = activeConversationId
-    if (!convId) {
-      convId = createConversation()
-    }
-
-    const previousMessages = useChatStore.getState().conversations.find((c) => c.id === convId)?.messages ?? []
 
     // Build message content — file contents are injected at API call time, not stored in message
     let messageContent = content
@@ -559,7 +643,9 @@ export default function ChatView() {
     controller?.abort()
   }
 
-  const apiConfigured = resolveApiConfig(settings.providers, settings.activeModel) !== null
+  const apiConfigured = inputMode === 'image'
+    ? resolveImageGenerationConfig(settings) !== null
+    : resolveApiConfig(settings.providers, settings.activeModel) !== null
 
   // Empty state
   if (!activeConversationId) {
@@ -645,10 +731,13 @@ export default function ChatView() {
         onSend={handleSend}
         onStop={handleStop}
         onExportSpreadsheet={handleExportSpreadsheet}
+        inputMode={inputMode}
+        onInputModeChange={setInputMode}
         hasSpreadsheetSession={Boolean(latestSpreadsheet?.spreadsheetSessionId)}
         spreadsheetName={latestSpreadsheet?.name ?? null}
         isExportingSpreadsheet={isExportingSpreadsheet}
         isStreaming={isCurrentStreaming}
+        isImageGenerating={isImageGenerating}
         disabled={!apiConfigured}
         contextStats={contextStats}
       />

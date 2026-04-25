@@ -136,6 +136,22 @@ interface CompleteChatRequest {
   maxTokens: number
 }
 
+interface GenerateImageRequest {
+  baseUrl: string
+  apiKey: string
+  model: string
+  prompt: string
+  size: '1024x1024' | '1024x1536' | '1536x1024'
+  quality: 'auto' | 'low' | 'medium' | 'high'
+}
+
+interface GenerateImageResult {
+  ok: boolean
+  imageBase64?: string
+  revisedPrompt?: string
+  error?: string
+}
+
 type ChatStreamEvent =
   | { streamId: string; type: 'chunk'; chunk: string }
   | { streamId: string; type: 'done' }
@@ -167,6 +183,7 @@ interface ElectronAPI {
   exportSpreadsheetSession: (sessionId: string) => Promise<ExportSpreadsheetSessionResult>
   testApiConnection: (config: ApiConnectionConfig) => Promise<ApiConnectionTestResult>
   completeChat: (request: CompleteChatRequest) => Promise<string>
+  generateImage: (request: GenerateImageRequest) => Promise<GenerateImageResult>
   startChatStream: (request: StartChatStreamRequest) => Promise<boolean>
   cancelChatStream: (streamId: string) => Promise<boolean>
   subscribeChatStreamEvents: (listener: (event: ChatStreamEvent) => void) => number

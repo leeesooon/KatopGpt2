@@ -112,6 +112,22 @@ interface CompleteChatRequest {
   maxTokens: number
 }
 
+interface GenerateImageRequest {
+  baseUrl: string
+  apiKey: string
+  model: string
+  prompt: string
+  size: '1024x1024' | '1024x1536' | '1536x1024'
+  quality: 'auto' | 'low' | 'medium' | 'high'
+}
+
+interface GenerateImageResult {
+  ok: boolean
+  imageBase64?: string
+  revisedPrompt?: string
+  error?: string
+}
+
 interface ChatCompletionChunk {
   choices: Array<{
     delta: { content?: string; role?: string }
@@ -167,6 +183,12 @@ function openExternalUrl(rawUrl: string) {
 
 function normalizeApiBaseUrl(baseUrl: string) {
   return baseUrl.trim().replace(/\/+$/, '')
+}
+
+function normalizeImageDataUrl(value: string, mimeType = 'image/png') {
+  const trimmed = value.trim()
+  if (trimmed.startsWith('data:image/')) return trimmed
+  return `data:${mimeType};base64,${trimmed}`
 }
 
 function normalizeRelativeWorkspacePath(relativePath: string) {
@@ -508,6 +530,84 @@ async function completeChat(request: CompleteChatRequest) {
   }
 
   return text
+}
+
+async function generateImage(request: GenerateImageRequest): Promise<GenerateImageResult> {
+  const baseUrl = normalizeApiBaseUrl(request.baseUrl)
+  const url = `${baseUrl}/images/generations`
+  const prompt = request.prompt.trim()
+
+  if (!request.apiKey.trim()) {
+    return { ok: false, error: '请先在设置中填写生图模型的 API Key。' }
+  }
+
+  if (!prompt) {
+    return { ok: false, error: '请输入要生成的图片描述。' }
+  }
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${request.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: request.model,
+        prompt,
+        n: 1,
+        size: request.size,
+        quality: request.quality,
+      }),
+    })
+
+    if (!response.ok) {
+      const { message } = await readApiError(response)
+      return { ok: false, error: message }
+    }
+
+    const payload = await response.json() as {
+      data?: Array<{
+        b64_json?: string
+        url?: string
+        revised_prompt?: string
+      }>
+    }
+    const firstImage = payload.data?.[0]
+
+    if (!firstImage) {
+      return { ok: false, error: '生图接口没有返回图片数据。' }
+    }
+
+    if (firstImage.b64_json) {
+      return {
+        ok: true,
+        imageBase64: normalizeImageDataUrl(firstImage.b64_json),
+        revisedPrompt: firstImage.revised_prompt,
+      }
+    }
+
+    if (firstImage.url) {
+      const imageResponse = await fetch(firstImage.url)
+      if (!imageResponse.ok) {
+        return { ok: false, error: '图片已生成，但下载图片失败。' }
+      }
+      const imageBuffer = Buffer.from(await imageResponse.arrayBuffer())
+      const mimeType = imageResponse.headers.get('content-type') || 'image/png'
+      return {
+        ok: true,
+        imageBase64: normalizeImageDataUrl(imageBuffer.toString('base64'), mimeType),
+        revisedPrompt: firstImage.revised_prompt,
+      }
+    }
+
+    return { ok: false, error: '生图接口返回格式不受支持。' }
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : '生成图片失败。',
+    }
+  }
 }
 
 function sendChatStreamEvent(sender: WebContents, payload: ChatStreamEvent) {
@@ -910,6 +1010,7 @@ ipcMain.handle('files:executeSpreadsheetPlan', (_event, request: ExecuteSpreadsh
 ipcMain.handle('files:exportSpreadsheetSession', (_event, sessionId: string) => exportSpreadsheetSessionToFile(sessionId))
 ipcMain.handle('api:testConnection', (_event, config: ApiConnectionConfig) => testApiConnection(config))
 ipcMain.handle('api:completeChat', (_event, request: CompleteChatRequest) => completeChat(request))
+ipcMain.handle('api:generateImage', (_event, request: GenerateImageRequest) => generateImage(request))
 ipcMain.handle('api:startChatStream', (event, request: StartChatStreamRequest) => {
   if (activeApiStreams.has(request.streamId)) {
     throw new Error('聊天流已存在')

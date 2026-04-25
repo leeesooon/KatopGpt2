@@ -1,4 +1,4 @@
-import type { ApiConfig, Message, ImageAttachment, FileAttachment } from '../types'
+import type { ApiConfig, Message, ImageAttachment, FileAttachment, ImageGenerationQuality, ImageGenerationSize } from '../types'
 
 export class ChatApiError extends Error {
   constructor(
@@ -26,6 +26,19 @@ interface ParsedStreamLine {
 interface ApiConnectionTestResult {
   ok: boolean
   status?: number
+  error?: string
+}
+
+export interface GenerateImageRequest {
+  prompt: string
+  size: ImageGenerationSize
+  quality: ImageGenerationQuality
+}
+
+export interface GenerateImageResult {
+  ok: boolean
+  imageBase64?: string
+  revisedPrompt?: string
   error?: string
 }
 
@@ -510,6 +523,27 @@ export async function parseSpreadsheetIntent(
       ? parsed.plan as SpreadsheetExecutionPlan
       : undefined,
   }
+}
+
+export async function generateImage(
+  config: ApiConfig,
+  request: GenerateImageRequest
+): Promise<GenerateImageResult> {
+  if (!window.electronAPI?.generateImage) {
+    return {
+      ok: false,
+      error: '当前环境不支持生图接口，请在 Electron 应用中使用。',
+    }
+  }
+
+  return window.electronAPI.generateImage({
+    baseUrl: config.baseUrl,
+    apiKey: config.apiKey,
+    model: config.model,
+    prompt: request.prompt,
+    size: request.size,
+    quality: request.quality,
+  })
 }
 
 /** Non-streaming test call to verify API config */

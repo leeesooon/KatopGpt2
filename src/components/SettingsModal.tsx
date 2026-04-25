@@ -1,11 +1,11 @@
 import { useState } from 'react'
 import {
   X, Eye, EyeOff, CheckCircle, AlertCircle, Loader2,
-  Plus, Trash2, ChevronDown, ChevronUp, Server, ImageIcon,
+  Plus, Trash2, ChevronDown, ChevronUp, Server, ImageIcon, Sparkles,
 } from 'lucide-react'
 import { useChatStore } from '../store/chatStore'
 import { testApiConnection } from '../services/chatApi'
-import type { ApiProvider, ModelConfig } from '../types'
+import type { ApiProvider, ImageGenerationQuality, ImageGenerationSize, ModelConfig } from '../types'
 import { openExternalUrl } from '../utils/externalLinks'
 
 interface ProviderFormData {
@@ -57,6 +57,10 @@ export default function SettingsModal() {
   const [enableSearchByDefault, setEnableSearchByDefault] = useState(settings.enableSearchByDefault)
   const [showSerperKey, setShowSerperKey] = useState(false)
   const [showTavilyKey, setShowTavilyKey] = useState(false)
+  const [imageProviderId, setImageProviderId] = useState(settings.imageGeneration.providerId ?? '')
+  const [imageModel, setImageModel] = useState(settings.imageGeneration.model ?? '')
+  const [imageSize, setImageSize] = useState<ImageGenerationSize>(settings.imageGeneration.size)
+  const [imageQuality, setImageQuality] = useState<ImageGenerationQuality>(settings.imageGeneration.quality)
 
   if (!isSettingsOpen) return null
 
@@ -83,7 +87,7 @@ export default function SettingsModal() {
   const handleAddModel = (form: ProviderFormData, setFn: (f: ProviderFormData) => void) => {
     const modelName = form.modelInput.trim()
     if (!modelName || form.models.some((m) => m.name === modelName)) return
-    setFn({ ...form, models: [...form.models, { name: modelName, multimodal: false }], modelInput: '' })
+    setFn({ ...form, models: [...form.models, { name: modelName, multimodal: false, capabilities: { chat: true, vision: false, imageGeneration: false } }], modelInput: '' })
   }
 
   const handleRemoveModel = (form: ProviderFormData, setFn: (f: ProviderFormData) => void, modelName: string) => {
@@ -94,7 +98,23 @@ export default function SettingsModal() {
     setFn({
       ...form,
       models: form.models.map((m) =>
-        m.name === modelName ? { ...m, multimodal: !m.multimodal } : m
+        m.name === modelName ? {
+          ...m,
+          multimodal: !m.multimodal,
+          capabilities: { ...m.capabilities, chat: true, vision: !m.multimodal },
+        } : m
+      ),
+    })
+  }
+
+  const handleToggleImageGeneration = (form: ProviderFormData, setFn: (f: ProviderFormData) => void, modelName: string) => {
+    setFn({
+      ...form,
+      models: form.models.map((m) =>
+        m.name === modelName ? {
+          ...m,
+          capabilities: { ...m.capabilities, chat: true, imageGeneration: !(m.capabilities?.imageGeneration ?? false) },
+        } : m
       ),
     })
   }
@@ -174,6 +194,13 @@ export default function SettingsModal() {
       serperApiKey,
       tavilyApiKey,
       enableSearchByDefault,
+      imageGeneration: {
+        providerId: imageProviderId || undefined,
+        model: imageModel || undefined,
+        size: imageSize,
+        quality: imageQuality,
+        count: 1,
+      },
     })
     setSettingsOpen(false)
   }
@@ -208,6 +235,17 @@ export default function SettingsModal() {
               title={model.multimodal ? '多模态已开启' : '点击开启多模态'}
             >
               <ImageIcon size={11} />
+            </button>
+            <button
+              onClick={() => handleToggleImageGeneration(form, setFn, model.name)}
+              className={`ml-0.5 p-0.5 rounded transition-colors ${
+                model.capabilities?.imageGeneration
+                  ? 'text-fuchsia-400 hover:text-fuchsia-300'
+                  : 'text-surface-500 hover:text-surface-300'
+              }`}
+              title={model.capabilities?.imageGeneration ? '生图已开启' : '点击开启生图'}
+            >
+              <Sparkles size={11} />
             </button>
             <button
               onClick={() => handleRemoveModel(form, setFn, model.name)}
@@ -559,6 +597,62 @@ export default function SettingsModal() {
                 />
               </button>
             </div>
+          </section>
+
+          <section className="space-y-4">
+            <h3 className="text-sm font-semibold text-surface-300 uppercase tracking-wider">
+              生图模式
+            </h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-surface-400">生图服务商</label>
+                <select
+                  value={imageProviderId}
+                  onChange={(e) => {
+                    setImageProviderId(e.target.value)
+                    setImageModel('')
+                  }}
+                  className="input-field"
+                >
+                  <option value="">自动选择已开启生图的模型</option>
+                  {settings.providers.map((provider) => (
+                    <option key={provider.id} value={provider.id}>{provider.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-surface-400">生图模型</label>
+                <select
+                  value={imageModel}
+                  onChange={(e) => setImageModel(e.target.value)}
+                  className="input-field"
+                >
+                  <option value="">自动选择</option>
+                  {(settings.providers.find((provider) => provider.id === imageProviderId)?.models ?? [])
+                    .map((model) => <option key={model.name} value={model.name}>{model.name}</option>)}
+                </select>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-surface-400">图片尺寸</label>
+                <select value={imageSize} onChange={(e) => setImageSize(e.target.value as ImageGenerationSize)} className="input-field">
+                  <option value="1024x1024">1024×1024 方图</option>
+                  <option value="1024x1536">1024×1536 竖图</option>
+                  <option value="1536x1024">1536×1024 横图</option>
+                </select>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-surface-400">图片质量</label>
+                <select value={imageQuality} onChange={(e) => setImageQuality(e.target.value as ImageGenerationQuality)} className="input-field">
+                  <option value="auto">自动</option>
+                  <option value="low">低</option>
+                  <option value="medium">中</option>
+                  <option value="high">高</option>
+                </select>
+              </div>
+            </div>
+            <p className="text-[10px] text-surface-500">
+              使用 OpenAI 兼容的 /images/generations 接口。请在模型标签上点亮“生图”能力，API Key 仍保存在对应服务商配置中。
+            </p>
           </section>
 
           {/* === General Parameters === */}

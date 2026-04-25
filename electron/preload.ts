@@ -130,6 +130,22 @@ interface CompleteChatRequest {
   maxTokens: number
 }
 
+interface GenerateImageRequest {
+  baseUrl: string
+  apiKey: string
+  model: string
+  prompt: string
+  size: '1024x1024' | '1024x1536' | '1536x1024'
+  quality: 'auto' | 'low' | 'medium' | 'high'
+}
+
+interface GenerateImageResult {
+  ok: boolean
+  imageBase64?: string
+  revisedPrompt?: string
+  error?: string
+}
+
 type ChatStreamEvent =
   | { streamId: string; type: 'chunk'; chunk: string }
   | { streamId: string; type: 'done' }
@@ -192,6 +208,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   exportSpreadsheetSession: (sessionId: string) => ipcRenderer.invoke('files:exportSpreadsheetSession', sessionId),
   testApiConnection: (config: ApiConnectionConfig) => ipcRenderer.invoke('api:testConnection', config),
   completeChat: (request: CompleteChatRequest) => ipcRenderer.invoke('api:completeChat', request),
+  generateImage: (request: GenerateImageRequest) => ipcRenderer.invoke('api:generateImage', request),
   startChatStream: (request: StartChatStreamRequest) => ipcRenderer.invoke('api:startChatStream', request),
   cancelChatStream: (streamId: string) => ipcRenderer.invoke('api:cancelChatStream', streamId),
   subscribeChatStreamEvents: (listener: (event: ChatStreamEvent) => void) => {

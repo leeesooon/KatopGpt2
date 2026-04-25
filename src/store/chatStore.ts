@@ -35,7 +35,7 @@ interface ChatState {
   setActiveModel: (selection: ModelSelection | null) => void
 
   // Settings actions
-  updateSettings: (settings: Partial<Pick<AppSettings, 'systemPrompt' | 'temperature' | 'maxTokens' | 'contextWindowSize' | 'searchEngine' | 'serperApiKey' | 'tavilyApiKey' | 'enableSearchByDefault'>>) => void
+  updateSettings: (settings: Partial<Pick<AppSettings, 'systemPrompt' | 'temperature' | 'maxTokens' | 'contextWindowSize' | 'searchEngine' | 'serperApiKey' | 'tavilyApiKey' | 'enableSearchByDefault' | 'imageGeneration'>>) => void
   setSettingsOpen: (open: boolean) => void
 
   // Streaming — per conversation
@@ -243,7 +243,7 @@ export const useChatStore = create<ChatState>()(
     }),
     {
       name: 'katop-gpt-storage',
-      version: 5,
+      version: 6,
       partialize: (state) => ({
         conversations: state.conversations,
         activeConversationId: state.activeConversationId,
@@ -327,6 +327,35 @@ export const useChatStore = create<ChatState>()(
             }
             if (settings.enableSearchByDefault == null) {
               settings.enableSearchByDefault = false
+            }
+          }
+        }
+        if (version <= 5) {
+          const settings = state.settings as AppSettings | undefined
+          if (settings) {
+            settings.imageGeneration = {
+              ...DEFAULT_SETTINGS.imageGeneration,
+              ...settings.imageGeneration,
+              count: 1,
+            }
+            if (settings.providers) {
+              settings.providers = settings.providers.map((provider) => ({
+                ...provider,
+                models: provider.models.map((model) => {
+                  if (typeof model === 'string') {
+                    return { name: model, multimodal: false }
+                  }
+                  return {
+                    ...model,
+                    capabilities: {
+                      chat: true,
+                      vision: model.capabilities?.vision ?? model.multimodal ?? false,
+                      imageGeneration: model.capabilities?.imageGeneration ?? false,
+                      ...model.capabilities,
+                    },
+                  }
+                }) as ModelConfig[],
+              }))
             }
           }
         }

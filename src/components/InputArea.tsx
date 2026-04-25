@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { Send, Square, ImagePlus, Paperclip, X, FileText, Search, Loader2, BookOpenText, SquareArrowOutUpRight, Download } from 'lucide-react'
+﻿import { useEffect, useMemo, useRef, useState } from 'react'
+import { Send, Square, ImagePlus, Paperclip, X, FileText, Search, Loader2, BookOpenText, SquareArrowOutUpRight, Download, Sparkles } from 'lucide-react'
 import { v4 as uuidv4 } from 'uuid'
 import ModelSelector from './ModelSelector'
 import { useChatStore } from '../store/chatStore'
 import { useWorkspaceStore } from '../store/workspaceStore'
-import type { DocumentAgentMode, ImageAttachment, FileAttachment } from '../types'
+import type { ChatInputMode, DocumentAgentMode, ImageAttachment, FileAttachment } from '../types'
 
 const EXTRACTABLE_DOCUMENT_EXTENSIONS = ['.pptx', '.pdf', '.docx', '.xlsx', '.csv']
 
@@ -54,10 +54,13 @@ interface InputAreaProps {
   onSend: (content: string, images: ImageAttachment[], files: FileAttachment[]) => void
   onStop: () => void
   onExportSpreadsheet?: () => void
+  inputMode: ChatInputMode
+  onInputModeChange: (mode: ChatInputMode) => void
   hasSpreadsheetSession?: boolean
   spreadsheetName?: string | null
   isExportingSpreadsheet?: boolean
   isStreaming: boolean
+  isImageGenerating?: boolean
   disabled: boolean
   contextStats: {
     messageCount: number
@@ -69,10 +72,13 @@ export default function InputArea({
   onSend,
   onStop,
   onExportSpreadsheet,
+  inputMode,
+  onInputModeChange,
   hasSpreadsheetSession = false,
   spreadsheetName = null,
   isExportingSpreadsheet = false,
   isStreaming,
+  isImageGenerating = false,
   disabled,
   contextStats,
 }: InputAreaProps) {
@@ -103,12 +109,21 @@ export default function InputArea({
   const fileInputRef = useRef<HTMLInputElement>(null)
   const dragCounterRef = useRef(0)
   const isProcessingFiles = pendingFiles.length > 0
+  const isImageMode = inputMode === 'image'
 
   useEffect(() => {
     if (!isStreaming && textareaRef.current) {
       textareaRef.current.focus()
     }
   }, [isStreaming])
+
+  useEffect(() => {
+    if (isImageMode) {
+      setImages([])
+      setFiles([])
+      setAttachmentError(null)
+    }
+  }, [isImageMode])
 
   useEffect(() => {
     if (!composerDraft) return
@@ -145,6 +160,7 @@ export default function InputArea({
 
   const handleSend = () => {
     const trimmed = input.trim()
+    if (isImageMode && (!trimmed || disabled || isProcessingFiles)) return
     if ((!trimmed && images.length === 0 && files.length === 0) || disabled || isProcessingFiles) return
     onSend(trimmed, images, files)
     setInput('')
@@ -353,7 +369,9 @@ export default function InputArea({
   }
 
   const placeholder = pendingAction === 'chat'
-    ? '输入消息... (Enter 发送, Shift+Enter 换行, 可拖拽文件)'
+    ? isImageMode
+      ? '描述你想生成的图片... (Enter 生成, Shift+Enter 换行)'
+      : '输入消息... (Enter 发送, Shift+Enter 换行, 可拖拽文件)'
     : `当前模式：${actionLabelMap[pendingAction]}，继续补充你的要求后发送`
 
   const contextIndicator = useMemo(() => {
@@ -410,8 +428,32 @@ export default function InputArea({
 
       <div className="max-w-3xl mx-auto">
         <div className="mb-2 flex items-center gap-2">
+          <div className="inline-flex rounded-full border border-white/10 bg-white/5 p-0.5 text-xs">
+            <button
+              onClick={() => onInputModeChange('chat')}
+              disabled={isStreaming}
+              className={`rounded-full px-3 py-1 transition disabled:opacity-50 ${
+                !isImageMode ? 'bg-primary-500/20 text-primary-200' : 'text-surface-400 hover:text-white'
+              }`}
+              title="切换到聊天模式"
+            >
+              聊天
+            </button>
+            <button
+              onClick={() => onInputModeChange('image')}
+              disabled={isStreaming}
+              className={`inline-flex items-center gap-1 rounded-full px-3 py-1 transition disabled:opacity-50 ${
+                isImageMode ? 'bg-fuchsia-500/20 text-fuchsia-200' : 'text-surface-400 hover:text-white'
+              }`}
+              title="切换到生图模式"
+            >
+              <Sparkles size={12} />
+              生图
+            </button>
+          </div>
           <button
             onClick={() => void handleToggleDocumentAssistant()}
+            disabled={isImageMode}
             className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs transition ${
               isDocumentAssistantOpen
                 ? 'border-amber-300/20 bg-amber-300/10 text-amber-100'
@@ -427,7 +469,7 @@ export default function InputArea({
               绑定到当前对话
             </span>
           )}
-          {hasSpreadsheetSession && onExportSpreadsheet && (
+          {!isImageMode && hasSpreadsheetSession && onExportSpreadsheet && (
             <button
               onClick={onExportSpreadsheet}
               disabled={disabled || isExportingSpreadsheet}
@@ -563,7 +605,7 @@ export default function InputArea({
             {(settings.serperApiKey || settings.tavilyApiKey) && (
               <button
                 onClick={() => setSearchEnabled(!searchEnabled)}
-                disabled={disabled || isStreaming}
+                disabled={disabled || isStreaming || isImageMode}
                 className={`shrink-0 p-2 rounded-lg transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed ${
                   searchEnabled
                     ? 'bg-primary-500/20 text-primary-400 hover:bg-primary-500/30'
@@ -579,7 +621,7 @@ export default function InputArea({
             {/* Image upload button */}
             <button
               onClick={() => imageInputRef.current?.click()}
-              disabled={disabled || isStreaming}
+              disabled={disabled || isStreaming || isImageMode}
               className="shrink-0 p-2 hover:bg-surface-700/50 text-surface-400 hover:text-surface-200
                          rounded-lg transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed"
               title="添加图片"
@@ -598,7 +640,7 @@ export default function InputArea({
             {/* File upload button */}
             <button
               onClick={() => fileInputRef.current?.click()}
-              disabled={disabled || isStreaming}
+              disabled={disabled || isStreaming || isImageMode}
               className="shrink-0 p-2 hover:bg-surface-700/50 text-surface-400 hover:text-surface-200
                          rounded-lg transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed"
               title="添加文件"
@@ -641,13 +683,13 @@ export default function InputArea({
             ) : (
               <button
                 onClick={handleSend}
-                disabled={(!input.trim() && images.length === 0 && files.length === 0) || disabled || isProcessingFiles}
+                disabled={(isImageMode ? !input.trim() : (!input.trim() && images.length === 0 && files.length === 0)) || disabled || isProcessingFiles}
                 className="shrink-0 p-2 bg-primary-600 hover:bg-primary-500 text-white
                            rounded-lg transition-all duration-200 active:scale-95
                            disabled:opacity-30 disabled:cursor-not-allowed"
-                title={isProcessingFiles ? '请等待文档提取完成' : '发送'}
+                title={isProcessingFiles ? '请等待文档提取完成' : isImageMode ? '生成图片' : '发送'}
               >
-                <Send size={18} />
+                {isImageMode ? <Sparkles size={18} /> : <Send size={18} />}
               </button>
             )}
           </div>
@@ -662,3 +704,4 @@ export default function InputArea({
     </div>
   )
 }
+

@@ -347,6 +347,19 @@ const MessageBubble = memo(function MessageBubble({ message }: MessageBubbleProp
           </div>
         ) : (
           <>
+            {message.images && message.images.length > 0 && (
+              <div className="flex flex-wrap gap-2 mb-3">
+                {message.images.map((img) => (
+                  <img
+                    key={img.id}
+                    src={img.base64}
+                    alt={img.name}
+                    className="max-w-[360px] max-h-[360px] rounded-xl object-contain border border-surface-600/30 cursor-pointer hover:opacity-90 transition-opacity bg-surface-900/40"
+                    onClick={() => window.open(img.base64, '_blank')}
+                  />
+                ))}
+              </div>
+            )}
             <div className="markdown-body text-sm">
               <ReactMarkdown 
                 remarkPlugins={[remarkGfm]} 
