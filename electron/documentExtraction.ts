@@ -1,7 +1,12 @@
 import { randomUUID } from 'crypto'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'fs/promises'
 import JSZip from 'jszip'
+import os from 'os'
+import path from 'path'
+import { spawn } from 'child_process'
 import { Script, createContext } from 'vm'
 import * as XLSX from 'xlsx'
+import { z } from 'zod'
 
 export interface ExtractDocumentTextRequest {
   fileName: string
@@ -30,7 +35,7 @@ export interface SpreadsheetPlanFilter {
 }
 
 export interface SpreadsheetExecutionPlan {
-  intent: 'count' | 'sum' | 'avg' | 'chart' | 'export' | 'script' | 'filter_rows'
+  intent: 'count' | 'sum' | 'avg' | 'chart' | 'export' | 'script' | 'filter_rows' | 'analysis' | 'detail_filter' | 'aggregation'
   sourceSheetName?: string
   groupByColumns?: string[]
   valueColumn?: string
@@ -42,11 +47,70 @@ export interface SpreadsheetExecutionPlan {
   targetSheetName?: string
   useLastCreatedSheet?: boolean
   topN?: number
+  steps?: SpreadsheetPlanStep[]
+  explanation?: string
   script?: {
-    language: 'javascript'
+    language: 'python' | 'javascript'
     code: string
     summary?: string
   }
+}
+
+export type SpreadsheetPlanStep =
+  | {
+      op: 'filter'
+      conditions: SpreadsheetPlanFilter[]
+    }
+  | {
+      op: 'group_by'
+      columns: string[]
+    }
+  | {
+      op: 'aggregate'
+      metrics: Array<{
+        type: 'count' | 'sum' | 'avg'
+        column?: string
+        as?: string
+      }>
+    }
+  | {
+      op: 'sort'
+      by: string
+      direction: 'asc' | 'desc'
+    }
+  | {
+      op: 'top_n'
+      value: number
+    }
+  | {
+      op: 'select_columns'
+      columns: string[]
+    }
+  | {
+      op: 'chart'
+      chartType: SpreadsheetChartType
+    }
+  | {
+      op: 'export'
+      target: 'new_sheet' | 'excel_file'
+      sheetName?: string
+    }
+
+type SpreadsheetToolName = SpreadsheetPlanStep['op']
+
+interface SpreadsheetToolExecutionState {
+  intent: SpreadsheetExecutionPlan['intent']
+  filters: SpreadsheetPlanFilter[]
+  groupByColumns: string[]
+  valueColumn?: string
+  selectColumns: string[]
+  sortBy?: string
+  sortDirection?: 'asc' | 'desc'
+  chartType?: SpreadsheetChartType
+  targetSheetName?: string
+  exportTarget?: 'new_sheet' | 'excel_file'
+  topN?: number
+  explanation?: string
 }
 
 export interface ExecuteSpreadsheetPlanRequest {
@@ -71,6 +135,7 @@ export interface ExportSpreadsheetSessionResult {
 export interface SpreadsheetColumnSchema {
   name: string
   inferredType: 'string' | 'number' | 'boolean' | 'date' | 'mixed' | 'empty'
+  aliases?: string[]
 }
 
 export interface SpreadsheetSheetSchema {
@@ -95,6 +160,7 @@ const MAX_SPREADSHEET_SAMPLE_ROWS = 6
 const MAX_SPREADSHEET_SAMPLE_COLUMNS = 10
 const MAX_SPREADSHEET_PREVIEW_ROWS = 8
 const SCRIPT_EXECUTION_TIMEOUT_MS = 1500
+const PYTHON_SCRIPT_TIMEOUT_MS = 20000
 
 interface SpreadsheetSession {
   sessionId: string
@@ -410,6 +476,24 @@ function parseWorkbook(buffer: Buffer, fileType: SpreadsheetDocumentType) {
   })
 }
 
+function buildColumnAliases(name: string) {
+  const aliases = new Set<string>()
+  const trimmed = name.trim()
+  if (!trimmed) return []
+
+  aliases.add(trimmed)
+  aliases.add(trimmed.replace(/[\s_\-()（）【】\[\]：:]/g, ''))
+
+  if (trimmed.includes('岗位')) aliases.add('职位')
+  if (trimmed.includes('职位')) aliases.add('岗位')
+  if (trimmed.includes('部门')) aliases.add('所属部门')
+  if (trimmed.includes('所属部门')) aliases.add('部门')
+  if (trimmed.includes('姓名')) aliases.add('人员')
+  if (trimmed.includes('责任人')) aliases.add('负责人')
+
+  return Array.from(aliases).filter(Boolean)
+}
+
 function inferColumnType(values: string[]): SpreadsheetColumnSchema['inferredType'] {
   const samples = values.filter(Boolean).slice(0, 20)
   if (samples.length === 0) return 'empty'
@@ -437,6 +521,7 @@ function buildWorkbookSchema(workbook: XLSX.WorkBook): SpreadsheetWorkbookSchema
         return {
           name,
           inferredType: inferColumnType(values),
+          aliases: buildColumnAliases(name),
         }
       })
 
@@ -635,20 +720,206 @@ function resolveSheetHeaders(workbook: XLSX.WorkBook, sheetName?: string) {
   return { resolvedSheetName, headers }
 }
 
+const spreadsheetPlanFilterSchema = z.object({
+  column: z.string().min(1),
+  operator: z.enum(['eq', 'contains', 'gt', 'gte', 'lt', 'lte']),
+  value: z.string(),
+})
+
+const spreadsheetToolStepSchemas = {
+  filter: z.object({
+    op: z.literal('filter'),
+    conditions: z.array(spreadsheetPlanFilterSchema).min(1),
+  }),
+  group_by: z.object({
+    op: z.literal('group_by'),
+    columns: z.array(z.string().min(1)).min(1),
+  }),
+  aggregate: z.object({
+    op: z.literal('aggregate'),
+    metrics: z.array(z.object({
+      type: z.enum(['count', 'sum', 'avg']),
+      column: z.string().optional(),
+      as: z.string().optional(),
+    })).min(1),
+  }),
+  sort: z.object({
+    op: z.literal('sort'),
+    by: z.string().min(1),
+    direction: z.enum(['asc', 'desc']),
+  }),
+  top_n: z.object({
+    op: z.literal('top_n'),
+    value: z.number().int().positive(),
+  }),
+  select_columns: z.object({
+    op: z.literal('select_columns'),
+    columns: z.array(z.string().min(1)).min(1),
+  }),
+  chart: z.object({
+    op: z.literal('chart'),
+    chartType: z.enum(['bar', 'line', 'pie', 'horizontalBar']),
+  }),
+  export: z.object({
+    op: z.literal('export'),
+    target: z.enum(['new_sheet', 'excel_file']),
+    sheetName: z.string().optional(),
+  }),
+} satisfies Record<SpreadsheetToolName, z.ZodTypeAny>
+
+type SpreadsheetToolHandler<Name extends SpreadsheetToolName> = {
+  schema: typeof spreadsheetToolStepSchemas[Name]
+  apply: (state: SpreadsheetToolExecutionState, step: z.infer<typeof spreadsheetToolStepSchemas[Name]>) => void
+}
+
+const spreadsheetToolRegistry: { [K in SpreadsheetToolName]: SpreadsheetToolHandler<K> } = {
+  filter: {
+    schema: spreadsheetToolStepSchemas.filter,
+    apply: (state, step) => {
+      state.filters.push(...step.conditions)
+    },
+  },
+  group_by: {
+    schema: spreadsheetToolStepSchemas.group_by,
+    apply: (state, step) => {
+      state.groupByColumns = step.columns
+    },
+  },
+  aggregate: {
+    schema: spreadsheetToolStepSchemas.aggregate,
+    apply: (state, step) => {
+      const primaryMetric = step.metrics[0]
+      state.intent = primaryMetric.type
+      state.valueColumn = primaryMetric.column
+    },
+  },
+  sort: {
+    schema: spreadsheetToolStepSchemas.sort,
+    apply: (state, step) => {
+      state.sortBy = step.by
+      state.sortDirection = step.direction
+    },
+  },
+  top_n: {
+    schema: spreadsheetToolStepSchemas.top_n,
+    apply: (state, step) => {
+      state.topN = step.value
+    },
+  },
+  select_columns: {
+    schema: spreadsheetToolStepSchemas.select_columns,
+    apply: (state, step) => {
+      state.selectColumns = step.columns
+    },
+  },
+  chart: {
+    schema: spreadsheetToolStepSchemas.chart,
+    apply: (state, step) => {
+      state.chartType = step.chartType
+      if (state.intent === 'analysis') {
+        state.intent = 'chart'
+      }
+    },
+  },
+  export: {
+    schema: spreadsheetToolStepSchemas.export,
+    apply: (state, step) => {
+      state.exportTarget = step.target
+      if (step.sheetName) {
+        state.targetSheetName = step.sheetName
+      }
+      if (step.target === 'excel_file') {
+        state.intent = 'export'
+      } else if (state.intent === 'analysis' || state.intent === 'detail_filter') {
+        state.intent = 'filter_rows'
+      }
+    },
+  },
+}
+
+function applySpreadsheetToolSteps(plan: SpreadsheetExecutionPlan) {
+  const state: SpreadsheetToolExecutionState = {
+    intent: plan.intent,
+    filters: [...(plan.filters ?? [])],
+    groupByColumns: [...(plan.groupByColumns ?? [])],
+    valueColumn: plan.valueColumn,
+    selectColumns: [...(plan.selectColumns ?? [])],
+    sortBy: plan.sortBy,
+    sortDirection: plan.sortDirection,
+    chartType: plan.chartType,
+    targetSheetName: plan.targetSheetName,
+    exportTarget: undefined,
+    topN: plan.topN,
+    explanation: plan.explanation,
+  }
+
+  for (const rawStep of plan.steps ?? []) {
+    const handler = spreadsheetToolRegistry[rawStep.op]
+    const step = handler.schema.parse(rawStep)
+    handler.apply(state, step as never)
+  }
+
+  return state
+}
+
+function normalizeStepBasedPlan(plan: SpreadsheetExecutionPlan): SpreadsheetExecutionPlan {
+  if (!plan.steps || plan.steps.length === 0) {
+    return plan
+  }
+
+  const toolState = applySpreadsheetToolSteps(plan)
+
+  const normalized: SpreadsheetExecutionPlan = {
+    ...plan,
+    intent: toolState.intent,
+    filters: toolState.filters,
+    groupByColumns: toolState.groupByColumns,
+    valueColumn: toolState.valueColumn,
+    selectColumns: toolState.selectColumns,
+    sortBy: toolState.sortBy,
+    sortDirection: toolState.sortDirection,
+    chartType: toolState.chartType,
+    targetSheetName: toolState.targetSheetName,
+    topN: toolState.topN,
+    explanation: toolState.explanation,
+  }
+
+  if (plan.intent === 'analysis' || plan.intent === 'aggregation') {
+    if (normalized.groupByColumns?.length) {
+      normalized.intent = normalized.valueColumn ? (normalized.intent === 'aggregation' ? 'sum' : normalized.intent) : 'count'
+    }
+  }
+
+  if (plan.intent === 'detail_filter' && !normalized.groupByColumns?.length) {
+    normalized.intent = 'filter_rows'
+  }
+
+  return normalized
+}
+
 function resolvePlanToOperation(workbook: XLSX.WorkBook, plan: SpreadsheetExecutionPlan): SpreadsheetOperation | null {
-  if (plan.intent === 'chart' || plan.intent === 'export' || plan.intent === 'script' || plan.intent === 'filter_rows') {
+  const normalizedPlan = normalizeStepBasedPlan(plan)
+  if (
+    normalizedPlan.intent === 'chart'
+    || normalizedPlan.intent === 'export'
+    || normalizedPlan.intent === 'script'
+    || normalizedPlan.intent === 'filter_rows'
+    || normalizedPlan.intent === 'analysis'
+    || normalizedPlan.intent === 'detail_filter'
+    || normalizedPlan.intent === 'aggregation'
+  ) {
     return null
   }
 
-  const { resolvedSheetName, headers } = resolveSheetHeaders(workbook, plan.sourceSheetName)
-  const groupByColumns = (plan.groupByColumns ?? [])
+  const { resolvedSheetName, headers } = resolveSheetHeaders(workbook, normalizedPlan.sourceSheetName)
+  const groupByColumns = (normalizedPlan.groupByColumns ?? [])
     .map((column) => resolveHeader(column, headers))
     .filter((column): column is string => Boolean(column))
   if (groupByColumns.length === 0) {
     throw new Error('未识别到有效的分组列')
   }
 
-  const filters = (plan.filters ?? [])
+  const filters = (normalizedPlan.filters ?? [])
     .map((filter) => {
       const resolvedColumn = resolveHeader(filter.column, headers)
       if (!resolvedColumn) return null
@@ -660,13 +931,14 @@ function resolvePlanToOperation(workbook: XLSX.WorkBook, plan: SpreadsheetExecut
     })
     .filter((filter): filter is SpreadsheetFilter => Boolean(filter))
 
-  const chartType = plan.chartType
-  const targetSheetName = plan.targetSheetName || buildDefaultTargetSheetName(plan.intent)
-  const topN = typeof plan.topN === 'number' && Number.isFinite(plan.topN) && plan.topN > 0
-    ? Math.max(1, Math.floor(plan.topN))
+  const chartType = normalizedPlan.chartType
+  const operationIntent = normalizedPlan.intent as SpreadsheetOperation['kind']
+  const targetSheetName = normalizedPlan.targetSheetName || buildDefaultTargetSheetName(operationIntent)
+  const topN = typeof normalizedPlan.topN === 'number' && Number.isFinite(normalizedPlan.topN) && normalizedPlan.topN > 0
+    ? Math.max(1, Math.floor(normalizedPlan.topN))
     : undefined
 
-  if (plan.intent === 'count') {
+  if (normalizedPlan.intent === 'count') {
     return {
       kind: 'count',
       sourceSheetName: resolvedSheetName,
@@ -678,13 +950,13 @@ function resolvePlanToOperation(workbook: XLSX.WorkBook, plan: SpreadsheetExecut
     }
   }
 
-  const valueColumn = plan.valueColumn ? resolveHeader(plan.valueColumn, headers) : null
+  const valueColumn = normalizedPlan.valueColumn ? resolveHeader(normalizedPlan.valueColumn, headers) : null
   if (!valueColumn) {
     throw new Error('未识别到有效的数值列')
   }
 
   return {
-    kind: plan.intent,
+    kind: operationIntent,
     sourceSheetName: resolvedSheetName,
     groupByColumns,
     valueColumn,
@@ -910,8 +1182,16 @@ function writeRowsToSheet(session: SpreadsheetSession, baseSheetName: string, ro
 
 async function runSpreadsheetScriptPlan(session: SpreadsheetSession, plan: SpreadsheetExecutionPlan) {
   const script = plan.script
-  if (!script || script.language !== 'javascript' || !script.code.trim()) {
-    throw new Error('脚本计划缺少可执行的 JavaScript 代码')
+  if (!script || !script.code.trim()) {
+    throw new Error('脚本计划缺少可执行代码')
+  }
+
+  if (script.language === 'python') {
+    return runSpreadsheetPythonScriptPlan(session, plan)
+  }
+
+  if (script.language !== 'javascript') {
+    throw new Error(`暂不支持脚本语言：${script.language}`)
   }
 
   const api = {
@@ -1006,6 +1286,144 @@ async function runSpreadsheetScriptPlan(session: SpreadsheetSession, plan: Sprea
   }
 }
 
+async function runSpreadsheetPythonScriptPlan(session: SpreadsheetSession, plan: SpreadsheetExecutionPlan) {
+  const script = plan.script
+  if (!script || script.language !== 'python' || !script.code.trim()) {
+    throw new Error('脚本计划缺少可执行的 Python 代码')
+  }
+
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'katop-excel-agent-'))
+  const workbookPath = path.join(tempRoot, 'input.xlsx')
+  const schemaPath = path.join(tempRoot, 'schema.json')
+  const resultPath = path.join(tempRoot, 'result.json')
+  const outputDir = path.join(tempRoot, 'output')
+  const scriptPath = path.join(tempRoot, 'agent_script.py')
+
+  try {
+    await mkdir(outputDir, { recursive: true })
+    const workbookBuffer = XLSX.write(session.workbook, {
+      type: 'buffer',
+      bookType: 'xlsx',
+      compression: true,
+    })
+    await writeFile(workbookPath, Buffer.isBuffer(workbookBuffer) ? workbookBuffer : Buffer.from(workbookBuffer))
+    await writeFile(schemaPath, JSON.stringify(session.schema, null, 2), 'utf8')
+
+    const pythonCode = [
+      'import json',
+      'from pathlib import Path',
+      `INPUT_WORKBOOK = r'''${workbookPath}'''`,
+      `SCHEMA_PATH = r'''${schemaPath}'''`,
+      `OUTPUT_DIR = r'''${outputDir}'''`,
+      `RESULT_PATH = r'''${resultPath}'''`,
+      `SESSION_INFO = json.loads(r'''${JSON.stringify({
+        sessionId: session.sessionId,
+        fileName: session.fileName,
+        fileType: session.fileType,
+        lastCreatedSheetName: session.lastCreatedSheetName,
+      }).replace(/\\/g, '\\\\').replace(/'''/g, "\\'\\'\\'")}''')`,
+      '',
+      script.code,
+      '',
+      'result_file = Path(RESULT_PATH)',
+      'if not result_file.exists():',
+      '    raise RuntimeError("Python 脚本未写出 RESULT_PATH 结果文件")',
+    ].join('\n')
+    await writeFile(scriptPath, pythonCode, 'utf8')
+
+    const execution = await runPythonProcess(scriptPath, tempRoot)
+    const rawResult = JSON.parse(await readFile(resultPath, 'utf8')) as {
+      ok?: boolean
+      message?: string
+      createdSheetNames?: string[]
+      exportedFilePath?: string
+      chartPaths?: string[]
+      preview?: { headers?: string[]; rows?: Array<Array<string | number | boolean | null>> }
+      error?: string
+    }
+
+    if (!rawResult.ok) {
+      throw new Error(rawResult.error || rawResult.message || execution.stderr || 'Python 脚本执行失败')
+    }
+
+    const exportedFilePath = rawResult.exportedFilePath
+    if (exportedFilePath) {
+      const nextWorkbook = XLSX.readFile(exportedFilePath, {
+        cellDates: true,
+        dense: false,
+        raw: false,
+      })
+      session.workbook = nextWorkbook
+      session.schema = buildWorkbookSchema(nextWorkbook)
+      const lastSheet = rawResult.createdSheetNames?.[rawResult.createdSheetNames.length - 1]
+      if (lastSheet) {
+        session.lastCreatedSheetName = lastSheet
+      }
+    }
+
+    const previewRows = rawResult.preview?.headers
+      ? [
+        rawResult.preview.headers.map((item) => String(item)),
+        ...(rawResult.preview.rows ?? []).map((row) => row.map((item) => formatSpreadsheetCell(item))),
+      ]
+      : null
+
+    return {
+      createdSheetName: rawResult.createdSheetNames?.[rawResult.createdSheetNames.length - 1],
+      chartFileName: rawResult.chartPaths?.[0] ? path.basename(rawResult.chartPaths[0]) : undefined,
+      message: [
+        `已执行 Python 脚本计划${script.summary ? `：${script.summary}` : ''}`,
+        '',
+        rawResult.message || '已完成脚本执行。',
+        ...(rawResult.createdSheetNames?.length ? ['', `- 输出工作表：${rawResult.createdSheetNames.join('、')}`] : []),
+        ...(previewRows ? ['', '**结果预览**', '', renderSpreadsheetPreview(previewRows)] : []),
+        ...(rawResult.chartPaths?.length ? ['', `- 生成图表：${rawResult.chartPaths.map((item) => path.basename(item)).join('、')}`] : []),
+      ].join('\n'),
+    }
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true })
+  }
+}
+
+async function runPythonProcess(scriptPath: string, cwd: string) {
+  return await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn('python', [scriptPath], {
+      cwd,
+      windowsHide: true,
+    })
+    let stdout = ''
+    let stderr = ''
+    let finished = false
+    const timer = setTimeout(() => {
+      if (finished) return
+      child.kill()
+      reject(new Error('Python 脚本执行超时'))
+    }, PYTHON_SCRIPT_TIMEOUT_MS)
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString()
+    })
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString()
+    })
+    child.on('error', (error) => {
+      clearTimeout(timer)
+      finished = true
+      reject(error)
+    })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      if (finished) return
+      finished = true
+      if (code === 0) {
+        resolve({ stdout, stderr })
+        return
+      }
+      reject(new Error(stderr.trim() || stdout.trim() || `Python 脚本执行失败，退出码 ${code}`))
+    })
+  })
+}
+
 function createChartForSheet(session: SpreadsheetSession, sheetName: string, chartType: SpreadsheetChartType) {
   const sheet = session.workbook.Sheets[sheetName]
   if (!sheet) {
@@ -1074,6 +1492,31 @@ function matchesFilter(record: Record<string, unknown>, filter: SpreadsheetFilte
   return false
 }
 
+function matchesFilters(record: Record<string, unknown>, filters: SpreadsheetFilter[]) {
+  if (filters.length === 0) return true
+
+  const groupedFilters = new Map<string, SpreadsheetFilter[]>()
+  for (const filter of filters) {
+    const groupKey = `${filter.column}::${filter.operator}`
+    const group = groupedFilters.get(groupKey) ?? []
+    group.push(filter)
+    groupedFilters.set(groupKey, group)
+  }
+
+  return Array.from(groupedFilters.values()).every((group) => {
+    if (group.length === 1) {
+      return matchesFilter(record, group[0])
+    }
+
+    const operator = group[0].operator
+    if (operator === 'contains' || operator === 'eq') {
+      return group.some((filter) => matchesFilter(record, filter))
+    }
+
+    return group.every((filter) => matchesFilter(record, filter))
+  })
+}
+
 function resolveSelectedColumns(headers: string[], requested?: string[]) {
   if (!requested || requested.length === 0) {
     return headers
@@ -1103,7 +1546,7 @@ function executeFilterRowsPlan(session: SpreadsheetSession, plan: SpreadsheetExe
     .filter((filter): filter is SpreadsheetFilter => Boolean(filter))
 
   let filteredRecords = filters.length > 0
-    ? records.filter((record) => filters.every((filter) => matchesFilter(record, filter)))
+    ? records.filter((record) => matchesFilters(record, filters))
     : records
 
   if (plan.sortBy) {
@@ -1165,7 +1608,7 @@ function executeSpreadsheetOperation(session: SpreadsheetSession, operation: Spr
     defval: '',
   })
   const filteredRecords = operation.filters.length > 0
-    ? records.filter((record) => operation.filters.every((filter) => matchesFilter(record, filter)))
+    ? records.filter((record) => matchesFilters(record, operation.filters))
     : records
 
   if (filteredRecords.length === 0) {
@@ -1459,7 +1902,9 @@ export async function executeSpreadsheetPlan(
   }
 
   try {
-    if (request.plan.intent === 'export') {
+    const normalizedPlan = normalizeStepBasedPlan(request.plan)
+
+    if (normalizedPlan.intent === 'export') {
       return {
         ok: true,
         performed: false,
@@ -1467,8 +1912,8 @@ export async function executeSpreadsheetPlan(
       }
     }
 
-    if (request.plan.intent === 'script') {
-      const scriptResult = await runSpreadsheetScriptPlan(session, request.plan)
+    if (normalizedPlan.intent === 'script') {
+      const scriptResult = await runSpreadsheetScriptPlan(session, normalizedPlan)
       return {
         ok: true,
         performed: true,
@@ -1477,8 +1922,8 @@ export async function executeSpreadsheetPlan(
       }
     }
 
-    if (request.plan.intent === 'filter_rows') {
-      const result = executeFilterRowsPlan(session, request.plan)
+    if (normalizedPlan.intent === 'filter_rows' || normalizedPlan.intent === 'detail_filter') {
+      const result = executeFilterRowsPlan(session, normalizedPlan)
       return {
         ok: true,
         performed: true,
@@ -1487,11 +1932,11 @@ export async function executeSpreadsheetPlan(
       }
     }
 
-    if (request.plan.intent === 'chart') {
-      const chartType = request.plan.chartType ?? 'bar'
-      const sheetName = request.plan.useLastCreatedSheet
+    if (normalizedPlan.intent === 'chart') {
+      const chartType = normalizedPlan.chartType ?? 'bar'
+      const sheetName = normalizedPlan.useLastCreatedSheet
         ? session.lastCreatedSheetName
-        : request.plan.sourceSheetName ?? session.lastCreatedSheetName
+        : normalizedPlan.sourceSheetName ?? session.lastCreatedSheetName
       if (!sheetName) {
         return {
           ok: false,
@@ -1519,7 +1964,7 @@ export async function executeSpreadsheetPlan(
       }
     }
 
-    const operation = resolvePlanToOperation(session.workbook, request.plan)
+    const operation = resolvePlanToOperation(session.workbook, normalizedPlan)
     if (!operation) {
       return {
         ok: false,

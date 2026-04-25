@@ -36,6 +36,7 @@ interface WorkspaceSession {
   filePaths: string[]
   documents: Record<string, WorkspaceDocument>
   activeDocumentPath: string | null
+  pendingRenamePath: string | null
   isPanelVisible: boolean
   panelWidth: number
   editorMode: DocumentEditorMode
@@ -104,6 +105,7 @@ function createEmptySession(): WorkspaceSession {
     filePaths: [],
     documents: {},
     activeDocumentPath: null,
+    pendingRenamePath: null,
     isPanelVisible: false,
     panelWidth: 672,
     editorMode: 'split',
@@ -127,18 +129,22 @@ function titleFromPath(relativePath: string) {
   return parts[parts.length - 1] || '未命名文档'
 }
 
-function slugifyFileName(name: string) {
-  const sanitized = name
-    .replace(/[\\/:*?"<>|]+/g, ' ')
-    .replace(/\s+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .toLowerCase()
-
-  return sanitized || `draft-${Date.now()}`
-}
-
 function sortRelativePaths(filePaths: string[]) {
   return [...filePaths].sort((left, right) => left.localeCompare(right, 'zh-CN'))
+}
+
+function createUntitledDocumentPath(filePaths: string[]) {
+  const existingPaths = new Set(filePaths.map((filePath) => normalizeRelativePath(filePath)))
+  const baseName = '待命名'
+  let candidate = `${baseName}.md`
+  let index = 2
+
+  while (existingPaths.has(candidate)) {
+    candidate = `${baseName}-${index}.md`
+    index += 1
+  }
+
+  return candidate
 }
 
 function getAdjacentDocumentPath(filePaths: string[], targetPath: string) {
@@ -217,6 +223,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         filePaths,
         documents: {},
         activeDocumentPath: filePaths[0] ?? null,
+        pendingRenamePath: null,
         selection: null,
         latestSuggestion: null,
         isWorkspaceLoading: false,
@@ -384,7 +391,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
   },
 
-  createDocumentFromContent: async (content, suggestedName) => {
+  createDocumentFromContent: async (content, _suggestedName) => {
     if (window.electronAPI?.openWorkspaceWindow) {
       await window.electronAPI.openWorkspaceWindow()
     }
@@ -398,21 +405,36 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const workspaceReady = await ensureWorkspace()
     if (!workspaceReady) return false
 
-    const defaultName = `${slugifyFileName(suggestedName ?? 'conversation-doc')}.md`
-    const inputName = window.prompt('请输入 Markdown 文件名', defaultName)
-    if (!inputName) return false
-
-    const finalName = inputName.trim().toLowerCase().endsWith('.md') ? inputName.trim() : `${inputName.trim()}.md`
-    if (!finalName) return false
-
-    const created = await get().createDocument(finalName, content)
+    const untitledPath = createUntitledDocumentPath(get().filePaths)
+    const created = await get().createDocument(untitledPath, '')
     if (!created) return false
 
+    const createdDocument = get().documents[untitledPath]
+
     setSessionState(set, {
+      pendingRenamePath: untitledPath,
+      documents: {
+        ...get().documents,
+        [untitledPath]: createdDocument
+          ? {
+              ...createdDocument,
+              isPendingNaming: true,
+              pendingInitialContent: content,
+            }
+          : {
+              relativePath: untitledPath,
+              title: titleFromPath(untitledPath),
+              content: '',
+              isDirty: false,
+              lastLoadedAt: Date.now(),
+              isPendingNaming: true,
+              pendingInitialContent: content,
+            },
+      },
       taskState: {
         status: 'ready',
-        title: '已转为 Markdown 文档',
-        message: `已创建文档 ${finalName}，你可以继续编辑后保存。`,
+        title: '已创建待命名文档',
+        message: '请先在左侧文档树中完成命名，命名后会自动写入转换结果。',
       },
       isPanelVisible: true,
     })
@@ -444,7 +466,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     setSessionState(set, { isSaving: true, error: null })
 
     try {
+      const existingDocument = get().documents[normalizedOldPath]
+      const pendingInitialContent = existingDocument?.pendingInitialContent
+      const shouldWritePendingContent = Boolean(existingDocument?.isPendingNaming && pendingInitialContent && window.electronAPI?.writeWorkspaceDocument)
+
       await window.electronAPI.renameWorkspaceDocument(workspace.rootPath, normalizedOldPath, normalizedNewPath)
+      if (shouldWritePendingContent && pendingInitialContent) {
+        await window.electronAPI.writeWorkspaceDocument(workspace.rootPath, normalizedNewPath, pendingInitialContent)
+      }
+
+      const completedAt = Date.now()
       setSessionState(set, (session) => {
         const existingDocument = session.documents[normalizedOldPath]
         const nextDocuments = { ...session.documents }
@@ -455,18 +486,31 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
             ...existingDocument,
             relativePath: normalizedNewPath,
             title: titleFromPath(normalizedNewPath),
+            content: shouldWritePendingContent && pendingInitialContent ? pendingInitialContent : existingDocument.content,
+            isDirty: shouldWritePendingContent ? false : existingDocument.isDirty,
+            isPendingNaming: false,
+            pendingInitialContent: undefined,
+            lastLoadedAt: shouldWritePendingContent ? completedAt : existingDocument.lastLoadedAt,
+            lastSavedAt: shouldWritePendingContent ? completedAt : existingDocument.lastSavedAt,
           }
         }
 
+        const nextMessage = shouldWritePendingContent
+          ? `已完成命名并写入 ${titleFromPath(normalizedNewPath)}。`
+          : `${titleFromPath(normalizedOldPath)} 已更新为 ${titleFromPath(normalizedNewPath)}。`
+
+        const nextTitle = shouldWritePendingContent ? '文档已创建' : '文档已重命名'
+
         return {
           isSaving: false,
+          pendingRenamePath: session.pendingRenamePath === normalizedOldPath ? null : session.pendingRenamePath,
           filePaths: sortRelativePaths(session.filePaths.map((filePath) => filePath === normalizedOldPath ? normalizedNewPath : filePath)),
           activeDocumentPath: session.activeDocumentPath === normalizedOldPath ? normalizedNewPath : session.activeDocumentPath,
           documents: nextDocuments,
           taskState: {
             status: 'ready',
-            title: '文档已重命名',
-            message: `${titleFromPath(normalizedOldPath)} 已更新为 ${titleFromPath(normalizedNewPath)}。`,
+            title: nextTitle,
+            message: nextMessage,
           },
         }
       })

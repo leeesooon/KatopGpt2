@@ -1,92 +1,148 @@
-# PROJECT KNOWLEDGE BASE
+# AGENTS.md
 
-**Generated:** 2026-02-11
-**Commit:** 9beb150
-**Branch:** main
+## Purpose
+This file is for agentic coding assistants working in `E:\PyProject\KatopGpt`.
+Use it as the repository-specific source for commands, architecture notes, and code style.
 
-## OVERVIEW
+## Rule Files
+- No `.cursorrules` file was found.
+- No files were found under `.cursor/rules/`.
+- No `.github/copilot-instructions.md` file was found.
+- If any of those files appear later, treat them as additional constraints alongside this file.
 
-Electron desktop LLM chat client (KatopGPT). React 18 + TypeScript + Vite 6 + Tailwind CSS 3 + Zustand 4. Chinese UI (zh-CN). Supports multiple API providers, streaming responses, image/file attachments, and OCR fallback for non-multimodal models.
+## Project Snapshot
+- Electron desktop LLM chat client with a React renderer.
+- Stack: React 18, TypeScript 5, Vite 6, Tailwind CSS 3, Zustand 4, Electron 33.
+- UI language is Chinese; user-facing copy should stay Chinese.
+- Main features: multi-provider chat, streaming responses, search augmentation, OCR fallback,
+  Markdown workspace, and document extraction for `pptx`, `pdf`, and `docx`.
+- TypeScript runs in `strict` mode.
+- Path alias `@/* -> src/*` exists, but most source files prefer relative imports.
+- No lint, formatter, or automated test framework is configured.
 
-## STRUCTURE
+## Repo Map
+- `src/components/`: renderer UI components.
+- `src/services/`: chat API, OCR, search, webpage parsing, document-agent helpers.
+- `src/store/`: Zustand stores for chat state and workspace state.
+- `src/types/index.ts`: shared business types and `DEFAULT_SETTINGS`.
+- `src/index.css`: Tailwind layers and shared utility classes like `btn-primary` and `glass-panel`.
+- `electron/main.ts`: Electron main process, IPC handlers, workspace filesystem, API proxying.
+- `electron/preload.ts`: `contextBridge` API exposed to the renderer.
+- `src/vite-env.d.ts`: renderer typings for `window.electronAPI`.
+- `dist/`, `dist-renderer/`, `dist-electron/`, and `electron/*.d.ts`: generated output; do not hand-edit.
 
-```
-./
-├── electron/              # Electron main process + preload (IPC bridge)
-├── src/
-│   ├── components/        # 7 React components (all functional, no class components)
-│   │   ├── ChatView.tsx   # Main chat orchestrator — sends messages, handles streaming
-│   │   ├── InputArea.tsx  # Message input — text, images, files, drag-and-drop, paste
-│   │   ├── SettingsModal.tsx  # Provider CRUD, model params, API key management
-│   │   ├── Sidebar.tsx    # Conversation list with rename/delete
-│   │   ├── MessageBubble.tsx  # Markdown rendering with syntax highlighting
-│   │   ├── ModelSelector.tsx  # Provider/model dropdown selector
-│   │   └── TitleBar.tsx   # Custom frameless window controls
-│   ├── services/
-│   │   ├── chatApi.ts     # OpenAI-compatible streaming API client (async generator)
-│   │   └── ocr.ts         # Tesseract.js OCR for images on non-multimodal models
-│   ├── store/
-│   │   └── chatStore.ts   # Zustand store — conversations, settings, streaming state
-│   ├── types/
-│   │   └── index.ts       # All TypeScript interfaces + resolveApiConfig() helper
-│   ├── App.tsx            # Root layout: TitleBar + Sidebar + ChatView + SettingsModal
-│   ├── main.tsx           # React entry point
-│   └── index.css          # Tailwind layers + markdown styles + glass-panel utilities
-├── dist/                  # Vite build output (web assets)
-└── dist-electron/         # Compiled Electron main/preload
-```
+## Source Of Truth
+- Chat/provider/settings models live in `src/types/index.ts`.
+- Persisted chat-state migration logic lives in `src/store/chatStore.ts`.
+- Workspace session behavior lives in `src/store/workspaceStore.ts`.
+- Streaming behavior is split between `src/services/chatApi.ts` and `electron/main.ts`.
+- Search behavior is split between `src/services/searchApi.ts` and `src/services/webpage.ts`.
+- Any IPC change must stay aligned across `electron/main.ts`, `electron/preload.ts`, and `src/vite-env.d.ts`.
 
-## WHERE TO LOOK
+## Commands
+- Install dependencies: `npm install`
+- Renderer-only dev server: `npm run dev`
+- Electron dev launch: `npm run electron:dev`
+- Production build/package: `npm run build`
+- Preview renderer build: `npm run preview`
+- Fast type-check only: `npx tsc --noEmit`
 
-| Task | Location | Notes |
-|------|----------|-------|
-| Add new component | `src/components/` | Functional component, default export, Tailwind classes |
-| Change API behavior | `src/services/chatApi.ts` | `streamChat()` is an async generator yielding chunks |
-| Modify data model | `src/types/index.ts` | All interfaces live here; update store migration if schema changes |
-| Change state/persistence | `src/store/chatStore.ts` | Zustand + `persist` middleware; bump `version` on schema change |
-| Electron/IPC changes | `electron/main.ts` + `electron/preload.ts` | Context bridge pattern; add to both files |
-| Styling/theme | `tailwind.config.js` + `src/index.css` | Custom `primary` and `surface` color scales |
-| Build config | `vite.config.ts` | Electron plugin handles main/preload compilation |
+## Command Notes
+- `npm run dev` starts Vite for the renderer only; Electron-only APIs are unavailable there.
+- `npm run electron:dev` runs a Vite build and then launches `electron .`; it is not a real hot-reload loop.
+- `npm run build` runs `tsc && vite build --config vite.config.ts && electron-builder`.
+- `npx tsc --noEmit` is the lightest useful validation command for most code-only changes.
 
-## CONVENTIONS
+## Lint / Test Reality
+- ESLint: none.
+- Prettier or other formatter: none.
+- Unit/integration/E2E tests: none.
+- No `*.test.*` or `*.spec.*` files were found.
+- Single-test command: not available because no test runner is installed.
+- Manual verification is the normal validation path today.
 
-- **No linter/formatter configured** — no ESLint, Prettier, or pre-commit hooks
-- **Path alias**: `@/*` maps to `src/*` (tsconfig + vite)
-- **Components**: Functional only, `export default function Name()` pattern
-- **State access**: `useChatStore()` hook everywhere, no prop drilling for global state
-- **Icons**: Lucide React exclusively (`lucide-react`)
-- **Styling**: Tailwind utility classes inline; reusable utilities in `index.css` (`btn-primary`, `btn-ghost`, `input-field`, `glass-panel`)
-- **Chinese UI strings**: All user-facing text is in Chinese (e.g. `'新对话'`, `'发送消息...'`)
-- **Streaming throttle**: `requestAnimationFrame` used to batch state updates during streaming
+## Recommended Validation
+- Type-only or logic-only changes: run `npx tsc --noEmit`.
+- Renderer UI changes: use `npm run dev` for quick browser verification.
+- Electron, IPC, workspace, or filesystem changes: use `npm run electron:dev`.
+- Packaging-sensitive changes: use `npm run build`.
+- Search-related regressions: consult `QUICK_TEST_GUIDE.md` for the existing manual checklist.
 
-## ANTI-PATTERNS (THIS PROJECT)
+## Architecture Notes
+- The renderer must tolerate browser-only mode where `window.electronAPI` is missing.
+- Electron-only capabilities are guarded with optional chaining and graceful fallbacks.
+- `chatStore` uses Zustand `persist`; schema changes require a version bump and migration.
+- `workspaceStore` keeps workspace sessions keyed by conversation; do not flatten that behavior.
+- The workspace filesystem currently only allows `.md`, `.markdown`, and `.txt` files in `electron/main.ts`.
+- Search and webpage enrichment are non-blocking helpers; failures should not stop the main chat flow.
+- The chat UI batches streaming updates with `requestAnimationFrame` to reduce store churn.
+- Document extraction support is implemented through Electron IPC, not directly in the renderer.
 
-- **API keys logged to console** — `chatApi.ts` logs full request bodies via `console.dir`; do not add more sensitive logging
-- **No tests** — no test framework, no test files exist
-- **No CI/CD** — no GitHub Actions, Makefile, or Dockerfile
-- **Deprecated transitive deps** — `glob` and `tar` in `package-lock.json` have known vulnerabilities
+## Style Guide
 
-## UNIQUE STYLES
+### Imports
+- Follow the local file's existing import style before trying to reorder everything.
+- In general: React/core imports first, third-party packages next, app modules after that.
+- Keep type-only imports explicit with `import type`.
+- Prefer relative imports for nearby app modules; use `@/` only when it clearly improves readability.
+- Renderer imports usually omit file extensions; Electron code may include `.ts` when the existing file already does.
 
-- **Multi-provider architecture**: Users configure N providers (OpenAI, DeepSeek, etc.) each with N models. `resolveApiConfig()` flattens `ModelSelection → ApiConfig` for API calls
-- **Store migration**: `chatStore.ts` has versioned migrations (v0→v1: single-api to multi-provider; v1→v2: string[] models to ModelConfig[]). Bump `version` and add migration case when changing persisted schema
-- **OCR fallback**: When user attaches images to a non-multimodal model, images are OCR'd via tesseract.js and text is prepended to the message
-- **Frameless window**: Electron `frame: false` with custom `TitleBar.tsx`; CSS uses `-webkit-app-region: drag/no-drag`
-- **Glass morphism**: `.glass-panel` class uses `backdrop-blur-xl` + semi-transparent backgrounds
+### Formatting
+- Use 2-space indentation.
+- Use single quotes.
+- Avoid semicolons unless the surrounding file already needs them.
+- Keep trailing commas in multiline objects, arrays, params, and JSX props when nearby code does.
+- Prefer early returns and small helpers over deeply nested inline logic.
+- Keep comments sparse; add them only for genuinely non-obvious behavior.
 
-## COMMANDS
+### React And State
+- Components are function components; do not introduce class components.
+- The dominant export style is `export default function ComponentName()`.
+- Declare component props with a nearby `interface XProps`.
+- Keep hooks at the top of the component.
+- Event handlers usually use `handleX` naming.
+- Business state belongs in Zustand stores, not React context.
+- Prefer store actions over ad hoc state mutation in components.
 
-```bash
-npm run dev            # Vite dev server (browser-only, no Electron)
-npm run electron:dev   # Build + launch Electron app
-npm run build          # tsc && vite build && electron-builder (production)
-npm run preview        # Vite preview of built web assets
-```
+### TypeScript
+- Shared business types belong in `src/types/index.ts` unless they are truly file-local.
+- Prefer explicit interfaces and string unions over loose object shapes.
+- Use `unknown` for caught errors and narrow with `instanceof Error`.
+- Avoid introducing new `any`; there are a few localized exceptions around markdown rendering.
+- Preserve optional properties where the runtime actually permits them.
+- If you change persisted settings or data shapes, update `DEFAULT_SETTINGS` and migration logic together.
 
-## NOTES
+### Naming
+- Components, interfaces, types, and classes: `PascalCase`.
+- Variables, functions, store actions, and helpers: `camelCase`.
+- Module-level constants and regexes: `UPPER_SNAKE_CASE`.
+- Boolean flags: prefix with `is`, `has`, `can`, or `should`.
+- Keep internal identifiers in English even though visible UI text is Chinese.
 
-- `tsconfig.json` has `noUnusedLocals: false` and `noUnusedParameters: false` — unused vars won't error
-- Zustand persistence key: `'katop-gpt-storage'` in localStorage
-- `window.electronAPI` is typed implicitly — no global `.d.ts` declaration file exists
-- `postcss.config.js` uses CommonJS (`module.exports`), rest of config is mixed ESM/CJS
-- The `nul` file in root is likely accidental (Windows NUL device artifact)
+### Error Handling
+- User-facing error messages should stay in Chinese.
+- Prefer graceful degradation for optional features like OCR, search, webpage reads, and Electron bridges.
+- Use custom error classes when status codes matter; this repo already uses `ChatApiError` and `SearchApiError`.
+- Parse upstream API error bodies defensively.
+- Clean up readers, listeners, and subscriptions in `finally` blocks.
+- Do not leak secrets in logs or error messages.
+- Avoid adding more request-body logging because API keys are sensitive.
+
+### Electron, IPC, And UI
+- Keep `contextIsolation: true` and `nodeIntegration: false` intact.
+- Expose the minimum necessary API through `contextBridge`.
+- Validate and normalize external URLs before opening them.
+- Validate workspace paths before reading or writing local files.
+- If you add an IPC channel, update `electron/main.ts`, `electron/preload.ts`, and `src/vite-env.d.ts` in the same change.
+- Styling is Tailwind-first; reuse utilities from `src/index.css` before inventing new patterns.
+- Preserve the existing dark, glassy desktop UI unless the task explicitly changes design direction.
+- Icons come from `lucide-react`.
+
+## Practical Checklist
+- Match imports, formatting, and naming to nearby files.
+- Keep visible copy in Chinese and consistent with the existing tone.
+- Avoid hand-editing generated output in `dist*` directories or `electron/*.d.ts`.
+- If you touch persistence, verify versioning and migrations.
+- If you touch IPC, verify preload and renderer typings stay in sync.
+- Run the lightest relevant validation command for the scope of the change.
+- Be explicit when validation could not be run or when manual verification is still required.

@@ -11,6 +11,7 @@ interface FileNode {
 interface WorkspaceFileTreeProps {
   filePaths: string[]
   activePath: string | null
+  pendingRenamePath?: string | null
   onSelect: (relativePath: string) => void
   onCreate: (relativePath: string) => Promise<boolean>
   onRename: (oldRelativePath: string, newRelativePath: string) => Promise<boolean>
@@ -86,6 +87,7 @@ function TreeBranch({
   node,
   activePath,
   depth,
+  pendingRenamePath,
   onSelect,
   onRename,
   onDelete,
@@ -93,6 +95,7 @@ function TreeBranch({
   node: FileNode
   activePath: string | null
   depth: number
+  pendingRenamePath?: string | null
   onSelect: (relativePath: string) => void
   onRename: (oldRelativePath: string, newRelativePath: string) => Promise<boolean>
   onDelete: (relativePath: string) => Promise<boolean>
@@ -108,6 +111,13 @@ function TreeBranch({
   useEffect(() => {
     setRenameValue(node.name)
   }, [node.name])
+
+  useEffect(() => {
+    if (pendingRenamePath === node.path) {
+      setIsMenuOpen(false)
+      setIsRenaming(true)
+    }
+  }, [node.path, pendingRenamePath])
 
   useEffect(() => {
     if (!isMenuOpen) return
@@ -141,6 +151,7 @@ function TreeBranch({
             activePath={activePath}
             depth={depth + 1}
             onSelect={onSelect}
+            pendingRenamePath={pendingRenamePath}
             onRename={onRename}
             onDelete={onDelete}
           />
@@ -264,7 +275,7 @@ function TreeBranch({
   )
 }
 
-export default function WorkspaceFileTree({ filePaths, activePath, onSelect, onCreate, onRename, onDelete, onCollapse }: WorkspaceFileTreeProps) {
+export default function WorkspaceFileTree({ filePaths, activePath, pendingRenamePath, onSelect, onCreate, onRename, onDelete, onCollapse }: WorkspaceFileTreeProps) {
   const [isCreating, setIsCreating] = useState(false)
   const [draftName, setDraftName] = useState('')
   const tree = useMemo(() => buildTree(filePaths), [filePaths])
@@ -352,6 +363,7 @@ export default function WorkspaceFileTree({ filePaths, activePath, onSelect, onC
                 activePath={activePath}
                 depth={0}
                 onSelect={onSelect}
+                pendingRenamePath={pendingRenamePath}
                 onRename={onRename}
                 onDelete={onDelete}
               />

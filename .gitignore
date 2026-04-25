@@ -2,6 +2,7 @@ node_modules
 dist
 dist-renderer
 dist-electron
+release
 release-test
 nul
 *.backup
