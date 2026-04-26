@@ -19,6 +19,7 @@ interface ContextStats {
 }
 
 const MAX_CONTEXT_COUNTED_FILE_CHARS = 12000
+const IMAGE_GENERATION_QUALITY_PROMPT = '自然真实的人体结构，正常五指，手部清晰自然，面部五官协调，肢体比例合理，避免多余手指、畸形手、扭曲肢体、崩坏面部、低质量细节。'
 
 function findLatestSpreadsheetAttachment(messages: Array<{ files?: FileAttachment[] }>, currentFiles: FileAttachment[]) {
   const currentMatch = currentFiles.find(
@@ -115,6 +116,12 @@ function resolveImageGenerationConfig(settings: ReturnType<typeof useChatStore.g
   }
 
   return null
+}
+
+function buildImageGenerationPrompt(userPrompt: string) {
+  const trimmedPrompt = userPrompt.trim()
+  if (!trimmedPrompt) return IMAGE_GENERATION_QUALITY_PROMPT
+  return `${trimmedPrompt}\n\n质量要求：${IMAGE_GENERATION_QUALITY_PROMPT}`
 }
 
 export default function ChatView() {
@@ -333,6 +340,7 @@ export default function ChatView() {
       const generatedAt = Date.now()
       const referenceImages = images.slice(0, 1)
       const hasReferenceImage = referenceImages.length > 0
+      const enhancedPrompt = buildImageGenerationPrompt(content)
       const assistantMessage = addMessage(convId, {
         role: 'assistant',
         content: hasReferenceImage ? '正在基于参考图生成图片...' : '正在生成图片...',
@@ -344,6 +352,7 @@ export default function ChatView() {
         metadata: {
           kind: 'image_generation',
           originalPrompt: content,
+          enhancedPrompt,
           providerId: settings.imageGeneration.providerId,
           model: imageConfig.model,
           size: settings.imageGeneration.size,
@@ -354,7 +363,7 @@ export default function ChatView() {
       try {
         const result = await generateImage(imageConfig, {
           requestId,
-          prompt: content,
+          prompt: enhancedPrompt,
           images: referenceImages,
           size: settings.imageGeneration.size,
           quality: settings.imageGeneration.quality,
@@ -381,6 +390,7 @@ export default function ChatView() {
           metadata: {
             kind: 'image_generation',
             originalPrompt: content,
+            enhancedPrompt,
             revisedPrompt: result.revisedPrompt,
             providerId: settings.imageGeneration.providerId,
             model: imageConfig.model,

@@ -123,6 +123,7 @@ export interface Message {
     kind?: 'chat' | 'image_generation'
     revisedPrompt?: string
     originalPrompt?: string
+    enhancedPrompt?: string
     providerId?: string
     model?: string
     size?: ImageGenerationSize
