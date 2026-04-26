@@ -20,6 +20,7 @@ interface ChatState {
   deleteConversation: (id: string) => void
   setActiveConversation: (id: string) => void
   updateConversationTitle: (id: string, title: string) => void
+  updateConversationSummary: (id: string, summary: Conversation['summary']) => void
 
   // Message actions
   addMessage: (conversationId: string, message: Omit<Message, 'id' | 'timestamp'>) => Message
@@ -95,6 +96,14 @@ export const useChatStore = create<ChatState>()(
         set((state) => ({
           conversations: state.conversations.map((c) =>
             c.id === id ? { ...c, title, updatedAt: Date.now() } : c
+          ),
+        }))
+      },
+
+      updateConversationSummary: (id, summary) => {
+        set((state) => ({
+          conversations: state.conversations.map((c) =>
+            c.id === id ? { ...c, summary, updatedAt: Date.now() } : c
           ),
         }))
       },
@@ -260,7 +269,7 @@ export const useChatStore = create<ChatState>()(
     }),
     {
       name: 'katop-gpt-storage',
-      version: 6,
+      version: 7,
       partialize: (state) => ({
         conversations: state.conversations,
         activeConversationId: state.activeConversationId,
@@ -374,6 +383,15 @@ export const useChatStore = create<ChatState>()(
                 }) as ModelConfig[],
               }))
             }
+          }
+        }
+        if (version <= 6) {
+          const conversations = state.conversations as Conversation[] | undefined
+          if (Array.isArray(conversations)) {
+            state.conversations = conversations.map((conversation) => ({
+              ...conversation,
+              summary: conversation.summary,
+            }))
           }
         }
         return state as unknown as ChatState

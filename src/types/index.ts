@@ -138,7 +138,15 @@ export interface Conversation {
   id: string
   title: string
   messages: Message[]
+  summary?: ConversationSummary
   createdAt: number
+  updatedAt: number
+}
+
+export interface ConversationSummary {
+  content: string
+  coveredMessageId: string
+  coveredMessageCount: number
   updatedAt: number
 }
 

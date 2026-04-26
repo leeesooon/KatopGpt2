@@ -321,6 +321,30 @@ async function completeChatWithPayload(
   return await response.json() as CompleteChatResponsePayload
 }
 
+function extractCompletionTextFromPayload(payload: CompleteChatResponsePayload | null) {
+  const content = payload?.choices?.[0]?.message?.content
+  if (typeof content !== 'string') return ''
+  return content.trim()
+}
+
+export async function completeChatText(
+  config: ApiConfig,
+  messages: Array<{ role: string; content: string | ContentPart[] }>,
+  temperature: number,
+  maxTokens: number,
+  signal?: AbortSignal
+) {
+  const payload = await completeChatWithPayload({
+    baseUrl: config.baseUrl,
+    apiKey: config.apiKey,
+    model: config.model,
+    messages,
+    temperature,
+    maxTokens,
+  }, signal)
+  return extractCompletionTextFromPayload(payload)
+}
+
 async function parseSpreadsheetIntentWithFunctionCalling(
   config: ApiConfig,
   systemPrompt: string,
@@ -800,7 +824,7 @@ export async function generateImage(
     apiKey: config.apiKey,
     model: config.model,
     prompt: request.prompt,
-    images: request.images?.slice(0, 1).map((image) => ({
+    images: request.images?.slice(0, 12).map((image) => ({
       base64: image.base64,
       name: image.name,
     })),

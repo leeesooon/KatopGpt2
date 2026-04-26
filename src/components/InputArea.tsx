@@ -17,6 +17,7 @@ const EXTRACTABLE_DOCUMENT_MIME_TYPES = [
 ]
 
 const FILE_INPUT_ACCEPT = '.txt,.md,.markdown,.json,.csv,.pdf,.pptx,.docx,.xlsx'
+const MAX_IMAGE_REFERENCE_COUNT = 12
 
 const IMAGE_PROMPT_PRESETS = [
   { group: '风格', items: ['电影感', '赛博朋克', '水彩插画', '极简海报', '写实摄影', '3D 渲染'] },
@@ -76,6 +77,8 @@ interface InputAreaProps {
   contextStats: {
     messageCount: number
     messageChars: number
+    summaryEnabled?: boolean
+    summaryCoveredMessageCount?: number
   }
 }
 
@@ -122,6 +125,7 @@ export default function InputArea({
   const imageInputRef = useRef<HTMLInputElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const dragCounterRef = useRef(0)
+  const previousInputModeRef = useRef<ChatInputMode>(inputMode)
   const isProcessingFiles = pendingFiles.length > 0
   const isImageMode = inputMode === 'image'
 
@@ -132,20 +136,24 @@ export default function InputArea({
   }, [isStreaming])
 
   useEffect(() => {
-    if (isImageMode) {
-      if (!imageReferenceDraft) {
-        setImages([])
-      }
-      setFiles([])
-      setAttachmentError(null)
+    const previousInputMode = previousInputModeRef.current
+    previousInputModeRef.current = inputMode
+
+    if (inputMode !== 'image') return
+
+    if (previousInputMode !== 'image' && !imageReferenceDraft) {
+      setImages([])
     }
-  }, [imageReferenceDraft, isImageMode])
+
+    setFiles([])
+    setAttachmentError(null)
+  }, [imageReferenceDraft, inputMode])
 
   useEffect(() => {
     if (!imageReferenceDraft) return
-    setImages([imageReferenceDraft])
+    setImages((prev) => [imageReferenceDraft, ...prev].slice(0, MAX_IMAGE_REFERENCE_COUNT))
     setFiles([])
-    setAttachmentError('已添加参考图，请输入修改要求')
+    setAttachmentError(`已添加参考图，最多可使用 ${MAX_IMAGE_REFERENCE_COUNT} 张，请输入修改要求`)
     requestAnimationFrame(() => {
       textareaRef.current?.focus()
     })
@@ -246,7 +254,7 @@ export default function InputArea({
     const base64 = await readFileAsDataUrl(file)
     setImages((prev) => {
       const nextImage = { id: uuidv4(), base64, name: file.name }
-      return isImageMode ? [nextImage] : [...prev, nextImage]
+      return isImageMode ? [...prev, nextImage].slice(0, MAX_IMAGE_REFERENCE_COUNT) : [...prev, nextImage]
     })
   }
 
@@ -425,8 +433,10 @@ export default function InputArea({
       messageCount: contextStats.messageCount,
       totalChars,
       estimatedTokens,
+      summaryEnabled: Boolean(contextStats.summaryEnabled),
+      summaryCoveredMessageCount: contextStats.summaryCoveredMessageCount ?? 0,
     }
-  }, [contextStats.messageChars, contextStats.messageCount, input, settings.systemPrompt])
+  }, [contextStats.messageChars, contextStats.messageCount, contextStats.summaryCoveredMessageCount, contextStats.summaryEnabled, input, settings.systemPrompt])
 
   const isDocumentAssistantOpen = isPanelVisible || workspaceWindowOpen
 
@@ -680,7 +690,9 @@ export default function InputArea({
           )}
 
           {attachmentError && (
-            <div className="px-2 pb-2 text-xs text-red-400 break-all">
+            <div className={`px-2 pb-2 text-xs break-all ${
+              attachmentError.startsWith('已添加参考图') ? 'text-fuchsia-200' : 'text-red-400'
+            }`}>
               {attachmentError}
             </div>
           )}
@@ -710,7 +722,7 @@ export default function InputArea({
               disabled={disabled || isStreaming}
               className="shrink-0 p-2 hover:bg-surface-700/50 text-surface-400 hover:text-surface-200
                          rounded-lg transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed"
-              title={isImageMode ? '添加参考图（仅保留 1 张）' : '添加图片'}
+              title={isImageMode ? `添加参考图（最多 ${MAX_IMAGE_REFERENCE_COUNT} 张）` : '添加图片'}
             >
               <ImagePlus size={18} />
             </button>
@@ -718,7 +730,7 @@ export default function InputArea({
               ref={imageInputRef}
               type="file"
               accept="image/*"
-              multiple={!isImageMode}
+              multiple
               onChange={handleImageSelect}
               className="hidden"
             />
@@ -783,6 +795,7 @@ export default function InputArea({
         <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-surface-500">
           <div className="truncate">
             当前上下文约 {contextIndicator.estimatedTokens} tokens / {contextIndicator.totalChars} chars / {contextIndicator.messageCount} 条消息
+            {contextIndicator.summaryEnabled && ` / 已启用长期摘要 ${contextIndicator.summaryCoveredMessageCount} 条`}
           </div>
           <p className="text-right">AI 可能会犯错，请核实重要信息</p>
         </div>
