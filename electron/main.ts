@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell, type WebContents } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, protocol, shell, type WebContents } from 'electron'
 import { promises as fs } from 'fs'
 import path from 'path'
 import {
@@ -15,6 +15,7 @@ import {
 let mainWindow: BrowserWindow | null = null
 let workspaceWindow: BrowserWindow | null = null
 const activeApiStreams = new Map<string, AbortController>()
+const activeImageGenerations = new Map<string, AbortController>()
 
 const APP_AMPERSAND_RE = /&(?:amp(?:;|%3[Bb])|#38;)/gi
 const ALLOWED_EXTERNAL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:'])
@@ -22,6 +23,25 @@ const READABLE_WEB_CONTENT_TYPES = ['text/html', 'application/xhtml+xml', 'text/
 const MAX_WEB_PAGE_CHARS = 500000
 const WEB_FETCH_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) KatopGPT/1.0 Chrome/124.0.0.0 Safari/537.36'
 const ALLOWED_WORKSPACE_EXTENSIONS = new Set(['.md', '.markdown', '.txt'])
+const IMAGE_MIME_EXTENSIONS: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'image/svg+xml': 'svg',
+}
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'katopgpt-image',
+    privileges: {
+      bypassCSP: true,
+      secure: true,
+      standard: true,
+      supportFetchAPI: true,
+    },
+  },
+])
 
 type ApiContentPart =
   | { type: 'text'; text: string }
@@ -49,16 +69,240 @@ interface ApiConnectionTestResult {
   error?: string
 }
 
+interface ImageFileResult {
+  ok: boolean
+  message?: string
+  filePath?: string
+  dataUrl?: string
+}
+
+function parseImageDataUrl(dataUrl: string) {
+  const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/)
+  if (!match) {
+    throw new Error('图片数据格式不正确。')
+  }
+
+  const mimeType = match[1].toLowerCase()
+  const extension = IMAGE_MIME_EXTENSIONS[mimeType]
+  if (!extension) {
+    throw new Error('暂不支持该图片格式。')
+  }
+
+  return {
+    buffer: Buffer.from(match[2], 'base64'),
+    mimeType,
+    extension,
+  }
+}
+
+function sanitizeImageFileName(fileName: string, extension: string) {
+  const fallback = `katopgpt-image-${Date.now()}`
+  const baseName = path.basename(fileName || fallback, path.extname(fileName || ''))
+  const sanitized = baseName.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim() || fallback
+  return `${sanitized}.${extension}`
+}
+
+function imageFileUrl(filePath: string) {
+  return `katopgpt-image://generated/${encodeURIComponent(path.basename(filePath))}`
+}
+
+function parseImageFileUrl(rawUrl: string) {
+  if (!rawUrl.startsWith('katopgpt-image://')) return null
+  const imageRoot = path.join(app.getPath('userData'), 'generated-images')
+
+  try {
+    const parsedUrl = new URL(rawUrl)
+    if (parsedUrl.hostname === 'generated') {
+      const fileName = path.basename(decodeURIComponent(parsedUrl.pathname.replace(/^\/+/, '')))
+      return path.join(imageRoot, fileName)
+    }
+  } catch {
+    // Fallback to legacy parsing below.
+  }
+
+  const decodedPath = decodeURIComponent(rawUrl.slice('katopgpt-image://'.length))
+  const legacyPath = decodedPath.replace(/^generated\//, '')
+  const absolutePath = path.isAbsolute(legacyPath)
+    ? path.resolve(legacyPath)
+    : path.join(imageRoot, path.basename(legacyPath))
+  const relativePath = path.relative(imageRoot, absolutePath)
+  if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) return null
+  return absolutePath
+}
+
+async function persistGeneratedImageDataUrl(dataUrl: string, fileName: string) {
+  const image = parseImageDataUrl(dataUrl)
+  const imageDir = path.join(app.getPath('userData'), 'generated-images')
+  await fs.mkdir(imageDir, { recursive: true })
+  const finalFileName = sanitizeImageFileName(fileName, image.extension)
+  const filePath = path.join(imageDir, finalFileName)
+  await fs.writeFile(filePath, image.buffer)
+  return {
+    filePath,
+    fileName: finalFileName,
+    imageUrl: imageFileUrl(filePath),
+  }
+}
+
+function imageDataUrlToFile(dataUrl: string, fileName: string) {
+  const image = parseImageDataUrl(dataUrl)
+  return new File([image.buffer], sanitizeImageFileName(fileName, image.extension), {
+    type: image.mimeType,
+  })
+}
+
+async function persistGeneratedImageResponse(firstImage: { b64_json?: string; url?: string }, abortSignal: AbortSignal) {
+  if (firstImage.b64_json) {
+    return persistGeneratedImageDataUrl(
+      normalizeImageDataUrl(firstImage.b64_json),
+      `generated-${Date.now()}.png`
+    )
+  }
+
+  if (firstImage.url) {
+    const imageResponse = await fetch(firstImage.url, { signal: abortSignal })
+    if (!imageResponse.ok) {
+      throw new Error('图片已生成，但下载图片失败。')
+    }
+    const imageBuffer = Buffer.from(await imageResponse.arrayBuffer())
+    const mimeType = imageResponse.headers.get('content-type') || 'image/png'
+    return persistGeneratedImageDataUrl(
+      normalizeImageDataUrl(imageBuffer.toString('base64'), mimeType),
+      `generated-${Date.now()}.${IMAGE_MIME_EXTENSIONS[mimeType.toLowerCase()] ?? 'png'}`
+    )
+  }
+
+  throw new Error('生图接口返回格式不受支持。')
+}
+
+async function openImageDataUrl(dataUrl: string, fileName: string): Promise<ImageFileResult> {
+  try {
+    const filePath = dataUrl.startsWith('katopgpt-image://') ? parseImageFileUrl(dataUrl) : null
+    const targetPath = filePath ?? (() => {
+      const image = parseImageDataUrl(dataUrl)
+      const imageDir = path.join(app.getPath('temp'), 'katopgpt-images')
+      return { image, imageDir }
+    })()
+
+    let openPath = filePath
+    if (!openPath && typeof targetPath !== 'string') {
+      await fs.mkdir(targetPath.imageDir, { recursive: true })
+      openPath = path.join(targetPath.imageDir, sanitizeImageFileName(fileName, targetPath.image.extension))
+      await fs.writeFile(openPath, targetPath.image.buffer)
+    }
+
+    if (!openPath) {
+      throw new Error('图片文件路径不可用。')
+    }
+
+    const errorMessage = await shell.openPath(openPath)
+
+    if (errorMessage) {
+      return { ok: false, message: errorMessage }
+    }
+
+    return { ok: true, filePath: openPath }
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : '打开图片失败。',
+    }
+  }
+}
+
+async function readImageDataUrl(imageUrl: string): Promise<ImageFileResult> {
+  try {
+    const filePath = parseImageFileUrl(imageUrl)
+    if (!filePath) {
+      throw new Error('图片路径不可用。')
+    }
+
+    const buffer = await fs.readFile(filePath)
+    const extension = path.extname(filePath).toLowerCase()
+    const mimeType = Object.entries(IMAGE_MIME_EXTENSIONS).find(([, item]) => `.${item}` === extension)?.[0] ?? 'image/png'
+    return {
+      ok: true,
+      filePath,
+      dataUrl: normalizeImageDataUrl(buffer.toString('base64'), mimeType),
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : '读取图片失败。',
+    }
+  }
+}
+
+async function saveImageDataUrl(dataUrl: string, fileName: string): Promise<ImageFileResult> {
+  try {
+    const sourcePath = dataUrl.startsWith('katopgpt-image://') ? parseImageFileUrl(dataUrl) : null
+    const image = sourcePath ? null : parseImageDataUrl(dataUrl)
+    const extension = sourcePath ? path.extname(sourcePath).slice(1) || 'png' : image!.extension
+    const defaultFileName = sanitizeImageFileName(fileName, extension)
+    const dialogOptions = {
+      title: '保存图片',
+      defaultPath: path.join(app.getPath('pictures'), defaultFileName),
+      filters: [
+        { name: '图片文件', extensions: [extension] },
+      ],
+    }
+    const result = mainWindow
+      ? await dialog.showSaveDialog(mainWindow, dialogOptions)
+      : await dialog.showSaveDialog(dialogOptions)
+
+    if (result.canceled || !result.filePath) {
+      return { ok: false, message: '已取消保存。' }
+    }
+
+    if (sourcePath) {
+      await fs.copyFile(sourcePath, result.filePath)
+    } else {
+      await fs.writeFile(result.filePath, image!.buffer)
+    }
+
+    return {
+      ok: true,
+      message: `已保存到：${result.filePath}`,
+      filePath: result.filePath,
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : '保存图片失败。',
+    }
+  }
+}
+
+async function openImagePath(filePath: string): Promise<ImageFileResult> {
+  try {
+    const errorMessage = await shell.openPath(filePath)
+
+    if (errorMessage) {
+      return { ok: false, message: errorMessage }
+    }
+
+    return { ok: true, filePath }
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : '打开图片失败。',
+    }
+  }
+}
+
 async function exportSpreadsheetSessionToFile(sessionId: string): Promise<ExportSpreadsheetSessionResult> {
   try {
     const { buffer, defaultFileName, charts } = exportSpreadsheetSession(sessionId)
-    const result = await dialog.showSaveDialog(mainWindow ?? undefined, {
+    const dialogOptions = {
       title: '导出表格结果',
       defaultPath: path.join(app.getPath('documents'), defaultFileName),
       filters: [
         { name: 'Excel 文件', extensions: ['xlsx'] },
       ],
-    })
+    }
+    const result = mainWindow
+      ? await dialog.showSaveDialog(mainWindow, dialogOptions)
+      : await dialog.showSaveDialog(dialogOptions)
 
     if (result.canceled || !result.filePath) {
       return {
@@ -110,13 +354,49 @@ interface CompleteChatRequest {
   messages: ApiChatMessage[]
   temperature: number
   maxTokens: number
+  tools?: ChatToolDefinition[]
+  toolChoice?: ChatToolChoice
+  responseMode?: 'text' | 'raw'
+}
+
+interface ChatToolDefinition {
+  type: 'function'
+  function: {
+    name: string
+    description: string
+    parameters: Record<string, unknown>
+  }
+}
+
+type ChatToolChoice = 'auto' | {
+  type: 'function'
+  function: { name: string }
+}
+
+interface CompleteChatResponsePayload {
+  choices?: Array<{
+    message?: {
+      content?: unknown
+      tool_calls?: Array<{
+        function?: {
+          name?: unknown
+          arguments?: unknown
+        }
+      }>
+    }
+  }>
 }
 
 interface GenerateImageRequest {
+  requestId?: string
   baseUrl: string
   apiKey: string
   model: string
   prompt: string
+  images?: Array<{
+    base64?: string
+    name: string
+  }>
   size: '1024x1024' | '1024x1536' | '1536x1024'
   quality: 'auto' | 'low' | 'medium' | 'high'
 }
@@ -124,6 +404,9 @@ interface GenerateImageRequest {
 interface GenerateImageResult {
   ok: boolean
   imageBase64?: string
+  imageUrl?: string
+  filePath?: string
+  fileName?: string
   revisedPrompt?: string
   error?: string
 }
@@ -496,6 +779,12 @@ async function completeChat(request: CompleteChatRequest) {
   if (request.maxTokens > 0) {
     requestBody.max_tokens = request.maxTokens
   }
+  if (request.tools?.length) {
+    requestBody.tools = request.tools
+  }
+  if (request.toolChoice) {
+    requestBody.tool_choice = request.toolChoice
+  }
 
   const response = await fetch(url, {
     method: 'POST',
@@ -516,7 +805,10 @@ async function completeChat(request: CompleteChatRequest) {
 
   if (contentType.includes('application/json')) {
     try {
-      const payload = JSON.parse(rawText)
+      const payload = JSON.parse(rawText) as CompleteChatResponsePayload
+      if (request.responseMode === 'raw') {
+        return payload
+      }
       const text = extractCompletionText(payload)
       if (text) return text
     } catch {
@@ -529,13 +821,23 @@ async function completeChat(request: CompleteChatRequest) {
     throw new Error(buildUnparsedResponseError(rawText))
   }
 
+  if (request.responseMode === 'raw') {
+    throw new Error(buildUnparsedResponseError(rawText))
+  }
+
   return text
 }
 
 async function generateImage(request: GenerateImageRequest): Promise<GenerateImageResult> {
   const baseUrl = normalizeApiBaseUrl(request.baseUrl)
-  const url = `${baseUrl}/images/generations`
   const prompt = request.prompt.trim()
+  const referenceImage = request.images?.find((image) => image.base64)
+  const url = referenceImage ? `${baseUrl}/images/edits` : `${baseUrl}/images/generations`
+  const abortController = new AbortController()
+
+  if (request.requestId) {
+    activeImageGenerations.set(request.requestId, abortController)
+  }
 
   if (!request.apiKey.trim()) {
     return { ok: false, error: '请先在设置中填写生图模型的 API Key。' }
@@ -546,20 +848,38 @@ async function generateImage(request: GenerateImageRequest): Promise<GenerateIma
   }
 
   try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${request.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: request.model,
-        prompt,
-        n: 1,
-        size: request.size,
-        quality: request.quality,
-      }),
-    })
+    const response = referenceImage
+      ? await fetch(url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${request.apiKey}`,
+          },
+          body: (() => {
+            const formData = new FormData()
+            formData.append('model', request.model)
+            formData.append('prompt', prompt)
+            formData.append('n', '1')
+            formData.append('size', request.size)
+            formData.append('image', imageDataUrlToFile(referenceImage.base64!, referenceImage.name))
+            return formData
+          })(),
+          signal: abortController.signal,
+        })
+      : await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${request.apiKey}`,
+          },
+          body: JSON.stringify({
+            model: request.model,
+            prompt,
+            n: 1,
+            size: request.size,
+            quality: request.quality,
+          }),
+          signal: abortController.signal,
+        })
 
     if (!response.ok) {
       const { message } = await readApiError(response)
@@ -579,33 +899,23 @@ async function generateImage(request: GenerateImageRequest): Promise<GenerateIma
       return { ok: false, error: '生图接口没有返回图片数据。' }
     }
 
-    if (firstImage.b64_json) {
-      return {
-        ok: true,
-        imageBase64: normalizeImageDataUrl(firstImage.b64_json),
-        revisedPrompt: firstImage.revised_prompt,
-      }
+    const persisted = await persistGeneratedImageResponse(firstImage, abortController.signal)
+    return {
+      ok: true,
+      ...persisted,
+      revisedPrompt: firstImage.revised_prompt,
     }
-
-    if (firstImage.url) {
-      const imageResponse = await fetch(firstImage.url)
-      if (!imageResponse.ok) {
-        return { ok: false, error: '图片已生成，但下载图片失败。' }
-      }
-      const imageBuffer = Buffer.from(await imageResponse.arrayBuffer())
-      const mimeType = imageResponse.headers.get('content-type') || 'image/png'
-      return {
-        ok: true,
-        imageBase64: normalizeImageDataUrl(imageBuffer.toString('base64'), mimeType),
-        revisedPrompt: firstImage.revised_prompt,
-      }
-    }
-
-    return { ok: false, error: '生图接口返回格式不受支持。' }
   } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      return { ok: false, error: '已停止生成图片。' }
+    }
     return {
       ok: false,
       error: error instanceof Error ? error.message : '生成图片失败。',
+    }
+  } finally {
+    if (request.requestId) {
+      activeImageGenerations.delete(request.requestId)
     }
   }
 }
@@ -956,11 +1266,30 @@ function createWindow() {
   }
 }
 
-app.whenReady().then(createWindow)
+app.whenReady().then(() => {
+  protocol.handle('katopgpt-image', async (request) => {
+    const filePath = parseImageFileUrl(request.url)
+    if (!filePath) {
+      return new Response('Not found', { status: 404 })
+    }
+
+    try {
+      const buffer = await fs.readFile(filePath)
+      const extension = path.extname(filePath).toLowerCase()
+      const contentType = Object.entries(IMAGE_MIME_EXTENSIONS).find(([, item]) => `.${item}` === extension)?.[0] ?? 'image/png'
+      return new Response(buffer, { headers: { 'Content-Type': contentType } })
+    } catch {
+      return new Response('Not found', { status: 404 })
+    }
+  })
+  createWindow()
+})
 
 app.on('window-all-closed', () => {
   activeApiStreams.forEach((controller) => controller.abort())
   activeApiStreams.clear()
+  activeImageGenerations.forEach((controller) => controller.abort())
+  activeImageGenerations.clear()
   if (process.platform !== 'darwin') {
     app.quit()
   }
@@ -984,6 +1313,9 @@ ipcMain.on('window:maximize', () => {
 ipcMain.on('window:close', () => mainWindow?.close())
 ipcMain.handle('window:isMaximized', () => mainWindow?.isMaximized())
 ipcMain.handle('shell:openExternal', (_event, url: string) => openExternalUrl(url))
+ipcMain.handle('images:open', (_event, dataUrl: string, fileName: string) => openImageDataUrl(dataUrl, fileName))
+ipcMain.handle('images:save', (_event, dataUrl: string, fileName: string) => saveImageDataUrl(dataUrl, fileName))
+ipcMain.handle('images:read', (_event, imageUrl: string) => readImageDataUrl(imageUrl))
 ipcMain.handle('workspaceWindow:open', () => {
   createWorkspaceWindow()
   return true
@@ -1011,6 +1343,13 @@ ipcMain.handle('files:exportSpreadsheetSession', (_event, sessionId: string) => 
 ipcMain.handle('api:testConnection', (_event, config: ApiConnectionConfig) => testApiConnection(config))
 ipcMain.handle('api:completeChat', (_event, request: CompleteChatRequest) => completeChat(request))
 ipcMain.handle('api:generateImage', (_event, request: GenerateImageRequest) => generateImage(request))
+ipcMain.handle('api:cancelGenerateImage', (_event, requestId: string) => {
+  const controller = activeImageGenerations.get(requestId)
+  if (!controller) return false
+  controller.abort()
+  activeImageGenerations.delete(requestId)
+  return true
+})
 ipcMain.handle('api:startChatStream', (event, request: StartChatStreamRequest) => {
   if (activeApiStreams.has(request.streamId)) {
     throw new Error('聊天流已存在')

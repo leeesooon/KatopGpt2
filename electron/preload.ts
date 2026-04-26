@@ -141,13 +141,49 @@ interface CompleteChatRequest {
   messages: ApiChatMessage[]
   temperature: number
   maxTokens: number
+  tools?: ChatToolDefinition[]
+  toolChoice?: ChatToolChoice
+  responseMode?: 'text' | 'raw'
+}
+
+interface ChatToolDefinition {
+  type: 'function'
+  function: {
+    name: string
+    description: string
+    parameters: Record<string, unknown>
+  }
+}
+
+type ChatToolChoice = 'auto' | {
+  type: 'function'
+  function: { name: string }
+}
+
+interface CompleteChatResponsePayload {
+  choices?: Array<{
+    message?: {
+      content?: string
+      tool_calls?: Array<{
+        function?: {
+          name?: string
+          arguments?: string
+        }
+      }>
+    }
+  }>
 }
 
 interface GenerateImageRequest {
+  requestId?: string
   baseUrl: string
   apiKey: string
   model: string
   prompt: string
+  images?: Array<{
+    base64?: string
+    name: string
+  }>
   size: '1024x1024' | '1024x1536' | '1536x1024'
   quality: 'auto' | 'low' | 'medium' | 'high'
 }
@@ -155,8 +191,18 @@ interface GenerateImageRequest {
 interface GenerateImageResult {
   ok: boolean
   imageBase64?: string
+  imageUrl?: string
+  filePath?: string
+  fileName?: string
   revisedPrompt?: string
   error?: string
+}
+
+interface ImageFileResult {
+  ok: boolean
+  message?: string
+  filePath?: string
+  dataUrl?: string
 }
 
 type ChatStreamEvent =
@@ -196,6 +242,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   close: () => ipcRenderer.send('window:close'),
   isMaximized: () => ipcRenderer.invoke('window:isMaximized'),
   openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),
+  openImage: (dataUrl: string, fileName: string) => ipcRenderer.invoke('images:open', dataUrl, fileName),
+  saveImage: (dataUrl: string, fileName: string) => ipcRenderer.invoke('images:save', dataUrl, fileName),
+  readImage: (imageUrl: string) => ipcRenderer.invoke('images:read', imageUrl),
   openWorkspaceWindow: () => ipcRenderer.invoke('workspaceWindow:open'),
   closeWorkspaceWindow: () => ipcRenderer.invoke('workspaceWindow:close'),
   getWorkspaceWindowState: () => ipcRenderer.invoke('workspaceWindow:getState'),
@@ -220,8 +269,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   executeSpreadsheetPlan: (request: ExecuteSpreadsheetPlanRequest) => ipcRenderer.invoke('files:executeSpreadsheetPlan', request),
   exportSpreadsheetSession: (sessionId: string) => ipcRenderer.invoke('files:exportSpreadsheetSession', sessionId),
   testApiConnection: (config: ApiConnectionConfig) => ipcRenderer.invoke('api:testConnection', config),
-  completeChat: (request: CompleteChatRequest) => ipcRenderer.invoke('api:completeChat', request),
+  completeChat: (request: CompleteChatRequest) => ipcRenderer.invoke('api:completeChat', request) as Promise<string | CompleteChatResponsePayload>,
   generateImage: (request: GenerateImageRequest) => ipcRenderer.invoke('api:generateImage', request),
+  cancelGenerateImage: (requestId: string) => ipcRenderer.invoke('api:cancelGenerateImage', requestId),
   startChatStream: (request: StartChatStreamRequest) => ipcRenderer.invoke('api:startChatStream', request),
   cancelChatStream: (streamId: string) => ipcRenderer.invoke('api:cancelChatStream', streamId),
   subscribeChatStreamEvents: (listener: (event: ChatStreamEvent) => void) => {

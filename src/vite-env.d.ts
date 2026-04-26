@@ -147,13 +147,49 @@ interface CompleteChatRequest {
   messages: ApiChatMessage[]
   temperature: number
   maxTokens: number
+  tools?: ChatToolDefinition[]
+  toolChoice?: ChatToolChoice
+  responseMode?: 'text' | 'raw'
+}
+
+interface ChatToolDefinition {
+  type: 'function'
+  function: {
+    name: string
+    description: string
+    parameters: Record<string, unknown>
+  }
+}
+
+type ChatToolChoice = 'auto' | {
+  type: 'function'
+  function: { name: string }
+}
+
+interface CompleteChatResponsePayload {
+  choices?: Array<{
+    message?: {
+      content?: string
+      tool_calls?: Array<{
+        function?: {
+          name?: string
+          arguments?: string
+        }
+      }>
+    }
+  }>
 }
 
 interface GenerateImageRequest {
+  requestId?: string
   baseUrl: string
   apiKey: string
   model: string
   prompt: string
+  images?: Array<{
+    base64?: string
+    name: string
+  }>
   size: '1024x1024' | '1024x1536' | '1536x1024'
   quality: 'auto' | 'low' | 'medium' | 'high'
 }
@@ -161,8 +197,18 @@ interface GenerateImageRequest {
 interface GenerateImageResult {
   ok: boolean
   imageBase64?: string
+  imageUrl?: string
+  filePath?: string
+  fileName?: string
   revisedPrompt?: string
   error?: string
+}
+
+interface ImageFileResult {
+  ok: boolean
+  message?: string
+  filePath?: string
+  dataUrl?: string
 }
 
 type ChatStreamEvent =
@@ -177,6 +223,9 @@ interface ElectronAPI {
   close: () => void
   isMaximized: () => Promise<boolean>
   openExternal: (url: string) => Promise<boolean>
+  openImage: (dataUrl: string, fileName: string) => Promise<ImageFileResult>
+  saveImage: (dataUrl: string, fileName: string) => Promise<ImageFileResult>
+  readImage: (imageUrl: string) => Promise<ImageFileResult>
   openWorkspaceWindow: () => Promise<boolean>
   closeWorkspaceWindow: () => Promise<boolean>
   getWorkspaceWindowState: () => Promise<WorkspaceWindowState>
@@ -195,8 +244,9 @@ interface ElectronAPI {
   executeSpreadsheetPlan: (request: ExecuteSpreadsheetPlanRequest) => Promise<ExecuteSpreadsheetInstructionResult>
   exportSpreadsheetSession: (sessionId: string) => Promise<ExportSpreadsheetSessionResult>
   testApiConnection: (config: ApiConnectionConfig) => Promise<ApiConnectionTestResult>
-  completeChat: (request: CompleteChatRequest) => Promise<string>
+  completeChat: (request: CompleteChatRequest) => Promise<string | CompleteChatResponsePayload>
   generateImage: (request: GenerateImageRequest) => Promise<GenerateImageResult>
+  cancelGenerateImage: (requestId: string) => Promise<boolean>
   startChatStream: (request: StartChatStreamRequest) => Promise<boolean>
   cancelChatStream: (streamId: string) => Promise<boolean>
   subscribeChatStreamEvents: (listener: (event: ChatStreamEvent) => void) => number

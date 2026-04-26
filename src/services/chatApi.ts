@@ -6,8 +6,15 @@ import type {
   ImageGenerationQuality,
   ImageGenerationSize,
   SpreadsheetWorkbookSchema,
-  SpreadsheetPlanStep,
 } from '../types'
+import type {
+  SpreadsheetExecutionPlan,
+  SpreadsheetIntentParseResult,
+} from '../../electron/shared/spreadsheetPlan'
+import {
+  spreadsheetPlannerResultSchema,
+  spreadsheetPlannerToolDefinition,
+} from '../../electron/shared/spreadsheetPlan'
 
 export class ChatApiError extends Error {
   constructor(
@@ -39,7 +46,9 @@ interface ApiConnectionTestResult {
 }
 
 export interface GenerateImageRequest {
+  requestId?: string
   prompt: string
+  images?: ImageAttachment[]
   size: ImageGenerationSize
   quality: ImageGenerationQuality
 }
@@ -47,41 +56,11 @@ export interface GenerateImageRequest {
 export interface GenerateImageResult {
   ok: boolean
   imageBase64?: string
+  imageUrl?: string
+  filePath?: string
+  fileName?: string
   revisedPrompt?: string
   error?: string
-}
-export interface SpreadsheetPlannerFilter {
-  column: string
-  operator: 'eq' | 'contains' | 'gt' | 'gte' | 'lt' | 'lte'
-  value: string
-}
-
-export interface SpreadsheetExecutionPlan {
-  intent: 'count' | 'sum' | 'avg' | 'chart' | 'export' | 'script' | 'filter_rows' | 'analysis'
-  sourceSheetName?: string
-  groupByColumns?: string[]
-  valueColumn?: string
-  filters?: SpreadsheetPlannerFilter[]
-  selectColumns?: string[]
-  sortBy?: string
-  sortDirection?: 'asc' | 'desc'
-  chartType?: 'bar' | 'line' | 'pie' | 'horizontalBar'
-  targetSheetName?: string
-  useLastCreatedSheet?: boolean
-  topN?: number
-  steps?: SpreadsheetPlanStep[]
-  explanation?: string
-  script?: {
-    language: 'python' | 'javascript'
-    code: string
-    summary?: string
-  }
-}
-
-interface SpreadsheetIntentParseResult {
-  shouldExecute: boolean
-  normalizedInstruction?: string
-  plan?: SpreadsheetExecutionPlan
 }
 
 interface ElectronChatStreamRequest {
@@ -102,6 +81,56 @@ type ElectronChatStreamEvent =
 type ContentPart =
   | { type: 'text'; text: string }
   | { type: 'image_url'; image_url: { url: string } }
+
+type ChatToolDefinition = typeof spreadsheetPlannerToolDefinition
+
+type ChatToolChoice = 'auto' | {
+  type: 'function'
+  function: { name: string }
+}
+
+interface ChatToolCall {
+  function?: {
+    name?: string
+    arguments?: string
+  }
+}
+
+interface CompleteChatChoice {
+  message?: {
+    content?: string
+    tool_calls?: ChatToolCall[]
+  }
+}
+
+interface CompleteChatResponsePayload {
+  choices?: CompleteChatChoice[]
+}
+
+interface CompleteChatRequest {
+  baseUrl: string
+  apiKey: string
+  model: string
+  messages: Array<{ role: string; content: string | ContentPart[] }>
+  temperature: number
+  maxTokens: number
+  tools?: ChatToolDefinition[]
+  toolChoice?: ChatToolChoice
+  responseMode?: 'text' | 'raw'
+}
+
+type SpreadsheetPlannerFailureReason =
+  | 'no_tool_call'
+  | 'tool_args_parse_failed'
+  | 'zod_validation_failed'
+  | 'should_execute_false'
+  | 'function_call_request_failed'
+  | 'json_parse_failed'
+  | 'fallback_request_failed'
+
+function logSpreadsheetPlanner(reason: SpreadsheetPlannerFailureReason, details: Record<string, unknown>) {
+  console.warn('[spreadsheet-planner]', reason, details)
+}
 
 const MAX_FILE_CONTEXT_CHARS = 12000
 
@@ -151,9 +180,11 @@ function buildApiMessages(
         parts.push({ type: 'text', text: textContent })
       }
       for (const img of m.images) {
-        parts.push({ type: 'image_url', image_url: { url: img.base64 } })
+        if (img.base64) {
+          parts.push({ type: 'image_url', image_url: { url: img.base64 } })
+        }
       }
-      result.push({ role: m.role, content: parts })
+      result.push({ role: m.role, content: parts.length > 0 ? parts : textContent })
     } else {
       result.push({ role: m.role, content: textContent })
     }
@@ -198,6 +229,170 @@ function extractJsonObject(text: string) {
         return null
       }
     }
+    return null
+  }
+}
+
+function extractPlannerToolArguments(payload: CompleteChatResponsePayload) {
+  const toolCalls = payload.choices?.[0]?.message?.tool_calls
+  if (!Array.isArray(toolCalls)) {
+    return {
+      ok: false as const,
+      reason: 'no_tool_call' as const,
+      availableToolNames: [],
+    }
+  }
+
+  const availableToolNames = toolCalls
+    .map((toolCall) => toolCall.function?.name)
+    .filter((name): name is string => typeof name === 'string')
+  const plannerCall = toolCalls.find((toolCall) => toolCall.function?.name === spreadsheetPlannerToolDefinition.function.name)
+  const rawArguments = plannerCall?.function?.arguments
+  if (!rawArguments) {
+    return {
+      ok: false as const,
+      reason: 'no_tool_call' as const,
+      availableToolNames,
+    }
+  }
+
+  try {
+    return {
+      ok: true as const,
+      rawArguments,
+      parsedArguments: JSON.parse(rawArguments) as unknown,
+      availableToolNames,
+    }
+  } catch {
+    return {
+      ok: false as const,
+      reason: 'tool_args_parse_failed' as const,
+      rawArguments,
+      availableToolNames,
+    }
+  }
+}
+
+async function completeChatWithPayload(
+  request: CompleteChatRequest,
+  signal?: AbortSignal
+): Promise<CompleteChatResponsePayload | null> {
+  if (window.electronAPI?.completeChat) {
+    const response = await window.electronAPI.completeChat({
+      ...request,
+      responseMode: 'raw',
+    })
+    return typeof response === 'string' ? null : response
+  }
+
+  const baseUrl = request.baseUrl.replace(/\/+$/, '')
+  const url = `${baseUrl}/chat/completions`
+  const body: Record<string, unknown> = {
+    model: request.model,
+    temperature: request.temperature,
+    stream: false,
+    messages: request.messages,
+  }
+
+  if (request.maxTokens > 0) {
+    body.max_tokens = request.maxTokens
+  }
+  if (request.tools?.length) {
+    body.tools = request.tools
+  }
+  if (request.toolChoice) {
+    body.tool_choice = request.toolChoice
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${request.apiKey}`,
+    },
+    body: JSON.stringify(body),
+    signal,
+  })
+
+  if (!response.ok) {
+    throw new Error(`API 请求失败 (${response.status})`)
+  }
+
+  return await response.json() as CompleteChatResponsePayload
+}
+
+async function parseSpreadsheetIntentWithFunctionCalling(
+  config: ApiConfig,
+  systemPrompt: string,
+  userPrompt: string,
+  signal?: AbortSignal
+): Promise<SpreadsheetIntentParseResult | null> {
+  try {
+    const payload = await completeChatWithPayload({
+      baseUrl: config.baseUrl,
+      apiKey: config.apiKey,
+      model: config.model,
+      temperature: 0,
+      maxTokens: 700,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      tools: [spreadsheetPlannerToolDefinition],
+      toolChoice: {
+        type: 'function',
+        function: { name: spreadsheetPlannerToolDefinition.function.name },
+      },
+    }, signal)
+    if (!payload) {
+      logSpreadsheetPlanner('function_call_request_failed', {
+        model: config.model,
+        reason: 'empty_payload',
+      })
+      return null
+    }
+
+    const extracted = extractPlannerToolArguments(payload)
+    if (!extracted.ok) {
+      logSpreadsheetPlanner(extracted.reason, {
+        model: config.model,
+        availableToolNames: extracted.availableToolNames,
+        rawArgumentsPreview: 'rawArguments' in extracted && typeof extracted.rawArguments === 'string'
+          ? extracted.rawArguments.slice(0, 400)
+          : undefined,
+      })
+      return null
+    }
+
+    const parsed = spreadsheetPlannerResultSchema.safeParse(extracted.parsedArguments)
+    if (!parsed.success) {
+      logSpreadsheetPlanner('zod_validation_failed', {
+        model: config.model,
+        source: 'function_call',
+        issues: parsed.error.issues.map((issue) => ({
+          path: issue.path.join('.'),
+          message: issue.message,
+        })),
+        rawArgumentsPreview: extracted.rawArguments.slice(0, 800),
+      })
+      return null
+    }
+
+    if (!parsed.data.shouldExecute) {
+      logSpreadsheetPlanner('should_execute_false', {
+        model: config.model,
+        source: 'function_call',
+        normalizedInstruction: parsed.data.normalizedInstruction,
+        hasPlan: Boolean(parsed.data.plan),
+      })
+    }
+
+    return parsed.data
+  } catch (error) {
+    logSpreadsheetPlanner('function_call_request_failed', {
+      model: config.model,
+      error: error instanceof Error ? error.message : String(error),
+    })
     return null
   }
 }
@@ -415,7 +610,7 @@ export async function parseSpreadsheetIntent(
   recentContext?: string,
   signal?: AbortSignal
 ): Promise<SpreadsheetIntentParseResult | null> {
-  const systemPrompt = [
+  const plannerRules = [
     '你是一个表格指令解析器。',
     '你的任务是把用户针对 CSV/XLSX 的自然语言请求，转成可执行的结构化计划。',
     '优先利用已有上下文理解用户口语、省略、指代和续问。',
@@ -426,17 +621,16 @@ export async function parseSpreadsheetIntent(
     '如果用户提到“岗位分布”“部门分布”“占比分布”“人员分布”，通常应理解为先按对应字段分组计数；未明确图表类型但明显要看分布时，可默认柱状图。',
     '如果用户没有明确图表类型但明确要画图，默认改写成“生成柱状图”。',
     '如果用户没有重复说明分组字段，但最近上下文里已有刚生成的统计结果，可以沿用最近那次统计意图。',
-    '只输出 JSON，不要输出额外解释。',
-    'JSON 结构必须是：{"shouldExecute":boolean,"normalizedInstruction":string,"plan":{...}}',
+    `你必须调用函数 ${spreadsheetPlannerToolDefinition.function.name} 返回结果，不要输出额外自然语言。`,
     'plan 优先使用 steps DSL，而不是堆很多顶层字段。',
-    'plan 推荐结构：{"intent":"analysis|detail_filter|aggregation|chart|export|script","steps":[...],"targetSheetName":"...","explanation":"..."}',
+    'plan 推荐结构：intent + steps + targetSheetName + explanation。',
     '可用 steps 只有：filter, group_by, aggregate, sort, top_n, select_columns, chart, export。',
     'aggregate.metrics.type 只能是 count / sum / avg。',
     'chart.chartType 只能是 bar / line / pie / horizontalBar。',
     '如果需要兼容旧执行器，也可补充 groupByColumns/valueColumn/filters/selectColumns/sortBy/topN/chartType 等顶层字段，但 steps 是首选。',
     'filters 里的 operator 只能是 eq / contains / gt / gte / lt / lte。',
     'intent 只能是 analysis / detail_filter / aggregation / chart / export / script。',
-    '只有当内建操作明显不够时，才使用 script。script.language 优先使用 python，只有兼容旧能力时才允许 javascript。',
+    '只有当内建操作明显不够时，才使用 script。script.language 只能使用 python。',
     'python script 会收到这些预定义变量：INPUT_WORKBOOK, SCHEMA_PATH, OUTPUT_DIR, RESULT_PATH, SESSION_INFO。脚本必须把标准 JSON 结果写入 RESULT_PATH。',
     'RESULT_PATH JSON 推荐结构：{"ok":true,"message":"...","createdSheetNames":["..."],"exportedFilePath":"...xlsx","chartPaths":["...png"],"preview":{"headers":[...],"rows":[...]}}。失败时写 {"ok": false, "error": "..."}。',
     'script 只能基于当前表格临时副本和输出目录操作，会话外文件、网络、系统命令都不可用。',
@@ -453,6 +647,17 @@ export async function parseSpreadsheetIntent(
     '如果用户说“把刚才那个结果画成饼图”，可以输出：{"intent":"chart","useLastCreatedSheet":true,"steps":[{"op":"chart","chartType":"pie"}]}',
     '如果用户说“导出这个结果”，可以输出：{"intent":"export","useLastCreatedSheet":true,"steps":[{"op":"export","target":"excel_file"}]}',
     '如果用户要复杂改造，可输出 python script，例如：{"intent":"script","script":{"language":"python","summary":"清洗部门列并输出新表","code":"import json\nimport pandas as pd\nfrom pathlib import Path\nresult_path = Path(RESULT_PATH)\n...\nresult_path.write_text(json.dumps({\"ok\": True, \"message\": \"已完成\"}, ensure_ascii=False), encoding=\"utf-8\")"}}',
+  ]
+
+  const toolSystemPrompt = [
+    ...plannerRules,
+    `你必须调用函数 ${spreadsheetPlannerToolDefinition.function.name} 返回结果，不要输出额外自然语言。`,
+  ].join('\n')
+
+  const jsonFallbackSystemPrompt = [
+    ...plannerRules,
+    '只输出 JSON，不要输出额外解释。',
+    'JSON 结构必须是：{"shouldExecute":boolean,"normalizedInstruction":string,"plan":{...}}',
   ].join('\n')
 
   const userPrompt = [
@@ -464,21 +669,36 @@ export async function parseSpreadsheetIntent(
     spreadsheetSummary,
   ].join('\n')
 
+  const functionCallingResult = await parseSpreadsheetIntentWithFunctionCalling(
+    config,
+    toolSystemPrompt,
+    userPrompt,
+    signal
+  )
+  if (functionCallingResult) {
+    return functionCallingResult
+  }
+
   let content: string | undefined
   if (window.electronAPI?.completeChat) {
     try {
-      content = await window.electronAPI.completeChat({
+      const completion = await window.electronAPI.completeChat({
         baseUrl: config.baseUrl,
         apiKey: config.apiKey,
         model: config.model,
-        temperature: 0,
-        maxTokens: 300,
-        messages: [
-          { role: 'system', content: systemPrompt },
+          temperature: 0,
+          maxTokens: 300,
+          messages: [
+          { role: 'system', content: jsonFallbackSystemPrompt },
           { role: 'user', content: userPrompt },
         ],
       })
+      content = typeof completion === 'string' ? completion : undefined
     } catch {
+      logSpreadsheetPlanner('fallback_request_failed', {
+        model: config.model,
+        source: 'json_fallback',
+      })
       return null
     }
   } else {
@@ -496,7 +716,7 @@ export async function parseSpreadsheetIntent(
         max_tokens: 300,
         stream: false,
         messages: [
-          { role: 'system', content: systemPrompt },
+          { role: 'system', content: jsonFallbackSystemPrompt },
           { role: 'user', content: userPrompt },
         ],
       }),
@@ -504,6 +724,11 @@ export async function parseSpreadsheetIntent(
     })
 
     if (!response.ok) {
+      logSpreadsheetPlanner('fallback_request_failed', {
+        model: config.model,
+        source: 'json_fallback',
+        status: response.status,
+      })
       return null
     }
 
@@ -513,20 +738,49 @@ export async function parseSpreadsheetIntent(
     content = payload.choices?.[0]?.message?.content?.trim()
   }
 
-  if (!content) return null
+  if (!content) {
+    logSpreadsheetPlanner('fallback_request_failed', {
+      model: config.model,
+      source: 'json_fallback',
+      reason: 'empty_content',
+    })
+    return null
+  }
 
   const parsed = extractJsonObject(content)
-  if (!parsed) return null
-
-  return {
-    shouldExecute: Boolean(parsed.shouldExecute),
-    normalizedInstruction: typeof parsed.normalizedInstruction === 'string'
-      ? parsed.normalizedInstruction.trim()
-      : undefined,
-    plan: parsed.plan && typeof parsed.plan === 'object'
-      ? parsed.plan as SpreadsheetExecutionPlan
-      : undefined,
+  if (!parsed) {
+    logSpreadsheetPlanner('json_parse_failed', {
+      model: config.model,
+      source: 'json_fallback',
+      contentPreview: content.slice(0, 800),
+    })
+    return null
   }
+
+  const validated = spreadsheetPlannerResultSchema.safeParse(parsed)
+  if (!validated.success) {
+    logSpreadsheetPlanner('zod_validation_failed', {
+      model: config.model,
+      source: 'json_fallback',
+      issues: validated.error.issues.map((issue) => ({
+        path: issue.path.join('.'),
+        message: issue.message,
+      })),
+      contentPreview: content.slice(0, 800),
+    })
+    return null
+  }
+
+  if (!validated.data.shouldExecute) {
+    logSpreadsheetPlanner('should_execute_false', {
+      model: config.model,
+      source: 'json_fallback',
+      normalizedInstruction: validated.data.normalizedInstruction,
+      hasPlan: Boolean(validated.data.plan),
+    })
+  }
+
+  return validated.data
 }
 
 export async function generateImage(
@@ -541,14 +795,26 @@ export async function generateImage(
   }
 
   return window.electronAPI.generateImage({
+    requestId: request.requestId,
     baseUrl: config.baseUrl,
     apiKey: config.apiKey,
     model: config.model,
     prompt: request.prompt,
+    images: request.images?.slice(0, 1).map((image) => ({
+      base64: image.base64,
+      name: image.name,
+    })),
     size: request.size,
     quality: request.quality,
   })
 }
+
+export async function cancelGenerateImage(requestId: string): Promise<boolean> {
+  if (!window.electronAPI?.cancelGenerateImage) return false
+  return window.electronAPI.cancelGenerateImage(requestId)
+}
+
+export type { SpreadsheetExecutionPlan }
 
 /** Non-streaming test call to verify API config */
 export async function testApiConnection(config: { baseUrl: string; apiKey: string }): Promise<ApiConnectionTestResult> {

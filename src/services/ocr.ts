@@ -14,6 +14,7 @@ function getWorker() {
  * OCR a single image and return the recognised text.
  */
 export async function recognizeImage(image: ImageAttachment): Promise<string> {
+  if (!image.base64) return ''
   const worker = await getWorker()
   const { data } = await worker.recognize(image.base64)
   return data.text.trim()

@@ -7,6 +7,16 @@ import { spawn } from 'child_process'
 import { Script, createContext } from 'vm'
 import * as XLSX from 'xlsx'
 import { z } from 'zod'
+import {
+  spreadsheetPlanFilterSchema,
+  spreadsheetToolStepSchemas,
+} from './shared/spreadsheetPlan'
+import type {
+  SpreadsheetExecutionPlan,
+  SpreadsheetPlanFilter,
+  SpreadsheetPlanStep,
+  SpreadsheetToolName,
+} from './shared/spreadsheetPlan'
 
 export interface ExtractDocumentTextRequest {
   fileName: string
@@ -27,76 +37,6 @@ export interface ExecuteSpreadsheetInstructionRequest {
   sessionId: string
   instruction: string
 }
-
-export interface SpreadsheetPlanFilter {
-  column: string
-  operator: 'eq' | 'contains' | 'gt' | 'gte' | 'lt' | 'lte'
-  value: string
-}
-
-export interface SpreadsheetExecutionPlan {
-  intent: 'count' | 'sum' | 'avg' | 'chart' | 'export' | 'script' | 'filter_rows' | 'analysis' | 'detail_filter' | 'aggregation'
-  sourceSheetName?: string
-  groupByColumns?: string[]
-  valueColumn?: string
-  filters?: SpreadsheetPlanFilter[]
-  selectColumns?: string[]
-  sortBy?: string
-  sortDirection?: 'asc' | 'desc'
-  chartType?: SpreadsheetChartType
-  targetSheetName?: string
-  useLastCreatedSheet?: boolean
-  topN?: number
-  steps?: SpreadsheetPlanStep[]
-  explanation?: string
-  script?: {
-    language: 'python' | 'javascript'
-    code: string
-    summary?: string
-  }
-}
-
-export type SpreadsheetPlanStep =
-  | {
-      op: 'filter'
-      conditions: SpreadsheetPlanFilter[]
-    }
-  | {
-      op: 'group_by'
-      columns: string[]
-    }
-  | {
-      op: 'aggregate'
-      metrics: Array<{
-        type: 'count' | 'sum' | 'avg'
-        column?: string
-        as?: string
-      }>
-    }
-  | {
-      op: 'sort'
-      by: string
-      direction: 'asc' | 'desc'
-    }
-  | {
-      op: 'top_n'
-      value: number
-    }
-  | {
-      op: 'select_columns'
-      columns: string[]
-    }
-  | {
-      op: 'chart'
-      chartType: SpreadsheetChartType
-    }
-  | {
-      op: 'export'
-      target: 'new_sheet' | 'excel_file'
-      sheetName?: string
-    }
-
-type SpreadsheetToolName = SpreadsheetPlanStep['op']
 
 interface SpreadsheetToolExecutionState {
   intent: SpreadsheetExecutionPlan['intent']
@@ -719,53 +659,6 @@ function resolveSheetHeaders(workbook: XLSX.WorkBook, sheetName?: string) {
 
   return { resolvedSheetName, headers }
 }
-
-const spreadsheetPlanFilterSchema = z.object({
-  column: z.string().min(1),
-  operator: z.enum(['eq', 'contains', 'gt', 'gte', 'lt', 'lte']),
-  value: z.string(),
-})
-
-const spreadsheetToolStepSchemas = {
-  filter: z.object({
-    op: z.literal('filter'),
-    conditions: z.array(spreadsheetPlanFilterSchema).min(1),
-  }),
-  group_by: z.object({
-    op: z.literal('group_by'),
-    columns: z.array(z.string().min(1)).min(1),
-  }),
-  aggregate: z.object({
-    op: z.literal('aggregate'),
-    metrics: z.array(z.object({
-      type: z.enum(['count', 'sum', 'avg']),
-      column: z.string().optional(),
-      as: z.string().optional(),
-    })).min(1),
-  }),
-  sort: z.object({
-    op: z.literal('sort'),
-    by: z.string().min(1),
-    direction: z.enum(['asc', 'desc']),
-  }),
-  top_n: z.object({
-    op: z.literal('top_n'),
-    value: z.number().int().positive(),
-  }),
-  select_columns: z.object({
-    op: z.literal('select_columns'),
-    columns: z.array(z.string().min(1)).min(1),
-  }),
-  chart: z.object({
-    op: z.literal('chart'),
-    chartType: z.enum(['bar', 'line', 'pie', 'horizontalBar']),
-  }),
-  export: z.object({
-    op: z.literal('export'),
-    target: z.enum(['new_sheet', 'excel_file']),
-    sheetName: z.string().optional(),
-  }),
-} satisfies Record<SpreadsheetToolName, z.ZodTypeAny>
 
 type SpreadsheetToolHandler<Name extends SpreadsheetToolName> = {
   schema: typeof spreadsheetToolStepSchemas[Name]

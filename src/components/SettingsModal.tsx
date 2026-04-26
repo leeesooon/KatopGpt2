@@ -21,6 +21,32 @@ interface ConnectionTestState {
   message?: string
 }
 
+const imageSizeLabels: Record<ImageGenerationSize, string> = {
+  '1024x1024': '1024×1024 方图',
+  '1024x1536': '1024×1536 竖图',
+  '1536x1024': '1536×1024 横图',
+}
+
+const imageSizeHints: Record<ImageGenerationSize, string> = {
+  '1024x1024': '适合头像、图标、社媒配图',
+  '1024x1536': '竖图比例，适合海报和手机封面',
+  '1536x1024': '横图比例，适合横幅和桌面场景',
+}
+
+const imageQualityLabels: Record<ImageGenerationQuality, string> = {
+  auto: '自动',
+  low: '低',
+  medium: '中',
+  high: '高',
+}
+
+const imageQualityHints: Record<ImageGenerationQuality, string> = {
+  auto: '自动（推荐）',
+  low: '低质量通常更快',
+  medium: '中等质量，速度和效果较均衡',
+  high: '高质量可能明显变慢',
+}
+
 function emptyForm(): ProviderFormData {
   return { name: '', baseUrl: '', apiKey: '', models: [], modelInput: '' }
 }
@@ -603,6 +629,23 @@ export default function SettingsModal() {
             <h3 className="text-sm font-semibold text-surface-300 uppercase tracking-wider">
               生图模式
             </h3>
+            <div className={`rounded-xl border px-3 py-2.5 ${
+              imageQuality === 'high'
+                ? 'border-amber-300/25 bg-amber-300/10'
+                : 'border-fuchsia-300/15 bg-fuchsia-300/10'
+            }`}>
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="font-medium text-surface-100">
+                  当前生图参数：尺寸 {imageSizeLabels[imageSize]} / 质量 {imageQualityLabels[imageQuality]}
+                </span>
+                <span className={imageQuality === 'high' ? 'text-amber-200' : 'text-surface-400'}>
+                  {imageQualityHints[imageQuality]}
+                </span>
+              </div>
+              <p className="mt-1 text-[11px] text-surface-500">
+                {imageSizeHints[imageSize]}
+              </p>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <label className="text-xs font-medium text-surface-400">生图服务商</label>
@@ -643,10 +686,10 @@ export default function SettingsModal() {
               <div className="space-y-1.5">
                 <label className="text-xs font-medium text-surface-400">图片质量</label>
                 <select value={imageQuality} onChange={(e) => setImageQuality(e.target.value as ImageGenerationQuality)} className="input-field">
-                  <option value="auto">自动</option>
-                  <option value="low">低</option>
+                  <option value="auto">自动（推荐）</option>
+                  <option value="low">低（更快）</option>
                   <option value="medium">中</option>
-                  <option value="high">高</option>
+                  <option value="high">高（更慢）</option>
                 </select>
               </div>
             </div>

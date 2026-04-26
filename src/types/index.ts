@@ -1,3 +1,5 @@
+import type { SpreadsheetPlanStep } from '../../electron/shared/spreadsheetPlan'
+
 /** Single model configuration within a provider */
 export interface ModelConfig {
   name: string
@@ -27,8 +29,11 @@ export interface ImageGenerationSettings {
 export interface ImageAttachment {
   id: string
   /** Full data URL, e.g. "data:image/png;base64,..." */
-  base64: string
+  base64?: string
+  url?: string
+  filePath?: string
   name: string
+  isGenerating?: boolean
 }
 
 export interface SpreadsheetColumnSchema {
@@ -47,50 +52,6 @@ export interface SpreadsheetSheetSchema {
 export interface SpreadsheetWorkbookSchema {
   sheets: SpreadsheetSheetSchema[]
 }
-
-export type SpreadsheetPlanStep =
-  | {
-      op: 'filter'
-      conditions: Array<{
-        column: string
-        operator: 'eq' | 'contains' | 'gt' | 'gte' | 'lt' | 'lte'
-        value: string
-      }>
-    }
-  | {
-      op: 'group_by'
-      columns: string[]
-    }
-  | {
-      op: 'aggregate'
-      metrics: Array<{
-        type: 'count' | 'sum' | 'avg'
-        column?: string
-        as?: string
-      }>
-    }
-  | {
-      op: 'sort'
-      by: string
-      direction: 'asc' | 'desc'
-    }
-  | {
-      op: 'top_n'
-      value: number
-    }
-  | {
-      op: 'select_columns'
-      columns: string[]
-    }
-  | {
-      op: 'chart'
-      chartType: 'bar' | 'line' | 'pie' | 'horizontalBar'
-    }
-  | {
-      op: 'export'
-      target: 'new_sheet' | 'excel_file'
-      sheetName?: string
-    }
 
 /** File attached to a message */
 export interface FileAttachment {
@@ -161,6 +122,11 @@ export interface Message {
   metadata?: {
     kind?: 'chat' | 'image_generation'
     revisedPrompt?: string
+    originalPrompt?: string
+    providerId?: string
+    model?: string
+    size?: ImageGenerationSize
+    quality?: ImageGenerationQuality
   }
   /** Search results attached to this message (for assistant responses) */
   searchResults?: SearchResult[]
@@ -260,3 +226,5 @@ export function supportsImageGeneration(model: ModelConfig | undefined) {
 export function supportsVision(model: ModelConfig | undefined) {
   return model?.capabilities?.vision ?? model?.multimodal ?? false
 }
+
+export type { SpreadsheetPlanStep }

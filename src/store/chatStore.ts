@@ -24,6 +24,7 @@ interface ChatState {
   // Message actions
   addMessage: (conversationId: string, message: Omit<Message, 'id' | 'timestamp'>) => Message
   updateMessage: (conversationId: string, messageId: string, content: string) => void
+  patchMessage: (conversationId: string, messageId: string, patch: Partial<Omit<Message, 'id' | 'timestamp'>>) => void
   getActiveMessages: () => Message[]
 
   // Provider actions
@@ -126,6 +127,22 @@ export const useChatStore = create<ChatState>()(
                   ...c,
                   messages: c.messages.map((m) =>
                     m.id === messageId ? { ...m, content } : m
+                  ),
+                  updatedAt: Date.now(),
+                }
+              : c
+          ),
+        }))
+      },
+
+      patchMessage: (conversationId, messageId, patch) => {
+        set((state) => ({
+          conversations: state.conversations.map((c) =>
+            c.id === conversationId
+              ? {
+                  ...c,
+                  messages: c.messages.map((m) =>
+                    m.id === messageId ? { ...m, ...patch } : m
                   ),
                   updatedAt: Date.now(),
                 }

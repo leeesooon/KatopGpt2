@@ -2,7 +2,7 @@
 import { MessageSquarePlus, Sparkles, ArrowDown } from 'lucide-react'
 import { useChatStore } from '../store/chatStore'
 import { useWorkspaceStore } from '../store/workspaceStore'
-import { streamChat, parseSpreadsheetIntent, generateImage, ChatApiError } from '../services/chatApi'
+import { streamChat, parseSpreadsheetIntent, generateImage, cancelGenerateImage, ChatApiError } from '../services/chatApi'
 import type { SpreadsheetExecutionPlan } from '../services/chatApi'
 import { recognizeImages } from '../services/ocr'
 import { resolveApiConfig, supportsImageGeneration } from '../types'
@@ -127,6 +127,7 @@ export default function ChatView() {
     createConversation,
     addMessage,
     updateMessage,
+    patchMessage,
     updateConversationTitle,
     setConversationStreaming,
     attachSearchResults,
@@ -135,6 +136,7 @@ export default function ChatView() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const abortMapRef = useRef<Map<string, AbortController>>(new Map())
+  const imageGenerationRequestMapRef = useRef<Map<string, string>>(new Map())
   const scrollRafRef = useRef<number>(0)
   const scrollPositionsRef = useRef<Map<string, number>>(new Map())
   const prevConvIdRef = useRef<string | null>(null)
@@ -144,6 +146,7 @@ export default function ChatView() {
   const [streamingDrafts, setStreamingDrafts] = useState<Record<string, string>>({})
   const [isExportingSpreadsheet, setIsExportingSpreadsheet] = useState(false)
   const [inputMode, setInputMode] = useState<ChatInputMode>('chat')
+  const [imageReferenceDraft, setImageReferenceDraft] = useState<ImageAttachment | null>(null)
 
   const activeConversation = conversations.find((c) => c.id === activeConversationId)
   const messages = activeConversation?.messages ?? []
@@ -267,6 +270,33 @@ export default function ChatView() {
     }
   }, [activeConversationId, addMessage, createConversation, isExportingSpreadsheet, latestSpreadsheet])
 
+  const handleContinueImageEdit = useCallback(async (image: ImageAttachment) => {
+    let base64 = image.base64
+    if (!base64 && image.url && window.electronAPI?.readImage) {
+      const result = await window.electronAPI.readImage(image.url)
+      if (result.ok && result.dataUrl) {
+        base64 = result.dataUrl
+      }
+    }
+
+    if (!base64) {
+      const convId = activeConversationId ?? createConversation()
+      addMessage(convId, {
+        role: 'assistant',
+        content: '读取参考图失败，请先保存图片后重新上传。',
+        metadata: { kind: 'image_generation' },
+      })
+      return
+    }
+
+    setInputMode('image')
+    setImageReferenceDraft({
+      id: `reference-${Date.now()}`,
+      base64,
+      name: image.name || `reference-${Date.now()}.png`,
+    })
+  }, [activeConversationId, addMessage, createConversation])
+
   const handleSend = async (content: string, images: ImageAttachment[], files: FileAttachment[]) => {
     let convId = activeConversationId
     if (!convId) {
@@ -298,38 +328,69 @@ export default function ChatView() {
       }
 
       setConversationStreaming(convId, true)
+      const requestId = `${convId}-${Date.now()}`
+      imageGenerationRequestMapRef.current.set(convId, requestId)
+      const generatedAt = Date.now()
+      const referenceImages = images.slice(0, 1)
+      const hasReferenceImage = referenceImages.length > 0
+      const assistantMessage = addMessage(convId, {
+        role: 'assistant',
+        content: hasReferenceImage ? '正在基于参考图生成图片...' : '正在生成图片...',
+        images: [{
+          id: `generating-${generatedAt}`,
+          name: `generated-${generatedAt}.png`,
+          isGenerating: true,
+        }],
+        metadata: {
+          kind: 'image_generation',
+          originalPrompt: content,
+          providerId: settings.imageGeneration.providerId,
+          model: imageConfig.model,
+          size: settings.imageGeneration.size,
+          quality: settings.imageGeneration.quality,
+        },
+      })
+
       try {
         const result = await generateImage(imageConfig, {
+          requestId,
           prompt: content,
+          images: referenceImages,
           size: settings.imageGeneration.size,
           quality: settings.imageGeneration.quality,
         })
 
-        if (!result.ok || !result.imageBase64) {
-          addMessage(convId, {
-            role: 'assistant',
+        if (!result.ok || (!result.imageUrl && !result.imageBase64)) {
+          patchMessage(convId, assistantMessage.id, {
             content: result.error || '生成图片失败，请稍后重试。',
+            images: [],
             metadata: { kind: 'image_generation' },
           })
           return
         }
 
-        const generatedAt = Date.now()
-        addMessage(convId, {
-          role: 'assistant',
+        patchMessage(convId, assistantMessage.id, {
           content: result.revisedPrompt ? `已生成图片。\n\n优化后的提示词：${result.revisedPrompt}` : '已生成图片。',
           images: [{
             id: `generated-${generatedAt}`,
             base64: result.imageBase64,
-            name: `generated-${generatedAt}.png`,
+            url: result.imageUrl,
+            filePath: result.filePath,
+            name: result.fileName ?? `generated-${generatedAt}.png`,
           }],
           metadata: {
             kind: 'image_generation',
+            originalPrompt: content,
             revisedPrompt: result.revisedPrompt,
+            providerId: settings.imageGeneration.providerId,
+            model: imageConfig.model,
+            size: settings.imageGeneration.size,
+            quality: settings.imageGeneration.quality,
           },
         })
       } finally {
         setConversationStreaming(convId, false)
+        imageGenerationRequestMapRef.current.delete(convId)
       }
       return
     }
@@ -640,6 +701,11 @@ export default function ChatView() {
 
   const handleStop = () => {
     if (!activeConversationId) return
+    const imageRequestId = imageGenerationRequestMapRef.current.get(activeConversationId)
+    if (imageRequestId) {
+      void cancelGenerateImage(imageRequestId)
+      return
+    }
     const controller = abortMapRef.current.get(activeConversationId)
     controller?.abort()
   }
@@ -704,7 +770,7 @@ export default function ChatView() {
             </div>
           )}
           {renderedMessages.map((msg) => (
-            <MessageBubble key={msg.id} message={msg} />
+            <MessageBubble key={msg.id} message={msg} onContinueImageEdit={handleContinueImageEdit} />
           ))}
 
           <div ref={messagesEndRef} />
@@ -732,6 +798,8 @@ export default function ChatView() {
         onSend={handleSend}
         onStop={handleStop}
         onExportSpreadsheet={handleExportSpreadsheet}
+        imageReferenceDraft={imageReferenceDraft}
+        onConsumeImageReferenceDraft={() => setImageReferenceDraft(null)}
         inputMode={inputMode}
         onInputModeChange={setInputMode}
         hasSpreadsheetSession={Boolean(latestSpreadsheet?.spreadsheetSessionId)}

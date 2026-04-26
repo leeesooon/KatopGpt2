@@ -18,6 +18,15 @@ const EXTRACTABLE_DOCUMENT_MIME_TYPES = [
 
 const FILE_INPUT_ACCEPT = '.txt,.md,.markdown,.json,.csv,.pdf,.pptx,.docx,.xlsx'
 
+const IMAGE_PROMPT_PRESETS = [
+  { group: '风格', items: ['电影感', '赛博朋克', '水彩插画', '极简海报', '写实摄影', '3D 渲染'] },
+  { group: '比例', items: ['1:1 方图', '16:9 横幅', '9:16 竖版', '4:3 构图', '3:2 摄影比例'] },
+  { group: '光照', items: ['柔和自然光', '黄昏逆光', '霓虹灯光', '棚拍布光', '高对比明暗'] },
+  { group: '镜头', items: ['广角镜头', '长焦压缩', '微距特写', '低角度仰拍', '俯视视角'] },
+  { group: '材质', items: ['玻璃质感', '金属材质', '纸张纹理', '丝绸质感', '磨砂塑料'] },
+  { group: '构图', items: ['中心构图', '三分法构图', '留白构图', '对称构图', '动态斜线构图'] },
+]
+
 function looksLikeBinaryText(content: string) {
   if (!content) return false
 
@@ -54,6 +63,8 @@ interface InputAreaProps {
   onSend: (content: string, images: ImageAttachment[], files: FileAttachment[]) => void
   onStop: () => void
   onExportSpreadsheet?: () => void
+  imageReferenceDraft?: ImageAttachment | null
+  onConsumeImageReferenceDraft?: () => void
   inputMode: ChatInputMode
   onInputModeChange: (mode: ChatInputMode) => void
   hasSpreadsheetSession?: boolean
@@ -72,6 +83,8 @@ export default function InputArea({
   onSend,
   onStop,
   onExportSpreadsheet,
+  imageReferenceDraft = null,
+  onConsumeImageReferenceDraft,
   inputMode,
   onInputModeChange,
   hasSpreadsheetSession = false,
@@ -103,6 +116,7 @@ export default function InputArea({
   const [files, setFiles] = useState<FileAttachment[]>([])
   const [pendingFiles, setPendingFiles] = useState<string[]>([])
   const [attachmentError, setAttachmentError] = useState<string | null>(null)
+  const [isPromptPanelOpen, setIsPromptPanelOpen] = useState(false)
   const [isDragOver, setIsDragOver] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
@@ -119,11 +133,24 @@ export default function InputArea({
 
   useEffect(() => {
     if (isImageMode) {
-      setImages([])
+      if (!imageReferenceDraft) {
+        setImages([])
+      }
       setFiles([])
       setAttachmentError(null)
     }
-  }, [isImageMode])
+  }, [imageReferenceDraft, isImageMode])
+
+  useEffect(() => {
+    if (!imageReferenceDraft) return
+    setImages([imageReferenceDraft])
+    setFiles([])
+    setAttachmentError('已添加参考图，请输入修改要求')
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus()
+    })
+    onConsumeImageReferenceDraft?.()
+  }, [imageReferenceDraft, onConsumeImageReferenceDraft])
 
   useEffect(() => {
     if (!composerDraft) return
@@ -172,6 +199,17 @@ export default function InputArea({
     }
   }
 
+  const appendPromptPreset = (preset: string) => {
+    setInput((current) => {
+      const separator = current.trim() ? '，' : ''
+      return `${current}${separator}${preset}`
+    })
+    requestAnimationFrame(() => {
+      adjustHeight()
+      textareaRef.current?.focus()
+    })
+  }
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -206,7 +244,10 @@ export default function InputArea({
 
   const addImageFile = async (file: File) => {
     const base64 = await readFileAsDataUrl(file)
-    setImages((prev) => [...prev, { id: uuidv4(), base64, name: file.name }])
+    setImages((prev) => {
+      const nextImage = { id: uuidv4(), base64, name: file.name }
+      return isImageMode ? [nextImage] : [...prev, nextImage]
+    })
   }
 
   const addTextFile = async (file: File) => {
@@ -370,7 +411,7 @@ export default function InputArea({
 
   const placeholder = pendingAction === 'chat'
     ? isImageMode
-      ? '描述你想生成的图片... (Enter 生成, Shift+Enter 换行)'
+      ? '描述你想生成或修改的图片... (Enter 生成, Shift+Enter 换行)'
       : '输入消息... (Enter 发送, Shift+Enter 换行, 可拖拽文件)'
     : `当前模式：${actionLabelMap[pendingAction]}，继续补充你的要求后发送`
 
@@ -480,7 +521,52 @@ export default function InputArea({
               <span>{isExportingSpreadsheet ? '导出中...' : '导出表格'}</span>
             </button>
           )}
+          {isImageMode && (
+            <button
+              onClick={() => setIsPromptPanelOpen((open) => !open)}
+              disabled={isStreaming}
+              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs transition disabled:opacity-50 ${
+                isPromptPanelOpen
+                  ? 'border-fuchsia-300/25 bg-fuchsia-300/10 text-fuchsia-100'
+                  : 'border-white/10 bg-white/5 text-surface-300 hover:bg-white/10 hover:text-white'
+              }`}
+              title="打开提示词增强面板"
+            >
+              <Sparkles size={14} />
+              提示词增强
+            </button>
+          )}
         </div>
+        {isImageMode && isPromptPanelOpen && (
+          <div className="mb-2 rounded-xl border border-fuchsia-300/15 bg-fuchsia-950/10 p-3 shadow-lg shadow-fuchsia-950/10">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <p className="text-xs font-medium text-fuchsia-100">点击标签追加到提示词</p>
+              <button
+                onClick={() => setIsPromptPanelOpen(false)}
+                className="rounded-full p-1 text-surface-400 transition hover:bg-white/10 hover:text-white"
+                title="关闭提示词增强"
+              >
+                <X size={13} />
+              </button>
+            </div>
+            <div className="space-y-2">
+              {IMAGE_PROMPT_PRESETS.map((presetGroup) => (
+                <div key={presetGroup.group} className="flex flex-wrap items-center gap-1.5">
+                  <span className="w-10 shrink-0 text-[11px] text-surface-500">{presetGroup.group}</span>
+                  {presetGroup.items.map((item) => (
+                    <button
+                      key={item}
+                      onClick={() => appendPromptPreset(item)}
+                      className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-surface-300 transition hover:border-fuchsia-300/30 hover:bg-fuchsia-300/10 hover:text-fuchsia-100"
+                    >
+                      {item}
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         <div className="glass-panel rounded-xl p-2">
           {/* Model selector row */}
           <div className="mb-1 flex items-center justify-between gap-2 border-b border-surface-700/30 px-1 pb-1.5">
@@ -621,10 +707,10 @@ export default function InputArea({
             {/* Image upload button */}
             <button
               onClick={() => imageInputRef.current?.click()}
-              disabled={disabled || isStreaming || isImageMode}
+              disabled={disabled || isStreaming}
               className="shrink-0 p-2 hover:bg-surface-700/50 text-surface-400 hover:text-surface-200
                          rounded-lg transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed"
-              title="添加图片"
+              title={isImageMode ? '添加参考图（仅保留 1 张）' : '添加图片'}
             >
               <ImagePlus size={18} />
             </button>
@@ -632,7 +718,7 @@ export default function InputArea({
               ref={imageInputRef}
               type="file"
               accept="image/*"
-              multiple
+              multiple={!isImageMode}
               onChange={handleImageSelect}
               className="hidden"
             />

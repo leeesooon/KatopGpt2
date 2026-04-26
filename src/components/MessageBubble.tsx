@@ -3,6 +3,7 @@ import {
   cloneElement,
   isValidElement,
   memo,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -12,8 +13,8 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
-import { Copy, Check, User, Bot, FileText } from 'lucide-react'
-import type { Message } from '../types'
+import { Copy, Check, User, Bot, FileText, Download, ExternalLink, Sparkles } from 'lucide-react'
+import type { ImageAttachment, Message } from '../types'
 import SourcesPanel from './SourcesPanel'
 import { normalizeExternalUrl, openExternalUrl } from '../utils/externalLinks'
 import MermaidBlock from './MermaidBlock'
@@ -21,6 +22,7 @@ import { useWorkspaceStore } from '../store/workspaceStore'
 
 interface MessageBubbleProps {
   message: Message
+  onContinueImageEdit?: (image: ImageAttachment) => void
 }
 
 type CitationContainerTag = 'blockquote' | 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6' | 'li' | 'p' | 'td' | 'th'
@@ -43,6 +45,126 @@ function transformMarkdownUrl(url: string) {
   }
 
   return url
+}
+
+function MessageImage({
+  image,
+  isUser,
+  onContinueEdit,
+}: {
+  image: ImageAttachment
+  isUser: boolean
+  onContinueEdit?: (image: ImageAttachment) => void
+}) {
+  const [status, setStatus] = useState<string | null>(null)
+  const [fallbackSrc, setFallbackSrc] = useState<string | null>(null)
+  const imageSrc = fallbackSrc ?? image.url ?? image.base64 ?? ''
+
+  useEffect(() => {
+    setFallbackSrc(null)
+  }, [image.url, image.base64])
+
+  const handleImageLoadError = async () => {
+    if (!image.url || fallbackSrc || !window.electronAPI?.readImage) return
+    const result = await window.electronAPI.readImage(image.url)
+    if (result.ok && result.dataUrl) {
+      setFallbackSrc(result.dataUrl)
+      return
+    }
+    setStatus(result.message || '图片加载失败')
+    setTimeout(() => setStatus(null), 2500)
+  }
+
+  const handleOpen = async () => {
+    if (image.isGenerating || !imageSrc) return
+    if (window.electronAPI?.openImage) {
+      const result = await window.electronAPI.openImage(imageSrc, image.name)
+      if (!result.ok) {
+        setStatus(result.message || '打开图片失败')
+        setTimeout(() => setStatus(null), 2500)
+      }
+      return
+    }
+
+    const opened = window.open()
+    if (opened) {
+      opened.document.write(`<img src="${imageSrc}" alt="${image.name}" style="max-width:100%;height:auto;display:block;margin:0 auto;" />`)
+      opened.document.title = image.name
+    }
+  }
+
+  const handleSave = async () => {
+    if (image.isGenerating || !imageSrc) return
+    if (window.electronAPI?.saveImage) {
+      const result = await window.electronAPI.saveImage(imageSrc, image.name)
+      setStatus(result.message || (result.ok ? '已保存图片' : '保存图片失败'))
+      setTimeout(() => setStatus(null), 2500)
+      return
+    }
+
+    const link = document.createElement('a')
+    link.href = imageSrc
+    link.download = image.name
+    link.click()
+  }
+
+  if (image.isGenerating) {
+    return (
+      <div className="relative flex h-[220px] w-[220px] items-center justify-center overflow-hidden rounded-xl border border-fuchsia-300/20 bg-surface-900/60">
+        <div className="absolute inset-0 animate-pulse bg-gradient-to-br from-fuchsia-500/20 via-primary-500/10 to-cyan-400/20" />
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.14),transparent_45%)] animate-ping" />
+        <Sparkles size={34} className="relative z-10 text-fuchsia-200 drop-shadow" />
+        <span className="absolute bottom-3 left-0 right-0 z-10 text-center text-xs text-fuchsia-100/80">
+          图片生成中...
+        </span>
+      </div>
+    )
+  }
+
+  return (
+    <div className="group/image relative inline-flex flex-col gap-1">
+      <button onClick={handleOpen} className="block text-left" title="打开图片">
+        <img
+          src={imageSrc}
+          alt={image.name}
+          onError={() => void handleImageLoadError()}
+          className={isUser
+            ? 'max-w-[200px] max-h-[200px] rounded-lg object-cover border border-surface-600/30 cursor-pointer hover:opacity-90 transition-opacity'
+            : 'max-w-[360px] max-h-[360px] rounded-xl object-contain border border-surface-600/30 cursor-pointer hover:opacity-90 transition-opacity bg-surface-900/40'}
+        />
+      </button>
+      <div className="absolute right-2 top-2 flex gap-1 opacity-0 group-hover/image:opacity-100 transition-opacity">
+        {!isUser && onContinueEdit && (
+          <button
+            onClick={() => onContinueEdit({ ...image, base64: fallbackSrc ?? image.base64 })}
+            className="px-2 py-1.5 rounded-lg bg-fuchsia-600/90 hover:bg-fuchsia-500 text-white text-xs shadow-lg backdrop-blur-sm"
+            title="基于这张图继续修改"
+          >
+            继续修改
+          </button>
+        )}
+        <button
+          onClick={handleOpen}
+          className="p-1.5 rounded-lg bg-surface-900/80 hover:bg-surface-800 text-surface-200 shadow-lg backdrop-blur-sm"
+          title="打开图片"
+        >
+          <ExternalLink size={14} />
+        </button>
+        <button
+          onClick={handleSave}
+          className="p-1.5 rounded-lg bg-surface-900/80 hover:bg-surface-800 text-surface-200 shadow-lg backdrop-blur-sm"
+          title="保存图片"
+        >
+          <Download size={14} />
+        </button>
+      </div>
+      {status && (
+        <span className="max-w-[240px] truncate text-[11px] text-surface-400">
+          {status}
+        </span>
+      )}
+    </div>
+  )
 }
 
 function CodeBlock({ language, value }: { language: string; value: string }) {
@@ -260,7 +382,7 @@ function MarkdownTable({ children, sources }: { children: ReactNode; sources: { 
   )
 }
 
-const MessageBubble = memo(function MessageBubble({ message }: MessageBubbleProps) {
+const MessageBubble = memo(function MessageBubble({ message, onContinueImageEdit }: MessageBubbleProps) {
   const isUser = message.role === 'user'
   const [showCopyButton, setShowCopyButton] = useState(false)
   const [copiedMessage, setCopiedMessage] = useState(false)
@@ -447,13 +569,7 @@ const MessageBubble = memo(function MessageBubble({ message }: MessageBubbleProp
             {message.images && message.images.length > 0 && (
               <div className="flex flex-wrap gap-2 mb-2">
                 {message.images.map((img) => (
-                  <img
-                    key={img.id}
-                    src={img.base64}
-                    alt={img.name}
-                    className="max-w-[200px] max-h-[200px] rounded-lg object-cover border border-surface-600/30 cursor-pointer hover:opacity-90 transition-opacity"
-                    onClick={() => window.open(img.base64, '_blank')}
-                  />
+                  <MessageImage key={img.id} image={img} isUser />
                 ))}
               </div>
             )}
@@ -483,13 +599,7 @@ const MessageBubble = memo(function MessageBubble({ message }: MessageBubbleProp
             {message.images && message.images.length > 0 && (
               <div className="flex flex-wrap gap-2 mb-3">
                 {message.images.map((img) => (
-                  <img
-                    key={img.id}
-                    src={img.base64}
-                    alt={img.name}
-                    className="max-w-[360px] max-h-[360px] rounded-xl object-contain border border-surface-600/30 cursor-pointer hover:opacity-90 transition-opacity bg-surface-900/40"
-                    onClick={() => window.open(img.base64, '_blank')}
-                  />
+                  <MessageImage key={img.id} image={img} isUser={false} onContinueEdit={onContinueImageEdit} />
                 ))}
               </div>
             )}
