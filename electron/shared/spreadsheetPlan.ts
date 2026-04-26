@@ -78,6 +78,23 @@ export interface SpreadsheetIntentParseResult {
   plan?: SpreadsheetExecutionPlan
 }
 
+export interface SpreadsheetColumnSchema {
+  name: string
+  inferredType: 'string' | 'number' | 'boolean' | 'date' | 'mixed' | 'empty'
+  aliases?: string[]
+}
+
+export interface SpreadsheetSheetSchema {
+  name: string
+  rowCount: number
+  columnCount: number
+  columns: SpreadsheetColumnSchema[]
+}
+
+export interface SpreadsheetWorkbookSchema {
+  sheets: SpreadsheetSheetSchema[]
+}
+
 export const spreadsheetPlanFilterSchema = z.object({
   column: z.string().min(1),
   operator: z.enum(['eq', 'contains', 'gt', 'gte', 'lt', 'lte']),

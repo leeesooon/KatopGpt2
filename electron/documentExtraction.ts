@@ -1,4 +1,3 @@
-import { randomUUID } from 'crypto'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'fs/promises'
 import JSZip from 'jszip'
 import os from 'os'
@@ -8,6 +7,17 @@ import { Script, createContext } from 'vm'
 import * as XLSX from 'xlsx'
 import { z } from 'zod'
 import {
+  buildWorkbookSchema,
+  formatSpreadsheetCell,
+  getSheetRows,
+  parseNumericValue,
+} from './spreadsheetSchema.ts'
+import {
+  getSpreadsheetSession,
+  registerSpreadsheetSession,
+} from './spreadsheetSession.ts'
+import type { SpreadsheetDocumentType, SpreadsheetSession } from './spreadsheetSession.ts'
+import {
   spreadsheetPlanFilterSchema,
   spreadsheetToolStepSchemas,
 } from './shared/spreadsheetPlan'
@@ -15,6 +25,7 @@ import type {
   SpreadsheetExecutionPlan,
   SpreadsheetPlanFilter,
   SpreadsheetPlanStep,
+  SpreadsheetWorkbookSchema,
   SpreadsheetToolName,
 } from './shared/spreadsheetPlan'
 
@@ -72,26 +83,7 @@ export interface ExportSpreadsheetSessionResult {
   chartPaths?: string[]
 }
 
-export interface SpreadsheetColumnSchema {
-  name: string
-  inferredType: 'string' | 'number' | 'boolean' | 'date' | 'mixed' | 'empty'
-  aliases?: string[]
-}
-
-export interface SpreadsheetSheetSchema {
-  name: string
-  rowCount: number
-  columnCount: number
-  columns: SpreadsheetColumnSchema[]
-}
-
-export interface SpreadsheetWorkbookSchema {
-  sheets: SpreadsheetSheetSchema[]
-}
-
 type SupportedDocumentType = 'pptx' | 'pdf' | 'docx' | 'xlsx' | 'csv'
-type SpreadsheetDocumentType = 'xlsx' | 'csv'
-
 const MAX_INPUT_BYTES = 20 * 1024 * 1024
 const MAX_SECTION_COUNT = 8
 const MAX_SECTION_CHARS = 700
@@ -101,25 +93,6 @@ const MAX_SPREADSHEET_SAMPLE_COLUMNS = 10
 const MAX_SPREADSHEET_PREVIEW_ROWS = 8
 const SCRIPT_EXECUTION_TIMEOUT_MS = 1500
 const PYTHON_SCRIPT_TIMEOUT_MS = 20000
-
-interface SpreadsheetSession {
-  sessionId: string
-  fileName: string
-  fileType: SpreadsheetDocumentType
-  workbook: XLSX.WorkBook
-  schema: SpreadsheetWorkbookSchema
-  generatedCharts: GeneratedChart[]
-  lastCreatedSheetName?: string
-  createdAt: number
-}
-
-interface GeneratedChart {
-  fileName: string
-  title: string
-  svgContent: string
-}
-
-const spreadsheetSessions = new Map<string, SpreadsheetSession>()
 
 type PdfWorkerModule = {
   WorkerMessageHandler?: unknown
@@ -354,14 +327,6 @@ async function extractPdfSummary(buffer: Buffer) {
   }
 }
 
-function formatSpreadsheetCell(value: unknown) {
-  if (value === null || value === undefined) return ''
-  if (typeof value === 'string') return normalizeWhitespace(value)
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
-  if (value instanceof Date) return value.toISOString()
-  return normalizeWhitespace(String(value))
-}
-
 function summarizeSheet(sheetName: string, rows: unknown[][]) {
   const normalizedRows = rows
     .map((row) => row.map((cell) => formatSpreadsheetCell(cell)))
@@ -416,65 +381,6 @@ function parseWorkbook(buffer: Buffer, fileType: SpreadsheetDocumentType) {
   })
 }
 
-function buildColumnAliases(name: string) {
-  const aliases = new Set<string>()
-  const trimmed = name.trim()
-  if (!trimmed) return []
-
-  aliases.add(trimmed)
-  aliases.add(trimmed.replace(/[\s_\-()（）【】\[\]：:]/g, ''))
-
-  if (trimmed.includes('岗位')) aliases.add('职位')
-  if (trimmed.includes('职位')) aliases.add('岗位')
-  if (trimmed.includes('部门')) aliases.add('所属部门')
-  if (trimmed.includes('所属部门')) aliases.add('部门')
-  if (trimmed.includes('姓名')) aliases.add('人员')
-  if (trimmed.includes('责任人')) aliases.add('负责人')
-
-  return Array.from(aliases).filter(Boolean)
-}
-
-function inferColumnType(values: string[]): SpreadsheetColumnSchema['inferredType'] {
-  const samples = values.filter(Boolean).slice(0, 20)
-  if (samples.length === 0) return 'empty'
-
-  const kinds = new Set(samples.map((value) => {
-    if (/^(true|false)$/i.test(value)) return 'boolean'
-    if (!Number.isNaN(Date.parse(value)) && /[-/:年月日T]/.test(value)) return 'date'
-    if (parseNumericValue(value) !== null) return 'number'
-    return 'string'
-  }))
-
-  return kinds.size === 1 ? Array.from(kinds)[0] as SpreadsheetColumnSchema['inferredType'] : 'mixed'
-}
-
-function buildWorkbookSchema(workbook: XLSX.WorkBook): SpreadsheetWorkbookSchema {
-  return {
-    sheets: workbook.SheetNames.map((sheetName) => {
-      const rows = getSheetRows(workbook.Sheets[sheetName]).map((row) => row.map((cell) => formatSpreadsheetCell(cell)))
-      const nonEmptyRows = rows.filter((row) => row.some(Boolean))
-      const headerRow = nonEmptyRows[0] ?? []
-      const columnCount = nonEmptyRows.reduce((count, row) => Math.max(count, row.length), 0)
-      const columns = Array.from({ length: columnCount }, (_, index) => {
-        const name = headerRow[index] || `列${index + 1}`
-        const values = nonEmptyRows.slice(1).map((row) => row[index] ?? '')
-        return {
-          name,
-          inferredType: inferColumnType(values),
-          aliases: buildColumnAliases(name),
-        }
-      })
-
-      return {
-        name: sheetName,
-        rowCount: Math.max(0, nonEmptyRows.length - 1),
-        columnCount,
-        columns,
-      }
-    }),
-  }
-}
-
 function buildWorkbookSummary(workbook: XLSX.WorkBook, fileTypeLabel: string) {
   const sheetSummaries = workbook.SheetNames.map((sheetName) => {
     const sheet = workbook.Sheets[sheetName]
@@ -496,31 +402,6 @@ async function extractSpreadsheetSummary(buffer: Buffer, fileName: string, fileT
     spreadsheetSessionId: sessionId,
     spreadsheetSchema: schema,
   }
-}
-
-function registerSpreadsheetSession(fileName: string, fileType: SpreadsheetDocumentType, workbook: XLSX.WorkBook, schema: SpreadsheetWorkbookSchema) {
-  const sessionId = randomUUID()
-  spreadsheetSessions.set(sessionId, {
-    sessionId,
-    fileName,
-    fileType,
-    workbook,
-    schema,
-    generatedCharts: [],
-    lastCreatedSheetName: undefined,
-    createdAt: Date.now(),
-  })
-
-  return sessionId
-}
-
-function getSheetRows(sheet: XLSX.WorkSheet) {
-  return XLSX.utils.sheet_to_json(sheet, {
-    header: 1,
-    raw: false,
-    defval: '',
-    blankrows: false,
-  }) as unknown[][]
 }
 
 function normalizeHeaderName(value: string) {
@@ -599,23 +480,6 @@ function extractFilters(instruction: string, headers: string[]) {
   }
 
   return filters
-}
-
-function parseNumericValue(value: unknown) {
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? value : null
-  }
-
-  const text = formatSpreadsheetCell(value).replace(/,/g, '').trim()
-  if (!text) return null
-
-  if (/^-?\d+(?:\.\d+)?%$/.test(text)) {
-    const percentValue = Number(text.slice(0, -1))
-    return Number.isFinite(percentValue) ? percentValue / 100 : null
-  }
-
-  const numericValue = Number(text)
-  return Number.isFinite(numericValue) ? numericValue : null
 }
 
 type SpreadsheetOperation =
@@ -1641,7 +1505,7 @@ function getDefaultExportFileName(fileName: string) {
 }
 
 export function exportSpreadsheetSession(sessionId: string) {
-  const session = spreadsheetSessions.get(sessionId)
+  const session = getSpreadsheetSession(sessionId)
   if (!session) {
     throw new Error('当前表格会话已失效，请重新上传文件后再试。')
   }
@@ -1718,7 +1582,7 @@ export async function extractDocumentText(
 export async function executeSpreadsheetInstruction(
   request: ExecuteSpreadsheetInstructionRequest
 ): Promise<ExecuteSpreadsheetInstructionResult> {
-  const session = spreadsheetSessions.get(request.sessionId)
+  const session = getSpreadsheetSession(request.sessionId)
   if (!session) {
     return {
       ok: false,
@@ -1785,7 +1649,7 @@ export async function executeSpreadsheetInstruction(
 export async function executeSpreadsheetPlan(
   request: ExecuteSpreadsheetPlanRequest
 ): Promise<ExecuteSpreadsheetInstructionResult> {
-  const session = spreadsheetSessions.get(request.sessionId)
+  const session = getSpreadsheetSession(request.sessionId)
   if (!session) {
     return {
       ok: false,

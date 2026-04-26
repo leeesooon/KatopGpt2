@@ -1,4 +1,4 @@
-import type { SpreadsheetPlanStep } from '../../electron/shared/spreadsheetPlan'
+import type { SpreadsheetPlanStep, SpreadsheetWorkbookSchema } from '../../electron/shared/spreadsheetPlan'
 
 /** Single model configuration within a provider */
 export interface ModelConfig {
@@ -34,23 +34,6 @@ export interface ImageAttachment {
   filePath?: string
   name: string
   isGenerating?: boolean
-}
-
-export interface SpreadsheetColumnSchema {
-  name: string
-  inferredType: 'string' | 'number' | 'boolean' | 'date' | 'mixed' | 'empty'
-  aliases?: string[]
-}
-
-export interface SpreadsheetSheetSchema {
-  name: string
-  rowCount: number
-  columnCount: number
-  columns: SpreadsheetColumnSchema[]
-}
-
-export interface SpreadsheetWorkbookSchema {
-  sheets: SpreadsheetSheetSchema[]
 }
 
 /** File attached to a message */
@@ -228,4 +211,4 @@ export function supportsVision(model: ModelConfig | undefined) {
   return model?.capabilities?.vision ?? model?.multimodal ?? false
 }
 
-export type { SpreadsheetPlanStep }
+export type { SpreadsheetPlanStep, SpreadsheetWorkbookSchema }

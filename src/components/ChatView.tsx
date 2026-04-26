@@ -1,128 +1,29 @@
-﻿import { useRef, useEffect, useCallback, useState } from 'react'
+﻿import { useRef, useCallback, useState } from 'react'
 import { MessageSquarePlus, Sparkles, ArrowDown } from 'lucide-react'
 import { useChatStore } from '../store/chatStore'
 import { useWorkspaceStore } from '../store/workspaceStore'
 import { streamChat, parseSpreadsheetIntent, generateImage, cancelGenerateImage, ChatApiError } from '../services/chatApi'
-import type { SpreadsheetExecutionPlan } from '../services/chatApi'
 import { recognizeImages } from '../services/ocr'
-import { resolveApiConfig, supportsImageGeneration } from '../types'
+import { resolveApiConfig } from '../types'
 import { prepareDocumentAgentRequest } from '../services/agentOrchestrator'
 import { webSearch, formatSearchContext, shouldTriggerSearch, SearchApiError } from '../services/searchApi'
 import { readWebPagesFromText, formatWebPageContext } from '../services/webpage'
-import type { ApiConfig, ChatInputMode, ImageAttachment, FileAttachment, SearchResult } from '../types'
+import type { ChatInputMode, ImageAttachment, FileAttachment, SearchResult } from '../types'
 import MessageBubble from './MessageBubble'
 import InputArea from './InputArea'
+import { useChatScroll } from './useChatScroll'
+import { useChatSideActions } from './useChatSideActions'
 
-interface ContextStats {
-  messageCount: number
-  messageChars: number
-}
-
-const MAX_CONTEXT_COUNTED_FILE_CHARS = 12000
-const IMAGE_GENERATION_QUALITY_PROMPT = '自然真实的人体结构，正常五指，手部清晰自然，面部五官协调，肢体比例合理，避免多余手指、畸形手、扭曲肢体、崩坏面部、低质量细节。'
-
-function findLatestSpreadsheetAttachment(messages: Array<{ files?: FileAttachment[] }>, currentFiles: FileAttachment[]) {
-  const currentMatch = currentFiles.find(
-    (file) => (file.fileType === 'xlsx' || file.fileType === 'csv') && file.spreadsheetSessionId
-  )
-  if (currentMatch) return currentMatch
-
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const files = messages[index].files ?? []
-    const matchedFile = files.find(
-      (file) => (file.fileType === 'xlsx' || file.fileType === 'csv') && file.spreadsheetSessionId
-    )
-    if (matchedFile) {
-      return matchedFile
-    }
-  }
-
-  return null
-}
-
-function shouldExecuteSpreadsheetInstruction(content: string) {
-  const trimmed = content.trim()
-  if (!trimmed) return false
-
-  return /(生成.*(?:sheet|工作表|图表|柱状图|折线图|饼图|条形图)|新\s*(?:sheet|工作表)|汇总|合计|求和|平均|均值|计数|条数|个数|数量|人数|多少人|有多少|分组|统计|分析|分布|占比|柱状图|折线图|饼图|条形图|图表)/i.test(trimmed)
-    && /(excel|xlsx|csv|表格|工作表|sheet|按|列|字段|图表|画图|统计图|可视化|岗位|部门)/i.test(trimmed)
-}
-
-function shouldExportSpreadsheetSession(content: string) {
-  const trimmed = content.trim()
-  if (!trimmed) return false
-
-  return /(导出|另存为|保存为|导出为)/i.test(trimmed)
-    && /(excel|xlsx|表格|工作表|sheet|文件)/i.test(trimmed)
-}
-
-function buildSpreadsheetRecentContext(messages: Array<{ role: string; content: string }>) {
-  return messages
-    .slice(-6)
-    .map((message) => `${message.role === 'user' ? '用户' : '助手'}: ${message.content}`)
-    .join('\n\n')
-}
-
-function summarizeSpreadsheetPlan(plan: SpreadsheetExecutionPlan) {
-  if (plan.explanation) return plan.explanation
-  if (plan.intent === 'export') return '导出当前表格结果'
-  if (plan.intent === 'chart') {
-    return `基于${plan.useLastCreatedSheet ? '最近结果表' : '指定工作表'}生成${plan.chartType ?? 'bar'}图表`
-  }
-  if (plan.intent === 'filter_rows') {
-    const filterText = plan.filters?.length
-      ? plan.filters.map((filter) => `${filter.column}${filter.operator}${filter.value}`).join('，')
-      : '无筛选条件'
-    const selectText = plan.selectColumns?.length ? `，保留列 ${plan.selectColumns.join(' + ')}` : ''
-    const sortText = plan.sortBy ? `，按 ${plan.sortBy} ${plan.sortDirection === 'asc' ? '升序' : '降序'}` : ''
-    const topNText = plan.topN ? `，取前 ${plan.topN} 行` : ''
-    return `筛选明细：${filterText}${selectText}${sortText}${topNText}`
-  }
-  if (plan.intent === 'script') {
-    return plan.script?.summary ? `执行脚本计划：${plan.script.summary}` : '执行脚本计划'
-  }
-
-  const metricLabel = plan.intent === 'count'
-    ? '计数'
-    : plan.intent === 'sum'
-      ? `汇总 ${plan.valueColumn ?? '数值列'}`
-      : `统计 ${plan.valueColumn ?? '数值列'} 平均值`
-  const groups = plan.groupByColumns?.join(' + ') || '未指定分组'
-  const filterText = plan.filters?.length
-    ? `，筛选 ${plan.filters.map((filter) => `${filter.column}${filter.operator}${filter.value}`).join('，')}`
-    : ''
-  const topNText = plan.topN ? `，取前 ${plan.topN} 项` : ''
-  return `按 ${groups} ${metricLabel}${filterText}${topNText}`
-}
-
-function resolveImageGenerationConfig(settings: ReturnType<typeof useChatStore.getState>['settings']): ApiConfig | null {
-  const imageSettings = settings.imageGeneration
-  const explicitSelection = imageSettings.providerId && imageSettings.model
-    ? { providerId: imageSettings.providerId, model: imageSettings.model }
-    : null
-  const explicitConfig = resolveApiConfig(settings.providers, explicitSelection)
-  if (explicitConfig) return explicitConfig
-
-  for (const provider of settings.providers) {
-    const model = provider.models.find((item) => supportsImageGeneration(item))
-    if (model) {
-      return {
-        baseUrl: provider.baseUrl,
-        apiKey: provider.apiKey,
-        model: model.name,
-        multimodal: model.multimodal,
-      }
-    }
-  }
-
-  return null
-}
-
-function buildImageGenerationPrompt(userPrompt: string) {
-  const trimmedPrompt = userPrompt.trim()
-  if (!trimmedPrompt) return IMAGE_GENERATION_QUALITY_PROMPT
-  return `${trimmedPrompt}\n\n质量要求：${IMAGE_GENERATION_QUALITY_PROMPT}`
-}
+import {
+  buildImageGenerationPrompt,
+  buildSpreadsheetRecentContext,
+  calculateContextStats,
+  findLatestSpreadsheetAttachment,
+  resolveImageGenerationConfig,
+  shouldExecuteSpreadsheetInstruction,
+  shouldExportSpreadsheetSession,
+  summarizeSpreadsheetPlan,
+} from './chatViewUtils'
 
 export default function ChatView() {
   const {
@@ -140,18 +41,9 @@ export default function ChatView() {
     attachSearchResults,
   } = useChatStore()
 
-  const messagesEndRef = useRef<HTMLDivElement>(null)
-  const scrollContainerRef = useRef<HTMLDivElement>(null)
   const abortMapRef = useRef<Map<string, AbortController>>(new Map())
   const imageGenerationRequestMapRef = useRef<Map<string, string>>(new Map())
-  const scrollRafRef = useRef<number>(0)
-  const scrollPositionsRef = useRef<Map<string, number>>(new Map())
-  const prevConvIdRef = useRef<string | null>(null)
-  const isRestoringScrollRef = useRef(false)
-  const shouldAutoStickRef = useRef(true)
-  const [showScrollBottom, setShowScrollBottom] = useState(false)
   const [streamingDrafts, setStreamingDrafts] = useState<Record<string, string>>({})
-  const [isExportingSpreadsheet, setIsExportingSpreadsheet] = useState(false)
   const [inputMode, setInputMode] = useState<ChatInputMode>('chat')
   const [imageReferenceDraft, setImageReferenceDraft] = useState<ImageAttachment | null>(null)
 
@@ -168,141 +60,31 @@ export default function ChatView() {
     if (!state.activeDocumentPath) return null
     return state.documents[state.activeDocumentPath] ?? null
   })
+  const {
+    messagesEndRef,
+    scrollContainerRef,
+    showScrollBottom,
+    handleScrollToBottom,
+  } = useChatScroll({
+    activeConversationId,
+    messageCount: renderedMessages.length,
+    latestMessageContent: renderedMessages[renderedMessages.length - 1]?.content,
+  })
 
-  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
-    if (scrollRafRef.current || isRestoringScrollRef.current) return
-    scrollRafRef.current = requestAnimationFrame(() => {
-      const container = scrollContainerRef.current
-      if (container) {
-        if (behavior === 'smooth') {
-          container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
-        } else {
-          container.scrollTop = container.scrollHeight
-        }
-      }
-      scrollRafRef.current = 0
-    })
-  }, [])
-
-  useEffect(() => {
-    if (shouldAutoStickRef.current) {
-      scrollToBottom('auto')
-    }
-  }, [renderedMessages.length, renderedMessages[renderedMessages.length - 1]?.content, scrollToBottom])
-
-  useEffect(() => {
-    return () => {
-      if (scrollRafRef.current) cancelAnimationFrame(scrollRafRef.current)
-    }
-  }, [])
-
-  // Save scroll position continuously + detect scroll-away-from-bottom
-  useEffect(() => {
-    const container = scrollContainerRef.current
-    if (!container) return
-    const handleScroll = () => {
-      const { scrollTop, scrollHeight, clientHeight } = container
-      const awayFromBottom = scrollHeight - scrollTop - clientHeight > 120
-      shouldAutoStickRef.current = !awayFromBottom
-      setShowScrollBottom(awayFromBottom)
-      if (activeConversationId) {
-        scrollPositionsRef.current.set(activeConversationId, scrollTop)
-      }
-    }
-    container.addEventListener('scroll', handleScroll, { passive: true })
-    return () => container.removeEventListener('scroll', handleScroll)
-  }, [activeConversationId])
-
-  // Restore scroll position on conversation switch
-  useEffect(() => {
-    const prevId = prevConvIdRef.current
-    prevConvIdRef.current = activeConversationId ?? null
-
-    if (prevId === activeConversationId) return
-
-    const container = scrollContainerRef.current
-    if (!container || !activeConversationId) return
-
-    isRestoringScrollRef.current = true
-
-    requestAnimationFrame(() => {
-      const savedPos = scrollPositionsRef.current.get(activeConversationId)
-      if (savedPos != null) {
-        container.scrollTop = savedPos
-      } else {
-        messagesEndRef.current?.scrollIntoView()
-      }
-      requestAnimationFrame(() => {
-        isRestoringScrollRef.current = false
-      })
-    })
-  }, [activeConversationId])
-
-  const handleScrollToBottom = () => {
-    shouldAutoStickRef.current = true
-    scrollToBottom('smooth')
-  }
-
-  const contextStats: ContextStats = messages.reduce(
-    (stats, message) => {
-      const imageChars = message.images?.length ? message.images.length * 120 : 0
-      const fileChars = message.files?.reduce(
-        (total, file) => total + Math.min(file.content.length, MAX_CONTEXT_COUNTED_FILE_CHARS),
-        0
-      ) ?? 0
-      return {
-        messageCount: stats.messageCount + 1,
-        messageChars: stats.messageChars + message.content.length + imageChars + fileChars,
-      }
-    },
-    { messageCount: 0, messageChars: 0 }
-  )
-  const latestSpreadsheet = findLatestSpreadsheetAttachment(messages, [])
-
-  const handleExportSpreadsheet = useCallback(async () => {
-    if (!latestSpreadsheet?.spreadsheetSessionId || !window.electronAPI?.exportSpreadsheetSession || isExportingSpreadsheet) {
-      return
-    }
-
-    setIsExportingSpreadsheet(true)
-    try {
-      const exportResult = await window.electronAPI.exportSpreadsheetSession(latestSpreadsheet.spreadsheetSessionId)
-      const convId = activeConversationId ?? createConversation()
-      addMessage(convId, {
-        role: 'assistant',
-        content: exportResult.message,
-      })
-    } finally {
-      setIsExportingSpreadsheet(false)
-    }
-  }, [activeConversationId, addMessage, createConversation, isExportingSpreadsheet, latestSpreadsheet])
-
-  const handleContinueImageEdit = useCallback(async (image: ImageAttachment) => {
-    let base64 = image.base64
-    if (!base64 && image.url && window.electronAPI?.readImage) {
-      const result = await window.electronAPI.readImage(image.url)
-      if (result.ok && result.dataUrl) {
-        base64 = result.dataUrl
-      }
-    }
-
-    if (!base64) {
-      const convId = activeConversationId ?? createConversation()
-      addMessage(convId, {
-        role: 'assistant',
-        content: '读取参考图失败，请先保存图片后重新上传。',
-        metadata: { kind: 'image_generation' },
-      })
-      return
-    }
-
-    setInputMode('image')
-    setImageReferenceDraft({
-      id: `reference-${Date.now()}`,
-      base64,
-      name: image.name || `reference-${Date.now()}.png`,
-    })
-  }, [activeConversationId, addMessage, createConversation])
+  const contextStats = calculateContextStats(messages)
+  const {
+    handleContinueImageEdit,
+    handleExportSpreadsheet,
+    isExportingSpreadsheet,
+    latestSpreadsheet,
+  } = useChatSideActions({
+    activeConversationId,
+    messages,
+    createConversation,
+    addMessage,
+    setInputMode,
+    setImageReferenceDraft,
+  })
 
   const handleSend = async (content: string, images: ImageAttachment[], files: FileAttachment[]) => {
     let convId = activeConversationId

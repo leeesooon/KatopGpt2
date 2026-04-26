@@ -1266,6 +1266,94 @@ function createWindow() {
   }
 }
 
+
+function registerWindowIpcHandlers() {
+  ipcMain.on('window:minimize', () => mainWindow?.minimize())
+  ipcMain.on('window:maximize', () => {
+    if (mainWindow?.isMaximized()) {
+      mainWindow.unmaximize()
+    } else {
+      mainWindow?.maximize()
+    }
+  })
+  ipcMain.on('window:close', () => mainWindow?.close())
+  ipcMain.handle('window:isMaximized', () => mainWindow?.isMaximized())
+  ipcMain.handle('shell:openExternal', (_event, url: string) => openExternalUrl(url))
+  ipcMain.handle('workspaceWindow:open', () => {
+    createWorkspaceWindow()
+    return true
+  })
+  ipcMain.handle('workspaceWindow:close', () => {
+    if (!workspaceWindow || workspaceWindow.isDestroyed()) return false
+    workspaceWindow.close()
+    return true
+  })
+  ipcMain.handle('workspaceWindow:getState', () => ({
+    open: Boolean(workspaceWindow && !workspaceWindow.isDestroyed()),
+  }))
+}
+
+function registerImageIpcHandlers() {
+  ipcMain.handle('images:open', (_event, dataUrl: string, fileName: string) => openImageDataUrl(dataUrl, fileName))
+  ipcMain.handle('images:save', (_event, dataUrl: string, fileName: string) => saveImageDataUrl(dataUrl, fileName))
+  ipcMain.handle('images:read', (_event, imageUrl: string) => readImageDataUrl(imageUrl))
+}
+
+function registerWorkspaceIpcHandlers() {
+  ipcMain.handle('workspace:select', () => selectWorkspace())
+  ipcMain.handle('workspace:listDocuments', (_event, rootPath: string) => listWorkspaceDocuments(rootPath))
+  ipcMain.handle('workspace:readDocument', (_event, rootPath: string, relativePath: string) => readWorkspaceDocument(rootPath, relativePath))
+  ipcMain.handle('workspace:writeDocument', (_event, rootPath: string, relativePath: string, content: string) => writeWorkspaceDocument(rootPath, relativePath, content))
+  ipcMain.handle('workspace:createDocument', (_event, rootPath: string, relativePath: string, content: string) => createWorkspaceDocument(rootPath, relativePath, content))
+  ipcMain.handle('workspace:renameDocument', (_event, rootPath: string, oldRelativePath: string, newRelativePath: string) => renameWorkspaceDocument(rootPath, oldRelativePath, newRelativePath))
+  ipcMain.handle('workspace:deleteDocument', (_event, rootPath: string, relativePath: string) => deleteWorkspaceDocument(rootPath, relativePath))
+}
+
+function registerDocumentIpcHandlers() {
+  ipcMain.handle('files:extractDocumentText', (_event, request: ExtractDocumentTextRequest) => extractDocumentText(request))
+  ipcMain.handle('files:executeSpreadsheetInstruction', (_event, request: ExecuteSpreadsheetInstructionRequest) => executeSpreadsheetInstruction(request))
+  ipcMain.handle('files:executeSpreadsheetPlan', (_event, request: ExecuteSpreadsheetPlanRequest) => executeSpreadsheetPlan(request))
+  ipcMain.handle('files:exportSpreadsheetSession', (_event, sessionId: string) => exportSpreadsheetSessionToFile(sessionId))
+}
+
+function registerApiIpcHandlers() {
+  ipcMain.handle('web:fetchPage', (_event, url: string) => fetchWebPage(url))
+  ipcMain.handle('api:testConnection', (_event, config: ApiConnectionConfig) => testApiConnection(config))
+  ipcMain.handle('api:completeChat', (_event, request: CompleteChatRequest) => completeChat(request))
+  ipcMain.handle('api:generateImage', (_event, request: GenerateImageRequest) => generateImage(request))
+  ipcMain.handle('api:cancelGenerateImage', (_event, requestId: string) => {
+    const controller = activeImageGenerations.get(requestId)
+    if (!controller) return false
+    controller.abort()
+    activeImageGenerations.delete(requestId)
+    return true
+  })
+  ipcMain.handle('api:startChatStream', (event, request: StartChatStreamRequest) => {
+    if (activeApiStreams.has(request.streamId)) {
+      throw new Error('聊天流已存在')
+    }
+
+    const abortController = new AbortController()
+    activeApiStreams.set(request.streamId, abortController)
+    void proxyChatStream(event.sender, request, abortController)
+    return true
+  })
+  ipcMain.handle('api:cancelChatStream', (_event, streamId: string) => {
+    const controller = activeApiStreams.get(streamId)
+    if (!controller) return false
+    controller.abort()
+    return true
+  })
+}
+
+function registerIpcHandlers() {
+  registerWindowIpcHandlers()
+  registerImageIpcHandlers()
+  registerWorkspaceIpcHandlers()
+  registerDocumentIpcHandlers()
+  registerApiIpcHandlers()
+}
+
 app.whenReady().then(() => {
   protocol.handle('katopgpt-image', async (request) => {
     const filePath = parseImageFileUrl(request.url)
@@ -1282,6 +1370,7 @@ app.whenReady().then(() => {
       return new Response('Not found', { status: 404 })
     }
   })
+  registerIpcHandlers()
   createWindow()
 })
 
@@ -1299,70 +1388,4 @@ app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) {
     createWindow()
   }
-})
-
-// Window controls
-ipcMain.on('window:minimize', () => mainWindow?.minimize())
-ipcMain.on('window:maximize', () => {
-  if (mainWindow?.isMaximized()) {
-    mainWindow.unmaximize()
-  } else {
-    mainWindow?.maximize()
-  }
-})
-ipcMain.on('window:close', () => mainWindow?.close())
-ipcMain.handle('window:isMaximized', () => mainWindow?.isMaximized())
-ipcMain.handle('shell:openExternal', (_event, url: string) => openExternalUrl(url))
-ipcMain.handle('images:open', (_event, dataUrl: string, fileName: string) => openImageDataUrl(dataUrl, fileName))
-ipcMain.handle('images:save', (_event, dataUrl: string, fileName: string) => saveImageDataUrl(dataUrl, fileName))
-ipcMain.handle('images:read', (_event, imageUrl: string) => readImageDataUrl(imageUrl))
-ipcMain.handle('workspaceWindow:open', () => {
-  createWorkspaceWindow()
-  return true
-})
-ipcMain.handle('workspaceWindow:close', () => {
-  if (!workspaceWindow || workspaceWindow.isDestroyed()) return false
-  workspaceWindow.close()
-  return true
-})
-ipcMain.handle('workspaceWindow:getState', () => ({
-  open: Boolean(workspaceWindow && !workspaceWindow.isDestroyed()),
-}))
-ipcMain.handle('web:fetchPage', (_event, url: string) => fetchWebPage(url))
-ipcMain.handle('workspace:select', () => selectWorkspace())
-ipcMain.handle('workspace:listDocuments', (_event, rootPath: string) => listWorkspaceDocuments(rootPath))
-ipcMain.handle('workspace:readDocument', (_event, rootPath: string, relativePath: string) => readWorkspaceDocument(rootPath, relativePath))
-ipcMain.handle('workspace:writeDocument', (_event, rootPath: string, relativePath: string, content: string) => writeWorkspaceDocument(rootPath, relativePath, content))
-ipcMain.handle('workspace:createDocument', (_event, rootPath: string, relativePath: string, content: string) => createWorkspaceDocument(rootPath, relativePath, content))
-ipcMain.handle('workspace:renameDocument', (_event, rootPath: string, oldRelativePath: string, newRelativePath: string) => renameWorkspaceDocument(rootPath, oldRelativePath, newRelativePath))
-ipcMain.handle('workspace:deleteDocument', (_event, rootPath: string, relativePath: string) => deleteWorkspaceDocument(rootPath, relativePath))
-ipcMain.handle('files:extractDocumentText', (_event, request: ExtractDocumentTextRequest) => extractDocumentText(request))
-ipcMain.handle('files:executeSpreadsheetInstruction', (_event, request: ExecuteSpreadsheetInstructionRequest) => executeSpreadsheetInstruction(request))
-ipcMain.handle('files:executeSpreadsheetPlan', (_event, request: ExecuteSpreadsheetPlanRequest) => executeSpreadsheetPlan(request))
-ipcMain.handle('files:exportSpreadsheetSession', (_event, sessionId: string) => exportSpreadsheetSessionToFile(sessionId))
-ipcMain.handle('api:testConnection', (_event, config: ApiConnectionConfig) => testApiConnection(config))
-ipcMain.handle('api:completeChat', (_event, request: CompleteChatRequest) => completeChat(request))
-ipcMain.handle('api:generateImage', (_event, request: GenerateImageRequest) => generateImage(request))
-ipcMain.handle('api:cancelGenerateImage', (_event, requestId: string) => {
-  const controller = activeImageGenerations.get(requestId)
-  if (!controller) return false
-  controller.abort()
-  activeImageGenerations.delete(requestId)
-  return true
-})
-ipcMain.handle('api:startChatStream', (event, request: StartChatStreamRequest) => {
-  if (activeApiStreams.has(request.streamId)) {
-    throw new Error('聊天流已存在')
-  }
-
-  const abortController = new AbortController()
-  activeApiStreams.set(request.streamId, abortController)
-  void proxyChatStream(event.sender, request, abortController)
-  return true
-})
-ipcMain.handle('api:cancelChatStream', (_event, streamId: string) => {
-  const controller = activeApiStreams.get(streamId)
-  if (!controller) return false
-  controller.abort()
-  return true
 })
