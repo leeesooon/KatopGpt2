@@ -58,11 +58,6 @@ export default function ChatView() {
   })
   const isCurrentStreaming = activeConversationId ? streamingConvIds.includes(activeConversationId) : false
   const isImageGenerating = inputMode === 'image' && isCurrentStreaming
-  const workspaceTaskState = useWorkspaceStore((state) => state.taskState)
-  const workspaceDocument = useWorkspaceStore((state) => {
-    if (!state.activeDocumentPath) return null
-    return state.documents[state.activeDocumentPath] ?? null
-  })
   const {
     messagesEndRef,
     scrollContainerRef,
@@ -550,23 +545,6 @@ export default function ChatView() {
 
   return (
     <div className="flex-1 flex flex-col min-w-0">
-      {(workspaceDocument || workspaceTaskState.status !== 'idle') && (
-        <div className="border-b border-white/8 bg-white/[0.03] px-5 py-3 backdrop-blur-sm">
-          <div className="mx-auto flex max-w-4xl items-center justify-between gap-4 text-xs text-surface-400">
-            <div className="flex items-center gap-2">
-              <span className="rounded-full border border-amber-300/15 bg-amber-300/10 px-2.5 py-1 text-amber-100/90">
-                {workspaceDocument ? `当前文档: ${workspaceDocument.title}` : '文档工作区未选中文档'}
-              </span>
-              {workspaceDocument?.isDirty && (
-                <span className="rounded-full border border-white/10 px-2.5 py-1 text-surface-300">存在未保存修改</span>
-              )}
-            </div>
-            <div className="rounded-full border border-white/10 px-2.5 py-1 text-surface-300">
-              {workspaceTaskState.title}
-            </div>
-          </div>
-        </div>
-      )}
       {/* Messages */}
       <div className="flex-1 overflow-y-auto relative" ref={scrollContainerRef}>
         <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">

@@ -171,6 +171,137 @@
   background-position: 0 24px, 0 0;
 }
 
+.workspace-codemirror {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.workspace-codemirror .cm-editor {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: transparent;
+  color: #e5edf8;
+  font-size: 15px;
+  outline: none;
+}
+
+.workspace-codemirror .cm-scroller {
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  font-family: 'IBM Plex Mono', 'JetBrains Mono', ui-monospace, monospace;
+  line-height: 1.78;
+  background-image:
+    linear-gradient(rgba(148, 163, 184, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.025) 1px, transparent 1px);
+  background-size: 100% 32px, 32px 100%;
+  background-position: 0 24px, 0 0;
+}
+
+.workspace-codemirror .cm-content {
+  box-sizing: border-box;
+  min-height: 100%;
+  padding: 22px 26px 42px;
+  caret-color: #fbbf24;
+}
+
+.workspace-codemirror .cm-line {
+  padding: 0 4px;
+}
+
+.workspace-codemirror .cm-activeLine {
+  border-radius: 12px;
+  background: rgba(251, 191, 36, 0.075);
+  box-shadow: inset 2px 0 0 rgba(251, 191, 36, 0.35);
+}
+
+.workspace-codemirror .cm-selectionBackground,
+.workspace-codemirror .cm-content ::selection {
+  background: rgba(59, 130, 246, 0.35) !important;
+}
+
+.workspace-codemirror .cm-placeholder {
+  color: rgba(148, 163, 184, 0.55);
+}
+
+.workspace-codemirror .cm-md-heading-line {
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-weight: 700;
+  color: #f8fafc;
+}
+
+.workspace-codemirror .cm-md-heading-1 { font-size: 1.72em; line-height: 1.55; }
+.workspace-codemirror .cm-md-heading-2 { font-size: 1.45em; line-height: 1.6; }
+.workspace-codemirror .cm-md-heading-3 { font-size: 1.24em; line-height: 1.65; }
+.workspace-codemirror .cm-md-heading-4,
+.workspace-codemirror .cm-md-heading-5,
+.workspace-codemirror .cm-md-heading-6 { font-size: 1.08em; line-height: 1.7; }
+
+.workspace-codemirror .cm-md-heading-token,
+.workspace-codemirror .cm-md-meta {
+  color: rgba(148, 163, 184, 0.52);
+}
+
+.workspace-codemirror .cm-md-strong {
+  font-weight: 700;
+  color: #fff7ed;
+}
+
+.workspace-codemirror .cm-md-emphasis {
+  font-style: italic;
+  color: #fde68a;
+}
+
+.workspace-codemirror .cm-md-strikethrough {
+  color: rgba(226, 232, 240, 0.62);
+  text-decoration: line-through;
+}
+
+.workspace-codemirror .cm-md-inline-code {
+  border: 1px solid rgba(251, 191, 36, 0.12);
+  border-radius: 7px;
+  background: rgba(15, 23, 42, 0.75);
+  color: #fcd34d;
+  padding: 0.08em 0.34em;
+}
+
+.workspace-codemirror .cm-md-link,
+.workspace-codemirror .cm-md-image-link {
+  color: #7dd3fc;
+  text-decoration: underline;
+  text-decoration-color: rgba(125, 211, 252, 0.35);
+  text-underline-offset: 3px;
+}
+
+.workspace-codemirror .cm-md-quote-line {
+  border-left: 3px solid rgba(251, 191, 36, 0.45);
+  color: rgba(226, 232, 240, 0.78);
+  background: linear-gradient(90deg, rgba(251, 191, 36, 0.08), transparent 62%);
+}
+
+.workspace-codemirror .cm-md-list-line {
+  color: rgba(226, 232, 240, 0.94);
+}
+
+.workspace-codemirror .cm-md-task-line {
+  color: rgba(226, 232, 240, 0.95);
+}
+
+.workspace-codemirror .cm-md-code-fence-line,
+.workspace-codemirror .cm-md-code-block-line {
+  background: rgba(2, 6, 23, 0.55);
+}
+
+.workspace-codemirror .cm-md-code-fence-line {
+  color: rgba(148, 163, 184, 0.72);
+}
+
+.workspace-codemirror .cm-md-code-block-line {
+  color: #bfdbfe;
+}
+
 .workspace-preview {
   background-image:
     radial-gradient(circle at top, rgba(245, 158, 11, 0.08), transparent 30%),

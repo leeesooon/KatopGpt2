@@ -1,11 +1,29 @@
 import { useMemo, useRef, useState } from 'react'
-import { ArrowLeftToLine, ArrowRightToLine, BookOpenText, FolderOpen, GripVertical, PanelLeftOpen, PanelsTopLeft, Save, Sparkles, SquareArrowOutUpRight, X } from 'lucide-react'
+import {
+  ArrowLeftToLine,
+  ArrowRightToLine,
+  BookOpenText,
+  FileText,
+  FolderOpen,
+  GripVertical,
+  Info,
+  ListTree,
+  PanelLeftOpen,
+  PanelsTopLeft,
+  Save,
+  Sparkles,
+  SquareArrowOutUpRight,
+  X,
+} from 'lucide-react'
 import { useWorkspaceStore } from '../store/workspaceStore'
 import type { DocumentAgentMode, DocumentEditorMode } from '../types'
 import WorkspaceFileTree from './WorkspaceFileTree'
 import DocumentEditor from './DocumentEditor'
+import type { DocumentEditorHandle } from './DocumentEditor'
 import DocumentPreview from './DocumentPreview'
 import AgentActionBar from './AgentActionBar'
+import DocumentAssistantPanel from './DocumentAssistantPanel'
+import DocumentOutline, { buildMarkdownOutline } from './DocumentOutline'
 
 const MODE_LABELS: Record<DocumentEditorMode, string> = {
   write: '编辑',
@@ -13,11 +31,32 @@ const MODE_LABELS: Record<DocumentEditorMode, string> = {
   split: '分栏',
 }
 
+type SideTab = 'assistant' | 'outline' | 'info'
+
 function buildComposerDraft(mode: DocumentAgentMode, documentTitle?: string) {
   if (mode === 'create') return '请帮我生成一份 Markdown 初稿，主题是：'
-  if (mode === 'rewrite') return `请改写我当前选中的内容，风格要求：`
+  if (mode === 'rewrite') return '请改写我当前选中的内容，风格要求：'
   if (mode === 'expand') return `请扩写当前文档《${documentTitle ?? '当前文档'}》，重点补充：`
   return `请总结当前文档《${documentTitle ?? '当前文档'}》，输出方向：`
+}
+
+function getDocumentStats(content: string) {
+  return {
+    lines: content ? content.split(/\r?\n/).length : 1,
+    words: content.trim() ? content.trim().split(/\s+/).length : 0,
+    characters: content.length,
+    headings: buildMarkdownOutline(content).length,
+  }
+}
+
+function formatTime(timestamp?: number) {
+  if (!timestamp) return '暂无'
+  return new Date(timestamp).toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
 interface DocumentWorkspaceProps {
@@ -27,8 +66,11 @@ interface DocumentWorkspaceProps {
 export default function DocumentWorkspace({ standalone = false }: DocumentWorkspaceProps) {
   const [isTreeCollapsed, setIsTreeCollapsed] = useState(false)
   const [treeWidth, setTreeWidth] = useState(220)
+  const [sidePanelWidth, setSidePanelWidth] = useState(320)
+  const [sideTab, setSideTab] = useState<SideTab>('assistant')
+  const [activeLine, setActiveLine] = useState<number | null>(null)
   const workspaceBodyRef = useRef<HTMLDivElement>(null)
-  const editorScrollRef = useRef<HTMLTextAreaElement>(null)
+  const editorScrollRef = useRef<DocumentEditorHandle>(null)
   const previewScrollRef = useRef<HTMLDivElement>(null)
   const syncingScrollRef = useRef<'editor' | 'preview' | null>(null)
   const {
@@ -65,6 +107,15 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
   } = useWorkspaceStore()
 
   const activeDocument = activeDocumentPath ? documents[activeDocumentPath] ?? null : null
+  const documentStats = useMemo(() => getDocumentStats(activeDocument?.content ?? ''), [activeDocument?.content])
+
+  const saveStatus = useMemo(() => {
+    if (!activeDocument) return { label: '未打开文档', tone: 'text-surface-400 border-white/10 bg-white/5' }
+    if (error) return { label: '保存失败', tone: 'text-rose-200 border-rose-400/25 bg-rose-400/10' }
+    if (isSaving) return { label: '保存中', tone: 'text-sky-200 border-sky-400/25 bg-sky-400/10' }
+    if (activeDocument.isDirty) return { label: '未保存', tone: 'text-amber-200 border-amber-400/25 bg-amber-400/10' }
+    return { label: '已保存', tone: 'text-emerald-200 border-emerald-400/25 bg-emerald-400/10' }
+  }, [activeDocument, error, isSaving])
 
   const statusTone = useMemo(() => {
     if (taskState.status === 'running') return 'text-sky-200 border-sky-400/25 bg-sky-400/10'
@@ -74,6 +125,7 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
   }, [taskState.status])
 
   const handleAction = (mode: DocumentAgentMode) => {
+    setSideTab('assistant')
     queueComposerDraft(mode, buildComposerDraft(mode, activeDocument?.title))
   }
 
@@ -82,8 +134,6 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
     if (!rawName) return
     await createDocumentFromSuggestion(rawName)
   }
-
-  const isRewriteSuggestion = latestSuggestion?.mode === 'rewrite'
 
   const handleResizeStart = () => {
     const handlePointerMove = (event: PointerEvent) => {
@@ -138,26 +188,55 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
     window.addEventListener('pointerup', stopResize)
   }
 
+  const handleSidePanelResizeStart = () => {
+    const container = workspaceBodyRef.current
+    if (!container) return
+
+    const containerRect = container.getBoundingClientRect()
+    const maxWidth = Math.max(300, Math.min(520, Math.round(containerRect.width * 0.45)))
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const nextWidth = containerRect.right - event.clientX
+      setSidePanelWidth(Math.max(280, Math.min(maxWidth, Math.round(nextWidth))))
+    }
+
+    const stopResize = () => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', stopResize)
+    }
+
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', stopResize)
+  }
+
   const syncScroll = (source: 'editor' | 'preview', progress: number) => {
     if (editorMode !== 'split') return
     if (syncingScrollRef.current && syncingScrollRef.current !== source) return
 
-    const target = source === 'editor' ? previewScrollRef.current : editorScrollRef.current
-    if (!target) return
-
     syncingScrollRef.current = source
-    const maxScroll = target.scrollHeight - target.clientHeight
-    target.scrollTop = maxScroll > 0 ? maxScroll * progress : 0
+    if (source === 'editor') {
+      const target = previewScrollRef.current
+      if (!target) return
+      const maxScroll = target.scrollHeight - target.clientHeight
+      target.scrollTop = maxScroll > 0 ? maxScroll * progress : 0
+    } else {
+      editorScrollRef.current?.scrollToProgress(progress)
+    }
 
     window.requestAnimationFrame(() => {
       syncingScrollRef.current = null
     })
   }
 
+  const handleJumpToLine = (line: number) => {
+    setActiveLine(line)
+    editorScrollRef.current?.focusLine(line)
+  }
+
   if (!currentWorkspace) {
     return (
       <aside
-        className={`${isPanelVisible || standalone ? 'relative flex' : 'hidden'} flex-col overflow-hidden ${standalone ? '' : 'border-l border-white/8'} bg-[radial-gradient(circle_at_top,rgba(245,158,11,0.18),transparent_38%),linear-gradient(180deg,#08111d_0%,#09131f_100%)] p-3`}
+        className={`${isPanelVisible || standalone ? 'relative flex' : 'hidden'} ${standalone ? 'h-full w-full flex-1' : 'border-l border-white/8'} flex-col overflow-hidden bg-[radial-gradient(circle_at_top,rgba(245,158,11,0.18),transparent_38%),linear-gradient(180deg,#08111d_0%,#09131f_100%)] p-3`}
         style={standalone ? undefined : { width: panelWidth, minWidth: 480 }}
       >
         {!standalone && (
@@ -203,30 +282,16 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
           </div>
           <div className="max-w-md">
             <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] uppercase tracking-[0.3em] text-surface-400">
-              <Sparkles size={12} /> Markdown Workspace MVP
+              <Sparkles size={12} /> Markdown Workspace
             </div>
-            <h2 className="text-3xl font-semibold tracking-tight text-surface-50">让聊天真正落到文档里</h2>
-            <p className="mt-4 text-sm leading-7 text-surface-400">
-              打开一个本地工作区后，你可以一边和模型对话，一边生成、改写、扩写 Markdown 文档，并把结果安全地应用回文件。
+            <h2 className="text-3xl font-semibold tracking-tight text-surface-50">让文档和对话一起工作</h2>
+            <p className="mt-3 text-sm leading-6 text-surface-400">
+              打开一个文件夹后，可以在这里编辑 Markdown、预览排版，并使用文档助手生成、改写和总结内容。
             </p>
+            <button onClick={() => void openWorkspace()} className="btn-primary mt-7 inline-flex items-center gap-2 rounded-2xl px-5 py-3">
+              <FolderOpen size={17} /> 打开工作区
+            </button>
           </div>
-
-          <div className="mt-8 grid w-full max-w-lg grid-cols-2 gap-3 text-left text-sm text-surface-300">
-            <div className="rounded-[24px] border border-white/10 bg-white/5 p-4">
-              <div className="mb-2 text-xs uppercase tracking-[0.24em] text-amber-200/70">Write</div>
-              从一句话生成 PRD、周报、会议纪要等 Markdown 初稿。
-            </div>
-            <div className="rounded-[24px] border border-white/10 bg-white/5 p-4">
-              <div className="mb-2 text-xs uppercase tracking-[0.24em] text-sky-200/70">Refine</div>
-              对当前文档或选中段落做扩写、总结和风格改写。
-            </div>
-          </div>
-
-          <button onClick={() => void openWorkspace()} className="btn-primary mt-8 inline-flex items-center gap-2 rounded-2xl px-5 py-3 text-sm shadow-[0_18px_48px_rgba(59,130,246,0.24)]">
-            <FolderOpen size={17} />
-            打开文档工作区
-          </button>
-          {error && <p className="mt-4 max-w-md text-xs text-rose-300">{error}</p>}
         </div>
       </aside>
     )
@@ -234,8 +299,8 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
 
   return (
     <aside
-      className={`${isPanelVisible || standalone ? 'relative flex' : 'hidden'} flex-col overflow-hidden ${standalone ? 'flex-1' : 'border-l border-white/8'} bg-[linear-gradient(180deg,#08111b_0%,#09111b_26%,#0b1624_100%)] p-3`}
-      style={standalone ? undefined : { width: panelWidth, minWidth: 480 }}
+      className={`${isPanelVisible || standalone ? 'relative flex' : 'hidden'} ${standalone ? 'h-full w-full flex-1' : 'border-l border-white/8'} flex-col overflow-hidden bg-[#07111d] p-3`}
+      style={standalone ? undefined : { width: panelWidth, minWidth: 720 }}
     >
       {!standalone && (
         <button
@@ -246,192 +311,230 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
           <GripVertical size={16} />
         </button>
       )}
-      <div className="flex h-full flex-col overflow-hidden rounded-[30px] border border-white/10 bg-[linear-gradient(180deg,rgba(9,17,27,0.96),rgba(9,17,27,0.9))] shadow-[0_22px_55px_rgba(0,0,0,0.28)]">
-      <div className="border-b border-white/8 px-5 py-4">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <div className="text-[11px] uppercase tracking-[0.28em] text-surface-500">Workspace</div>
-            <div className="mt-1 flex items-center gap-2 text-surface-100">
-              <span className="text-lg font-semibold">{currentWorkspace.name}</span>
-              <span className="rounded-full border border-white/10 px-2 py-0.5 text-[11px] text-surface-400">{filePaths.length} docs</span>
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_20%_0%,rgba(245,158,11,0.12),transparent_30%),radial-gradient(circle_at_100%_20%,rgba(56,189,248,0.1),transparent_28%)]" />
+      <div className="relative flex h-full min-h-0 flex-col rounded-[30px] border border-white/10 bg-white/[0.035] p-4 shadow-[0_24px_90px_rgba(0,0,0,0.28)]">
+        <header className="mb-4 flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.28em] text-surface-500">
+              <PanelsTopLeft size={13} /> 写作工作台
             </div>
+            <h2 className="mt-1 truncate text-lg font-semibold text-surface-50">
+              {activeDocument?.title ?? currentWorkspace.name}
+            </h2>
           </div>
-
-          <div className="flex items-center gap-2 self-start">
-            <button
-              onClick={() => setIsTreeCollapsed((value) => !value)}
-              className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-surface-300 transition hover:bg-white/10 hover:text-white"
-              title="展开工作区"
-            >
-              <PanelLeftOpen size={15} />
-            </button>
-            {!standalone && (
-              <button
-                onClick={() => void handlePopout()}
-                className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-surface-300 transition hover:bg-white/10 hover:text-white"
-                title="悬浮为独立窗口"
-              >
-                <SquareArrowOutUpRight size={15} />
-              </button>
-            )}
-            {standalone && (
-              <button
-                onClick={() => void handleDockBack()}
-                className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-surface-300 transition hover:bg-white/10 hover:text-white"
-                title="收回主界面"
-              >
-                <ArrowLeftToLine size={15} />
-              </button>
-            )}
-            <AgentActionBar
-              onAction={handleAction}
-              hasActiveDocument={Boolean(activeDocument)}
-              hasSelection={Boolean(selection?.text)}
-            />
-            {(['write', 'preview', 'split'] as DocumentEditorMode[]).map((mode) => (
-              <button
-                key={mode}
-                onClick={() => setEditorMode(mode)}
-                className={`rounded-full px-3 py-1.5 text-xs transition ${editorMode === mode ? 'bg-white text-surface-900' : 'border border-white/10 bg-white/5 text-surface-300 hover:bg-white/10'}`}
-              >
-                {MODE_LABELS[mode]}
-              </button>
-            ))}
+          <div className="flex items-center gap-2">
+            <span className={`rounded-full border px-3 py-1.5 text-xs ${saveStatus.tone}`}>{saveStatus.label}</span>
+            <span className={`hidden rounded-full border px-3 py-1.5 text-xs xl:inline-flex ${statusTone}`}>{taskState.title}</span>
             <button
               onClick={() => void saveActiveDocument()}
-              disabled={!activeDocument || !activeDocument.isDirty || isSaving}
-              className="btn-primary inline-flex items-center gap-2 rounded-full px-4 py-2 text-xs disabled:shadow-none"
+              disabled={!activeDocument || isSaving || !activeDocument.isDirty}
+              className="btn-ghost flex h-10 items-center gap-2 rounded-2xl border border-white/10 px-3 text-xs disabled:opacity-40"
+              title="保存当前文档"
             >
-              <Save size={14} />
-              {isSaving ? '保存中' : '保存'}
+              <Save size={15} /> 保存
             </button>
+            {!standalone ? (
+              <button
+                onClick={() => void handlePopout()}
+                className="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-surface-300 transition hover:bg-white/10 hover:text-white"
+                title="独立窗口打开"
+              >
+                <SquareArrowOutUpRight size={16} />
+              </button>
+            ) : (
+              <button
+                onClick={() => void handleDockBack()}
+                className="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-surface-300 transition hover:bg-white/10 hover:text-white"
+                title="收回主界面"
+              >
+                <ArrowLeftToLine size={16} />
+              </button>
+            )}
             {!standalone && (
               <button
                 onClick={() => setPanelVisible(false)}
-                className="btn-ghost inline-flex items-center gap-2 rounded-full border border-white/10 px-3 py-2 text-xs"
+                className="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-surface-300 transition hover:bg-white/10 hover:text-white"
                 title="隐藏文档区"
               >
-                <ArrowRightToLine size={14} />
-                隐藏
+                <ArrowRightToLine size={16} />
               </button>
             )}
           </div>
-        </div>
+        </header>
 
-        {(taskState.status === 'failed' || !activeDocument) && (
-          <p className="mt-4 text-xs text-surface-500">
-            {activeDocument ? taskState.message : '从左侧文档树里选择一个 Markdown 文档开始编辑'}
-          </p>
-        )}
-      </div>
-
-      <div ref={workspaceBodyRef} className="flex min-h-0 flex-1 gap-4 px-4 py-4">
-        {!isTreeCollapsed && (
-          <>
-          <div className="shrink-0 min-h-0" style={{ width: treeWidth }}>
-            <WorkspaceFileTree
-              filePaths={filePaths}
-              activePath={activeDocumentPath}
-              pendingRenamePath={pendingRenamePath}
-              onSelect={(relativePath) => void openDocument(relativePath)}
-              onCreate={(relativePath) => createDocument(relativePath, '')}
-              onRename={renameDocument}
-              onDelete={deleteDocument}
-              onCollapse={() => setIsTreeCollapsed(true)}
-            />
-          </div>
-          <button
-            onMouseDown={handleTreeResizeStart}
-            className="-ml-2 flex w-2 shrink-0 cursor-col-resize items-center justify-center rounded-full text-surface-600 transition hover:bg-white/5 hover:text-amber-200"
-            title="拖动调整工作区列表宽度"
-          >
-            <GripVertical size={14} />
-          </button>
-          </>
-        )}
-
-        <div className="flex min-w-0 flex-1 flex-col gap-4">
-          <div className="grid min-h-0 flex-1 gap-4" style={{ gridTemplateColumns: editorMode === 'split' ? '1fr 1fr' : '1fr' }}>
-            {editorMode !== 'preview' && (
-              <DocumentEditor
-                content={activeDocument?.content ?? ''}
-                onChange={updateActiveDocumentContent}
-                onSelectionChange={setSelection}
-                scrollRef={editorScrollRef}
-                onScroll={(progress) => syncScroll('editor', progress)}
+        <div ref={workspaceBodyRef} className="flex min-h-0 flex-1 overflow-hidden gap-4">
+          {!isTreeCollapsed ? (
+            <div className="relative min-h-0 shrink-0" style={{ width: treeWidth }}>
+              <WorkspaceFileTree
+                filePaths={filePaths}
+                activePath={activeDocumentPath}
+                pendingRenamePath={pendingRenamePath}
+                onSelect={(relativePath) => void openDocument(relativePath)}
+                onCreate={(relativePath) => createDocument(relativePath)}
+                onRename={(oldPath, newPath) => renameDocument(oldPath, newPath)}
+                onDelete={(relativePath) => deleteDocument(relativePath)}
               />
-            )}
-            {editorMode !== 'write' && (
-              <DocumentPreview
-                content={activeDocument?.content ?? ''}
-                scrollRef={previewScrollRef}
-                onScroll={(progress) => syncScroll('preview', progress)}
-              />
-            )}
-          </div>
-
-          {latestSuggestion && (
-            <div className="rounded-[24px] border border-emerald-400/20 bg-emerald-400/8 p-4">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-[11px] uppercase tracking-[0.26em] text-emerald-200/70">Latest Suggestion</div>
-                  <div className="mt-1 text-sm font-medium text-surface-100">{latestSuggestion.title}</div>
-                </div>
-                <button onClick={clearLatestSuggestion} className="btn-ghost px-2 py-1 text-xs">
-                  清除
-                </button>
-              </div>
-              <textarea
-                value={latestSuggestion.content}
-                onChange={(event) => updateLatestSuggestionContent(event.target.value)}
-                className="mt-3 min-h-[160px] w-full resize-y rounded-2xl border border-white/10 bg-[#08111b]/55 px-4 py-3 text-sm leading-6 text-surface-200 outline-none transition focus:border-emerald-300/30 focus:bg-[#08111b]/75"
-                placeholder="你可以先微调 AI 改写结果，再决定是否替换。"
-              />
-              <div className="mt-4 flex flex-wrap gap-2">
-                {isRewriteSuggestion ? (
-                  <>
-                    <button
-                      onClick={() => applyLatestSuggestion('replace-selection')}
-                      disabled={!selection}
-                      className="btn-primary rounded-full px-4 py-2 text-xs disabled:opacity-40"
-                    >
-                      确认替换
-                    </button>
-                    <button onClick={clearLatestSuggestion} className="btn-ghost rounded-full border border-white/10 px-4 py-2 text-xs">
-                      取消
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <button onClick={() => applyLatestSuggestion('replace-document')} className="btn-primary rounded-full px-4 py-2 text-xs">
-                      替换全文
-                    </button>
-                    <button onClick={() => applyLatestSuggestion('append-document')} className="btn-ghost rounded-full border border-white/10 px-4 py-2 text-xs">
-                      追加文末
-                    </button>
-                    <button onClick={() => void handleCreateFromSuggestion()} className="btn-ghost rounded-full border border-white/10 px-4 py-2 text-xs">
-                      新建文档
-                    </button>
-                    <button onClick={clearLatestSuggestion} className="btn-ghost rounded-full border border-white/10 px-4 py-2 text-xs">
-                      取消
-                    </button>
-                  </>
-                )}
-              </div>
+              <button
+                onMouseDown={handleTreeResizeStart}
+                className="absolute -right-2 top-0 flex h-full w-4 items-center justify-center text-surface-600 transition hover:text-amber-200"
+                title="拖动调整文件树宽度"
+              >
+                <GripVertical size={14} />
+              </button>
             </div>
+          ) : (
+            <button
+              onClick={() => setIsTreeCollapsed(false)}
+              className="flex h-full w-11 shrink-0 items-start justify-center rounded-[22px] border border-white/10 bg-white/5 py-4 text-surface-300 transition hover:bg-white/10 hover:text-white"
+              title="展开文件树"
+            >
+              <PanelLeftOpen size={17} />
+            </button>
           )}
 
-          {(isWorkspaceLoading || error) && (
-            <div className="flex items-center justify-between rounded-[20px] border border-white/10 bg-white/5 px-4 py-3 text-xs text-surface-400">
+          <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden gap-4">
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-[24px] border border-white/10 bg-white/[0.04] px-4 py-3">
               <div className="flex items-center gap-2">
-                <PanelsTopLeft size={14} />
-                {isWorkspaceLoading ? '正在同步工作区内容...' : error}
+                {!isTreeCollapsed && (
+                  <button onClick={() => setIsTreeCollapsed(true)} className="btn-ghost rounded-full border border-white/10 px-3 py-2 text-xs">
+                    收起文件树
+                  </button>
+                )}
+                <div className="flex rounded-full border border-white/10 bg-black/10 p-1">
+                  {(Object.keys(MODE_LABELS) as DocumentEditorMode[]).map((mode) => (
+                    <button
+                      key={mode}
+                      onClick={() => setEditorMode(mode)}
+                      className={`rounded-full px-3 py-1.5 text-xs transition ${editorMode === mode ? 'bg-white/12 text-white' : 'text-surface-400 hover:text-white'}`}
+                    >
+                      {MODE_LABELS[mode]}
+                    </button>
+                  ))}
+                </div>
               </div>
-              {error && <button onClick={() => void openWorkspace()} className="btn-ghost px-2 py-1 text-xs">重新打开</button>}
+              <AgentActionBar
+                onAction={handleAction}
+                hasActiveDocument={Boolean(activeDocument)}
+                hasSelection={Boolean(selection)}
+              />
             </div>
-          )}
+
+            <div
+              className="grid min-h-0 flex-1 overflow-hidden gap-4"
+              style={{ gridTemplateColumns: editorMode === 'split' ? 'minmax(0, 1fr) minmax(0, 1fr)' : 'minmax(0, 1fr)' }}
+            >
+              {editorMode !== 'preview' && (
+                <DocumentEditor
+                  ref={editorScrollRef}
+                  content={activeDocument?.content ?? ''}
+                  onChange={updateActiveDocumentContent}
+                  onSelectionChange={setSelection}
+                  onCursorLineChange={setActiveLine}
+                  onScroll={(progress) => syncScroll('editor', progress)}
+                  onSave={() => void saveActiveDocument()}
+                />
+              )}
+              {editorMode !== 'write' && (
+                <DocumentPreview
+                  content={activeDocument?.content ?? ''}
+                  scrollRef={previewScrollRef}
+                  onScroll={(progress) => syncScroll('preview', progress)}
+                />
+              )}
+            </div>
+
+            {(isWorkspaceLoading || error) && (
+              <div className="flex items-center justify-between rounded-[20px] border border-white/10 bg-white/5 px-4 py-3 text-xs text-surface-400">
+                <div className="flex items-center gap-2">
+                  <PanelsTopLeft size={14} />
+                  {isWorkspaceLoading ? '正在同步工作区内容...' : error}
+                </div>
+                {error && <button onClick={() => void openWorkspace()} className="btn-ghost px-2 py-1 text-xs">重新打开</button>}
+              </div>
+            )}
+          </main>
+
+          <section
+            className="relative flex min-h-0 shrink-0 flex-col overflow-hidden gap-3"
+            style={{ width: sidePanelWidth }}
+          >
+            <button
+              onMouseDown={handleSidePanelResizeStart}
+              className="absolute -left-3 top-0 z-10 flex h-full w-5 items-center justify-center text-surface-600 transition hover:text-sky-200"
+              title="拖动调整右侧栏宽度"
+            >
+              <GripVertical size={14} />
+            </button>
+            <div className="grid grid-cols-3 gap-1 rounded-2xl border border-white/10 bg-white/[0.04] p-1">
+              {([
+                ['assistant', Sparkles, 'AI 建议'],
+                ['outline', ListTree, '大纲'],
+                ['info', Info, '信息'],
+              ] as const).map(([tab, Icon, label]) => (
+                <button
+                  key={tab}
+                  onClick={() => setSideTab(tab)}
+                  className={`flex items-center justify-center gap-1.5 rounded-xl px-2 py-2 text-xs transition ${sideTab === tab ? 'bg-white/12 text-white' : 'text-surface-400 hover:text-white'}`}
+                >
+                  <Icon size={13} /> {label}
+                </button>
+              ))}
+            </div>
+
+            <div className="min-h-0 flex-1">
+              {sideTab === 'assistant' && (
+                <DocumentAssistantPanel
+                  activeDocument={activeDocument}
+                  selection={selection}
+                  latestSuggestion={latestSuggestion}
+                  taskState={taskState}
+                  onApplySuggestion={applyLatestSuggestion}
+                  onClearSuggestion={clearLatestSuggestion}
+                  onUpdateSuggestion={updateLatestSuggestionContent}
+                  onCreateFromSuggestion={handleCreateFromSuggestion}
+                />
+              )}
+              {sideTab === 'outline' && (
+                <DocumentOutline
+                  content={activeDocument?.content ?? ''}
+                  activeLine={activeLine}
+                  onJumpToLine={handleJumpToLine}
+                />
+              )}
+              {sideTab === 'info' && (
+                <div className="flex h-full flex-col rounded-[28px] border border-white/10 bg-[#0b1421]/86 p-4 shadow-[0_24px_70px_rgba(0,0,0,0.25)]">
+                  <div className="flex items-center gap-2 text-sm font-medium text-surface-100">
+                    <FileText size={16} className="text-emerald-200" /> 文档信息
+                  </div>
+                  <div className="mt-4 grid grid-cols-2 gap-3 text-xs">
+                    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+                      <div className="text-surface-500">行数</div>
+                      <div className="mt-1 text-lg font-semibold text-surface-100">{documentStats.lines}</div>
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+                      <div className="text-surface-500">字符</div>
+                      <div className="mt-1 text-lg font-semibold text-surface-100">{documentStats.characters}</div>
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+                      <div className="text-surface-500">词数</div>
+                      <div className="mt-1 text-lg font-semibold text-surface-100">{documentStats.words}</div>
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+                      <div className="text-surface-500">标题</div>
+                      <div className="mt-1 text-lg font-semibold text-surface-100">{documentStats.headings}</div>
+                    </div>
+                  </div>
+                  <div className="mt-4 space-y-3 rounded-2xl border border-white/10 bg-white/[0.04] p-3 text-xs leading-5 text-surface-400">
+                    <div>路径：{activeDocument?.relativePath ?? '未选择'}</div>
+                    <div>最近加载：{formatTime(activeDocument?.lastLoadedAt)}</div>
+                    <div>最近保存：{formatTime(activeDocument?.lastSavedAt)}</div>
+                    <div>当前选区：{selection ? `${selection.text.length} 字符` : '无'}</div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </section>
         </div>
-      </div>
       </div>
     </aside>
   )

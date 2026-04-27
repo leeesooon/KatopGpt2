@@ -1,5 +1,5 @@
 ﻿import { useEffect, useMemo, useRef, useState } from 'react'
-import { Send, Square, ImagePlus, Paperclip, X, FileText, Search, Loader2, BookOpenText, SquareArrowOutUpRight, Download, Sparkles } from 'lucide-react'
+import { Send, Square, ImagePlus, Paperclip, X, FileText, Search, Loader2, SquareArrowOutUpRight, Download, Sparkles } from 'lucide-react'
 import { v4 as uuidv4 } from 'uuid'
 import ModelSelector from './ModelSelector'
 import { useChatStore } from '../store/chatStore'
@@ -51,16 +51,9 @@ export default function InputArea({
 }: InputAreaProps) {
   const { searchEnabled, setSearchEnabled, settings } = useChatStore()
   const {
-    currentWorkspace,
-    activeDocumentPath,
-    documents,
     pendingAction,
     composerDraft,
     consumeComposerDraft,
-    clearPendingAction,
-    closeActiveDocument,
-    cancelDocumentWorkflow,
-    exitWorkspaceAssistant,
     isPanelVisible,
     setPanelVisible,
   } = useWorkspaceStore()
@@ -353,8 +346,6 @@ export default function InputArea({
   }
 
   const hasAttachments = images.length > 0 || files.length > 0
-  const activeDocument = activeDocumentPath ? documents[activeDocumentPath] : null
-
   const actionLabelMap: Record<DocumentAgentMode, string> = {
     chat: '普通对话',
     create: '生成初稿',
@@ -446,23 +437,16 @@ export default function InputArea({
               生图
             </button>
           </div>
-          <button
-            onClick={() => void handleToggleDocumentAssistant()}
-            disabled={isImageMode}
-            className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs transition ${
-              isDocumentAssistantOpen
-                ? 'border-amber-300/20 bg-amber-300/10 text-amber-100'
-                : 'border-white/10 bg-white/5 text-surface-300 hover:bg-white/10 hover:text-white'
-            }`}
-            title={isDocumentAssistantOpen ? '关闭文档助手' : '打开文档助手'}
-          >
-            {isDocumentAssistantOpen ? <BookOpenText size={14} /> : <SquareArrowOutUpRight size={14} />}
-            <span>{isDocumentAssistantOpen ? '文档助手已开启' : '打开文档助手'}</span>
-          </button>
-          {currentWorkspace && (
-            <span className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-surface-400">
-              绑定到当前对话
-            </span>
+          {!isDocumentAssistantOpen && (
+            <button
+              onClick={() => void handleToggleDocumentAssistant()}
+              disabled={isImageMode}
+              className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-surface-300 transition hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              title="打开文档助手"
+            >
+              <SquareArrowOutUpRight size={14} />
+              <span>打开文档助手</span>
+            </button>
           )}
           {!isImageMode && hasSpreadsheetSession && onExportSpreadsheet && (
             <button
@@ -525,47 +509,7 @@ export default function InputArea({
           {/* Model selector row */}
           <div className="mb-1 flex items-center justify-between gap-2 border-b border-surface-700/30 px-1 pb-1.5">
             <ModelSelector />
-            {currentWorkspace && (
-              <div className="flex items-center gap-2 text-[11px] text-surface-400">
-                <span className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-2 py-1">
-                  <span>工作区: {currentWorkspace.name}</span>
-                  <button
-                    onClick={() => {
-                      exitWorkspaceAssistant()
-                    }}
-                    className="rounded-full p-0.5 text-surface-500 transition hover:bg-white/10 hover:text-surface-100"
-                    title="退出编写助手"
-                  >
-                    <X size={11} />
-                  </button>
-                </span>
-                {activeDocument && (
-                  <span className="inline-flex items-center gap-1 rounded-full border border-amber-300/15 bg-amber-300/10 px-2 py-1 text-amber-100/90">
-                    <span>当前文档: {activeDocument.title}</span>
-                    <button
-                      onClick={closeActiveDocument}
-                      className="rounded-full p-0.5 text-amber-100/60 transition hover:bg-amber-100/10 hover:text-amber-50"
-                      title="关闭当前文档"
-                    >
-                      <X size={11} />
-                    </button>
-                  </span>
-                )}
-              </div>
-            )}
           </div>
-
-          {pendingAction !== 'chat' && (
-            <div className="mb-2 flex items-center justify-between gap-3 rounded-xl border border-amber-300/15 bg-amber-300/10 px-3 py-2 text-xs text-amber-100">
-              <div>
-                <span className="font-medium">文档模式:</span> {actionLabelMap[pendingAction]}
-                {activeDocument && <span className="text-amber-100/70"> · {activeDocument.title}</span>}
-              </div>
-              <button onClick={clearPendingAction} className="rounded-full border border-amber-200/15 px-2 py-1 text-[11px] text-amber-100/80 transition hover:bg-amber-200/10">
-                取消
-              </button>
-            </div>
-          )}
 
           {/* Image previews */}
           {images.length > 0 && (

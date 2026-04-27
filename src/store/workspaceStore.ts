@@ -108,7 +108,7 @@ function createEmptySession(): WorkspaceSession {
     pendingRenamePath: null,
     isPanelVisible: false,
     panelWidth: 672,
-    editorMode: 'split',
+    editorMode: 'write',
     selection: null,
     pendingAction: 'chat',
     composerDraft: null,
@@ -392,10 +392,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   createDocumentFromContent: async (content, _suggestedName) => {
-    if (window.electronAPI?.openWorkspaceWindow) {
-      await window.electronAPI.openWorkspaceWindow()
-    }
-
+    const shouldOpenWorkspaceWindow = Boolean(window.electronAPI?.openWorkspaceWindow)
     const ensureWorkspace = async () => {
       if (get().currentWorkspace) return true
       await get().openWorkspace()
@@ -406,10 +403,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     if (!workspaceReady) return false
 
     const untitledPath = createUntitledDocumentPath(get().filePaths)
-    const created = await get().createDocument(untitledPath, '')
+    const created = await get().createDocument(untitledPath, content)
     if (!created) return false
 
     const createdDocument = get().documents[untitledPath]
+    const createdAt = Date.now()
 
     setSessionState(set, {
       pendingRenamePath: untitledPath,
@@ -418,15 +416,18 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         [untitledPath]: createdDocument
           ? {
               ...createdDocument,
+              content,
+              isDirty: false,
               isPendingNaming: true,
               pendingInitialContent: content,
             }
           : {
               relativePath: untitledPath,
               title: titleFromPath(untitledPath),
-              content: '',
+              content,
               isDirty: false,
-              lastLoadedAt: Date.now(),
+              lastLoadedAt: createdAt,
+              lastSavedAt: createdAt,
               isPendingNaming: true,
               pendingInitialContent: content,
             },
@@ -434,10 +435,25 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       taskState: {
         status: 'ready',
         title: '已创建待命名文档',
-        message: '请先在左侧文档树中完成命名，命名后会自动写入转换结果。',
+        message: shouldOpenWorkspaceWindow
+          ? '内容已写入临时文档，请在独立文档窗口左侧文档树中完成命名。'
+          : '内容已写入临时文档，请先在左侧文档树中完成命名。',
       },
-      isPanelVisible: true,
+      isPanelVisible: !shouldOpenWorkspaceWindow,
     })
+
+    if (shouldOpenWorkspaceWindow) {
+      try {
+        await window.electronAPI?.openWorkspaceWindow()
+        setSessionState(set, { isPanelVisible: false })
+      } catch (error) {
+        setSessionState(set, {
+          isPanelVisible: true,
+          error: error instanceof Error ? error.message : '打开文档助手窗口失败',
+        })
+      }
+    }
+
     return true
   },
 
@@ -467,11 +483,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
     try {
       const existingDocument = get().documents[normalizedOldPath]
-      const pendingInitialContent = existingDocument?.pendingInitialContent
-      const shouldWritePendingContent = Boolean(existingDocument?.isPendingNaming && pendingInitialContent && window.electronAPI?.writeWorkspaceDocument)
+      const pendingInitialContent = typeof existingDocument?.pendingInitialContent === 'string'
+        ? existingDocument.pendingInitialContent
+        : null
+      const shouldWritePendingContent = Boolean(existingDocument?.isPendingNaming && pendingInitialContent !== null && window.electronAPI?.writeWorkspaceDocument)
 
       await window.electronAPI.renameWorkspaceDocument(workspace.rootPath, normalizedOldPath, normalizedNewPath)
-      if (shouldWritePendingContent && pendingInitialContent) {
+      if (shouldWritePendingContent && pendingInitialContent !== null) {
         await window.electronAPI.writeWorkspaceDocument(workspace.rootPath, normalizedNewPath, pendingInitialContent)
       }
 
@@ -486,7 +504,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
             ...existingDocument,
             relativePath: normalizedNewPath,
             title: titleFromPath(normalizedNewPath),
-            content: shouldWritePendingContent && pendingInitialContent ? pendingInitialContent : existingDocument.content,
+            content: shouldWritePendingContent && pendingInitialContent !== null ? pendingInitialContent : existingDocument.content,
             isDirty: shouldWritePendingContent ? false : existingDocument.isDirty,
             isPendingNaming: false,
             pendingInitialContent: undefined,
