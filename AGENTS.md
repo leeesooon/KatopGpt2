@@ -78,6 +78,11 @@ Use it as the repository-specific source for commands, architecture notes, and c
 - The chat UI batches streaming updates with `requestAnimationFrame` to reduce store churn.
 - Document extraction support is implemented through Electron IPC, not directly in the renderer.
 
+## Chat Capability Roadmap
+- File knowledge base / RAG: add semantic indexing for uploaded files and workspace documents, retrieve only relevant chunks for chat context, and preserve source citations instead of injecting whole truncated files.
+- Unified tool-calling layer: expose search, webpage reads, spreadsheet actions, image generation, and workspace file operations through one model-driven tool interface with graceful fallbacks for providers without tool support.
+- User memory and project spaces: persist reusable user preferences, project background, writing style, and recurring constraints across conversations with explicit UI controls for viewing and deleting memory.
+
 ## Style Guide
 
 ### Imports

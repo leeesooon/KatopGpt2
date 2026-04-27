@@ -6,8 +6,10 @@ import { streamChat, parseSpreadsheetIntent, generateImage, cancelGenerateImage,
 import { recognizeImages } from '../services/ocr'
 import { resolveApiConfig } from '../types'
 import { prepareDocumentAgentRequest } from '../services/agentOrchestrator'
-import { webSearch, formatSearchContext, shouldTriggerSearch, SearchApiError } from '../services/searchApi'
+import { SearchApiError } from '../services/searchApi'
 import { readWebPagesFromText, formatWebPageContext } from '../services/webpage'
+import { runAgenticSearch } from '../services/agenticSearch'
+import { buildConversationSummary, buildSmartContextMessages, shouldUpdateConversationSummary } from '../services/contextManager'
 import type { ChatInputMode, ImageAttachment, FileAttachment, SearchResult } from '../types'
 import MessageBubble from './MessageBubble'
 import InputArea from './InputArea'
@@ -37,6 +39,7 @@ export default function ChatView() {
     updateMessage,
     patchMessage,
     updateConversationTitle,
+    updateConversationSummary,
     setConversationStreaming,
     attachSearchResults,
   } = useChatStore()
@@ -359,21 +362,25 @@ export default function ChatView() {
     }
 
     if ((searchEnabled || settings.enableSearchByDefault) && apiKey) {
-      const shouldSearch = searchEnabled || shouldTriggerSearch(messageContent)
-
-      if (shouldSearch) {
-        try {
-          const searchResults = await webSearch(messageContent, apiKey, settings.searchEngine, 'zh-CN', 8)
-          const startIndex = referenceSources.length + 1
-          const searchContext = formatSearchContext(searchResults, 4000, startIndex)
-          if (searchContext) {
-            referenceSections.push(`以下是网络搜索结果：\n\n${searchContext}`)
-            referenceSources = [...referenceSources, ...searchResults]
-          }
-        } catch (err) {
-          if (err instanceof SearchApiError) {
-            // Non-blocking: continue without search
-          }
+      try {
+        const startIndex = referenceSources.length + 1
+        const searchResult = await runAgenticSearch(
+          apiConfig,
+          messageContent,
+          previousMessages,
+          apiKey,
+          settings.searchEngine,
+          searchEnabled,
+          startIndex,
+          abortController.signal
+        )
+        if (searchResult.context) {
+          referenceSections.push(`以下是网络搜索结果：\n\n${searchResult.context}`)
+          referenceSources = [...referenceSources, ...searchResult.results]
+        }
+      } catch (err) {
+        if (err instanceof SearchApiError) {
+          // Non-blocking: continue without search
         }
       }
     }
@@ -402,18 +409,26 @@ export default function ChatView() {
         .conversations.find((c) => c.id === convId)!
         .messages.filter((m) => m.id !== assistantMsg.id)
 
-      // Sliding window: only send the last N messages as context
-      const windowSize = settings.contextWindowSize
-      const currentMessages = (allMessages.length > windowSize
-        ? allMessages.slice(-windowSize)
-        : allMessages
-      ).map((message) => {
-        if (message.id !== userMessage.id) return message
-        return {
-          ...message,
-          content: documentRequest.prompt,
+      const activeConversationForContext = useChatStore
+        .getState()
+        .conversations.find((c) => c.id === convId)
+      let activeSummary = activeConversationForContext?.summary
+
+      if (activeConversationForContext && shouldUpdateConversationSummary(activeConversationForContext)) {
+        const nextSummary = await buildConversationSummary(apiConfig, activeConversationForContext, abortController.signal)
+        if (nextSummary) {
+          updateConversationSummary(convId, nextSummary)
+          activeSummary = nextSummary
         }
-      })
+      }
+
+      const currentMessages = buildSmartContextMessages(
+        allMessages,
+        activeSummary,
+        settings.contextWindowSize,
+        userMessage.id,
+        documentRequest.prompt
+      )
       const referenceContext = referenceSections.join('\n\n')
 
       const stream = streamChat(

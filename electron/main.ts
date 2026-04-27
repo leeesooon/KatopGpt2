@@ -831,8 +831,8 @@ async function completeChat(request: CompleteChatRequest) {
 async function generateImage(request: GenerateImageRequest): Promise<GenerateImageResult> {
   const baseUrl = normalizeApiBaseUrl(request.baseUrl)
   const prompt = request.prompt.trim()
-  const referenceImage = request.images?.find((image) => image.base64)
-  const url = referenceImage ? `${baseUrl}/images/edits` : `${baseUrl}/images/generations`
+  const referenceImages = request.images?.filter((image) => image.base64).slice(0, 12) ?? []
+  const url = referenceImages.length > 0 ? `${baseUrl}/images/edits` : `${baseUrl}/images/generations`
   const abortController = new AbortController()
 
   if (request.requestId) {
@@ -848,7 +848,7 @@ async function generateImage(request: GenerateImageRequest): Promise<GenerateIma
   }
 
   try {
-    const response = referenceImage
+    const response = referenceImages.length > 0
       ? await fetch(url, {
           method: 'POST',
           headers: {
@@ -860,7 +860,9 @@ async function generateImage(request: GenerateImageRequest): Promise<GenerateIma
             formData.append('prompt', prompt)
             formData.append('n', '1')
             formData.append('size', request.size)
-            formData.append('image', imageDataUrlToFile(referenceImage.base64!, referenceImage.name))
+            for (const referenceImage of referenceImages) {
+              formData.append('image', imageDataUrlToFile(referenceImage.base64!, referenceImage.name))
+            }
             return formData
           })(),
           signal: abortController.signal,
