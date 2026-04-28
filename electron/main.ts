@@ -23,6 +23,9 @@ const READABLE_WEB_CONTENT_TYPES = ['text/html', 'application/xhtml+xml', 'text/
 const MAX_WEB_PAGE_CHARS = 500000
 const WEB_FETCH_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) KatopGPT/1.0 Chrome/124.0.0.0 Safari/537.36'
 const ALLOWED_WORKSPACE_EXTENSIONS = new Set(['.md', '.markdown', '.txt'])
+const APP_ICON_PATH = app.isPackaged
+  ? path.join(process.resourcesPath, 'build', 'icon.ico')
+  : path.join(process.cwd(), 'build', 'icon.ico')
 const IMAGE_MIME_EXTENSIONS: Record<string, string> = {
   'image/png': 'png',
   'image/jpeg': 'jpg',
@@ -1316,6 +1319,7 @@ function createWorkspaceWindow() {
     minWidth: 720,
     minHeight: 520,
     title: 'KatopGPT Workspace',
+    icon: APP_ICON_PATH,
     backgroundColor: '#0f172a',
     autoHideMenuBar: true,
     webPreferences: {
@@ -1360,6 +1364,7 @@ function createWindow() {
     minHeight: 600,
     frame: false,
     titleBarStyle: 'hidden',
+    icon: APP_ICON_PATH,
     backgroundColor: '#0f172a',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),

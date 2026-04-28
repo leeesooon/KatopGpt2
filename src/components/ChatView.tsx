@@ -15,6 +15,7 @@ import MessageBubble from './MessageBubble'
 import InputArea from './InputArea'
 import { useChatScroll } from './useChatScroll'
 import { useChatSideActions } from './useChatSideActions'
+import katopLogo from '../assets/katop-logo.png'
 
 import {
   buildImageGenerationPrompt,
@@ -949,8 +950,8 @@ export default function ChatView() {
       <div className="flex-1 flex flex-col">
         <div className="flex-1 flex items-center justify-center">
           <div className="text-center animate-fade-in">
-            <div className="w-16 h-16 mx-auto mb-6 rounded-2xl bg-gradient-to-br from-primary-500/20 to-primary-700/20 border border-primary-500/20 flex items-center justify-center">
-              <Sparkles size={28} className="text-primary-400" />
+            <div className="w-16 h-16 mx-auto mb-6 flex items-center justify-center">
+              <img src={katopLogo} alt="KatopGPT" className="w-16 h-16 object-contain drop-shadow-[0_0_24px_rgba(139,92,246,0.35)]" />
             </div>
             <h2 className="text-xl font-semibold text-surface-200 mb-2">KatopGPT</h2>
             <p className="text-surface-400 text-sm mb-6 max-w-sm">

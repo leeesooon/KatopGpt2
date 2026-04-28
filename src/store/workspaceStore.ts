@@ -7,7 +7,6 @@ import type {
   WorkspaceDocument,
   WorkspaceHandle,
 } from '../types'
-import { useChatStore } from './chatStore'
 
 type TaskStatus = 'idle' | 'running' | 'ready' | 'failed'
 type SuggestionApplyMode = 'replace-document' | 'append-document' | 'replace-selection'
@@ -53,8 +52,6 @@ interface WorkspaceSession {
 }
 
 interface WorkspaceState extends WorkspaceSession {
-  activeConversationId: string | null
-  sessions: Record<string, WorkspaceSession>
   openWorkspace: () => Promise<void>
   openDocument: (relativePath: string) => Promise<void>
   closeActiveDocument: () => void
@@ -84,11 +81,11 @@ interface WorkspaceState extends WorkspaceSession {
   updateLatestSuggestionContent: (content: string) => void
   cancelDocumentWorkflow: () => void
   exitWorkspaceAssistant: () => void
-  switchConversationSession: (conversationId: string | null) => void
-  pruneSessions: (conversationIds: string[]) => void
 }
 
-interface WorkspaceSyncState {
+type WorkspaceSyncState = WorkspaceSession
+
+interface LegacyWorkspaceSyncState {
   activeConversationId: string | null
   sessions: Record<string, WorkspaceSession>
 }
@@ -175,44 +172,68 @@ function getNextDocumentRevision(document: WorkspaceDocument) {
   return getDocumentRevision(document) + 1
 }
 
-function getActiveConversationId() {
-  return useChatStore.getState().activeConversationId
+function createDocumentSwitchPatch(activeDocumentPath: string | null) {
+  return {
+    activeDocumentPath,
+    selection: null,
+    pendingAction: 'chat' as const,
+    composerDraft: null,
+    latestSuggestion: null,
+    taskState: EMPTY_TASK_STATE,
+  }
 }
 
-function resolveSession(state: WorkspaceState, conversationId: string | null) {
-  if (!conversationId) return createEmptySession()
-  return state.sessions[conversationId] ?? createEmptySession()
+function pickWorkspaceSession(state: WorkspaceSession): WorkspaceSession {
+  return {
+    currentWorkspace: state.currentWorkspace,
+    filePaths: state.filePaths,
+    documents: state.documents,
+    activeDocumentPath: state.activeDocumentPath,
+    pendingRenamePath: state.pendingRenamePath,
+    isPanelVisible: state.isPanelVisible,
+    panelWidth: state.panelWidth,
+    editorMode: state.editorMode,
+    selection: state.selection,
+    pendingAction: state.pendingAction,
+    composerDraft: state.composerDraft,
+    latestSuggestion: state.latestSuggestion,
+    taskState: state.taskState,
+    isWorkspaceLoading: state.isWorkspaceLoading,
+    isSaving: state.isSaving,
+    saveSource: state.saveSource,
+    error: state.error,
+  }
+}
+
+function isLegacyWorkspaceSyncState(
+  syncState: WorkspaceSyncState | LegacyWorkspaceSyncState
+): syncState is LegacyWorkspaceSyncState {
+  return 'sessions' in syncState
+}
+
+function normalizeWorkspaceSyncState(syncState: WorkspaceSyncState | LegacyWorkspaceSyncState): WorkspaceSession {
+  if (isLegacyWorkspaceSyncState(syncState)) {
+    const activeSession = syncState.activeConversationId
+      ? syncState.sessions[syncState.activeConversationId]
+      : null
+    return activeSession ?? createEmptySession()
+  }
+
+  return {
+    ...createEmptySession(),
+    ...syncState,
+  }
 }
 
 function setSessionState(set: WorkspaceSet, patch: WorkspaceSessionPatch) {
   set((state) => {
-    const conversationId = getActiveConversationId() ?? state.activeConversationId
-    const currentSession = resolveSession(state, conversationId)
-    const partial = typeof patch === 'function' ? patch(currentSession) : patch
-    const nextSession: WorkspaceSession = { ...currentSession, ...partial }
-
-    if (!conversationId) {
-      return {
-        activeConversationId: null,
-        ...nextSession,
-      }
-    }
-
-    return {
-      activeConversationId: conversationId,
-      ...nextSession,
-      sessions: {
-        ...state.sessions,
-        [conversationId]: nextSession,
-      },
-    }
+    const partial = typeof patch === 'function' ? patch(state) : patch
+    return partial as Partial<WorkspaceState>
   })
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   ...createEmptySession(),
-  activeConversationId: getActiveConversationId(),
-  sessions: {},
 
   openWorkspace: async () => {
     if (!window.electronAPI?.selectWorkspace) {
@@ -271,20 +292,26 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
     const normalizedPath = normalizeRelativePath(relativePath)
     const cachedDocument = documents[normalizedPath]
+    const previousActiveDocumentPath = get().activeDocumentPath
     if (cachedDocument) {
-      setSessionState(set, { activeDocumentPath: normalizedPath, selection: null, error: null })
+      setSessionState(set, {
+        ...createDocumentSwitchPatch(normalizedPath),
+        error: null,
+      })
       return
     }
 
-    setSessionState(set, { isWorkspaceLoading: true, error: null })
+    setSessionState(set, {
+      ...createDocumentSwitchPatch(normalizedPath),
+      isWorkspaceLoading: true,
+      error: null,
+    })
 
     try {
       const content = await window.electronAPI.readWorkspaceDocument(currentWorkspace.rootPath, normalizedPath)
       const now = Date.now()
       setSessionState(set, (session) => ({
         isWorkspaceLoading: false,
-        activeDocumentPath: normalizedPath,
-        selection: null,
         documents: {
           ...session.documents,
           [normalizedPath]: {
@@ -302,6 +329,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     } catch (error) {
       setSessionState(set, {
         isWorkspaceLoading: false,
+        activeDocumentPath: previousActiveDocumentPath,
         error: error instanceof Error ? error.message : '读取文档失败',
       })
     }
@@ -775,22 +803,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     ...createEmptySession(),
     isPanelVisible: false,
   }),
-
-  switchConversationSession: (conversationId) => set((state) => {
-    const nextSession = resolveSession(state, conversationId)
-    return {
-      activeConversationId: conversationId,
-      ...nextSession,
-    }
-  }),
-
-  pruneSessions: (conversationIds) => set((state) => {
-    const allowedIds = new Set(conversationIds)
-    const sessions = Object.fromEntries(
-      Object.entries(state.sessions).filter(([conversationId]) => allowedIds.has(conversationId))
-    )
-    return { sessions }
-  }),
 }))
 
 if (typeof window !== 'undefined') {
@@ -799,25 +811,11 @@ if (typeof window !== 'undefined') {
     const sourceId = `workspace-${Math.random().toString(36).slice(2, 10)}`
     let isApplyingRemoteState = false
 
-    const pickSyncState = (state: WorkspaceState): WorkspaceSyncState => ({
-      activeConversationId: state.activeConversationId,
-      sessions: state.sessions,
-    })
+    const pickSyncState = (state: WorkspaceState): WorkspaceSyncState => pickWorkspaceSession(state)
 
-    const applySyncState = (syncState: WorkspaceSyncState) => {
+    const applySyncState = (syncState: WorkspaceSyncState | LegacyWorkspaceSyncState) => {
       isApplyingRemoteState = true
-      useWorkspaceStore.setState((state) => {
-        const nextConversationId = syncState.activeConversationId
-        const nextSession = nextConversationId && syncState.sessions[nextConversationId]
-          ? syncState.sessions[nextConversationId]
-          : createEmptySession()
-
-        return {
-          activeConversationId: nextConversationId,
-          sessions: syncState.sessions,
-          ...nextSession,
-        }
-      })
+      useWorkspaceStore.setState(normalizeWorkspaceSyncState(syncState))
       queueMicrotask(() => {
         isApplyingRemoteState = false
       })
@@ -825,7 +823,7 @@ if (typeof window !== 'undefined') {
 
     channel.addEventListener('message', (event) => {
       const message = event.data as
-        | { type: 'snapshot'; sourceId: string; payload: WorkspaceSyncState }
+        | { type: 'snapshot'; sourceId: string; payload: WorkspaceSyncState | LegacyWorkspaceSyncState }
         | { type: 'request'; sourceId: string }
 
       if (!message || message.sourceId === sourceId) return
@@ -857,16 +855,4 @@ if (typeof window !== 'undefined') {
       channel.postMessage({ type: 'request', sourceId })
     }, 0)
   }
-
-  let lastConversationId = getActiveConversationId()
-
-  useChatStore.subscribe((chatState) => {
-    const nextConversationId = chatState.activeConversationId
-    if (nextConversationId !== lastConversationId) {
-      lastConversationId = nextConversationId
-      useWorkspaceStore.getState().switchConversationSession(nextConversationId)
-    }
-
-    useWorkspaceStore.getState().pruneSessions(chatState.conversations.map((conversation) => conversation.id))
-  })
 }

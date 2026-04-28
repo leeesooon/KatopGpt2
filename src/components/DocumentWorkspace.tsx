@@ -71,6 +71,12 @@ function readFileAsDataUrl(file: File) {
   })
 }
 
+function getPathTitle(relativePath: string | null) {
+  if (!relativePath) return null
+  const segments = relativePath.split('/').filter(Boolean)
+  return segments[segments.length - 1] ?? null
+}
+
 interface DocumentWorkspaceProps {
   standalone?: boolean
 }
@@ -128,6 +134,7 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
   } = useWorkspaceStore()
 
   const activeDocument = activeDocumentPath ? documents[activeDocumentPath] ?? null : null
+  const activeDocumentTitle = activeDocument?.title ?? getPathTitle(activeDocumentPath) ?? currentWorkspace?.name ?? '未打开文档'
   const assistantModelOptions = useMemo(() => chatSettings.providers.flatMap((provider) =>
     provider.models.map((model) => ({
       value: `${provider.id}::${model.name}`,
@@ -206,6 +213,16 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
     const option = assistantModelOptions.find((item) => item.value === value)
     if (!option) return
     setActiveModel({ providerId: option.providerId, model: option.model })
+  }
+
+  const handleSelectDocument = (relativePath: string) => {
+    documentAgentRunner.reset()
+    void openDocument(relativePath)
+  }
+
+  const handleSwitchWorkspace = () => {
+    documentAgentRunner.reset()
+    void openWorkspace()
   }
 
   const handleCreateFromSuggestion = async () => {
@@ -418,7 +435,7 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
               <PanelsTopLeft size={13} /> 写作工作台
             </div>
             <h2 className="mt-1 truncate text-lg font-semibold text-surface-50">
-              {activeDocument?.title ?? currentWorkspace.name}
+              {activeDocumentTitle}
             </h2>
           </div>
           <div className="flex items-center gap-2">
@@ -465,13 +482,16 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
           {!isTreeCollapsed ? (
             <div className="relative min-h-0 shrink-0" style={{ width: treeWidth }}>
               <WorkspaceFileTree
+                workspaceName={currentWorkspace.name}
                 filePaths={filePaths}
                 activePath={activeDocumentPath}
                 pendingRenamePath={pendingRenamePath}
-                onSelect={(relativePath) => void openDocument(relativePath)}
+                onSelect={handleSelectDocument}
                 onCreate={(relativePath) => createDocument(relativePath)}
                 onRename={(oldPath, newPath) => renameDocument(oldPath, newPath)}
                 onDelete={(relativePath) => deleteDocument(relativePath)}
+                onSwitchWorkspace={handleSwitchWorkspace}
+                onCollapse={() => setIsTreeCollapsed(true)}
               />
               <button
                 onMouseDown={handleTreeResizeStart}
@@ -523,6 +543,7 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
             >
               {editorMode !== 'preview' && (
                 <DocumentEditor
+                  key={activeDocumentPath ?? 'empty-editor'}
                   ref={editorScrollRef}
                   content={activeDocument?.content ?? ''}
                   onChange={updateActiveDocumentContent}
@@ -535,6 +556,7 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
               )}
               {editorMode !== 'write' && (
                 <DocumentPreview
+                  key={activeDocumentPath ?? 'empty-preview'}
                   content={activeDocument?.content ?? ''}
                   workspaceRootPath={currentWorkspace.rootPath}
                   scrollRef={previewScrollRef}

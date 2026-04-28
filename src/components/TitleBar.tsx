@@ -1,4 +1,5 @@
-import { Minus, Square, X, Copy } from 'lucide-react'
+import { Minus, X, Copy } from 'lucide-react'
+import katopLogo from '../assets/katop-logo.png'
 
 export default function TitleBar() {
   const handleMinimize = () => window.electronAPI?.minimize()
@@ -8,7 +9,7 @@ export default function TitleBar() {
   return (
     <div className="drag-region flex items-center justify-between h-9 bg-surface-950 border-b border-surface-800/50 px-3 select-none shrink-0">
       <div className="flex items-center gap-2 no-drag">
-        <div className="w-3 h-3 rounded-full bg-gradient-to-br from-primary-400 to-primary-600" />
+        <img src={katopLogo} alt="KatopGPT" className="w-4 h-4 object-contain" />
         <span className="text-xs font-semibold text-surface-300 tracking-wide">KatopGPT</span>
       </div>
 

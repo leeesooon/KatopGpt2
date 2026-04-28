@@ -9,6 +9,7 @@ interface FileNode {
 }
 
 interface WorkspaceFileTreeProps {
+  workspaceName?: string
   filePaths: string[]
   activePath: string | null
   pendingRenamePath?: string | null
@@ -16,6 +17,7 @@ interface WorkspaceFileTreeProps {
   onCreate: (relativePath: string) => Promise<boolean>
   onRename: (oldRelativePath: string, newRelativePath: string) => Promise<boolean>
   onDelete: (relativePath: string) => Promise<boolean>
+  onSwitchWorkspace?: () => void
   onCollapse?: () => void
 }
 
@@ -275,7 +277,18 @@ function TreeBranch({
   )
 }
 
-export default function WorkspaceFileTree({ filePaths, activePath, pendingRenamePath, onSelect, onCreate, onRename, onDelete, onCollapse }: WorkspaceFileTreeProps) {
+export default function WorkspaceFileTree({
+  workspaceName,
+  filePaths,
+  activePath,
+  pendingRenamePath,
+  onSelect,
+  onCreate,
+  onRename,
+  onDelete,
+  onSwitchWorkspace,
+  onCollapse,
+}: WorkspaceFileTreeProps) {
   const [isCreating, setIsCreating] = useState(false)
   const [draftName, setDraftName] = useState('')
   const tree = useMemo(() => buildTree(filePaths), [filePaths])
@@ -292,26 +305,40 @@ export default function WorkspaceFileTree({ filePaths, activePath, pendingRename
 
   return (
     <div className="flex h-full flex-col rounded-[26px] border border-surface-700/35 bg-[#0d1420]/88 p-3">
-      <div className="mb-3 flex items-center justify-between px-1">
-        <div>
+      <div className="mb-3 grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2 px-1">
+        <div className="min-w-0">
           <div className="text-[11px] uppercase tracking-[0.28em] text-surface-500">Workspace</div>
           <div className="mt-1 text-sm font-medium text-surface-200">文档树</div>
+          {workspaceName && (
+            <div className="mt-1 truncate text-xs text-surface-500" title={workspaceName}>
+              {workspaceName}
+            </div>
+          )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-1.5">
           <button
             onClick={() => setIsCreating((value) => !value)}
-            className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/5 text-surface-300 transition hover:bg-white/10 hover:text-white"
+            className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-surface-300 transition hover:bg-white/10 hover:text-white"
             title="新建文档"
           >
-            <Plus size={16} />
+            <Plus size={15} />
           </button>
+          {onSwitchWorkspace && (
+            <button
+              onClick={onSwitchWorkspace}
+              className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-surface-300 transition hover:bg-white/10 hover:text-white"
+              title="切换工作区"
+            >
+              <FolderOpen size={15} />
+            </button>
+          )}
           {onCollapse && (
             <button
               onClick={onCollapse}
-              className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/5 text-surface-300 transition hover:bg-white/10 hover:text-white"
+              className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-surface-300 transition hover:bg-white/10 hover:text-white"
               title="收起工作区"
             >
-              <PanelLeftClose size={16} />
+              <PanelLeftClose size={15} />
             </button>
           )}
         </div>
