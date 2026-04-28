@@ -41,6 +41,15 @@ protocol.registerSchemesAsPrivileged([
       supportFetchAPI: true,
     },
   },
+  {
+    scheme: 'katopgpt-workspace',
+    privileges: {
+      bypassCSP: true,
+      secure: true,
+      standard: true,
+      supportFetchAPI: true,
+    },
+  },
 ])
 
 type ApiContentPart =
@@ -74,6 +83,13 @@ interface ImageFileResult {
   message?: string
   filePath?: string
   dataUrl?: string
+}
+
+interface SaveWorkspaceImageResult {
+  ok: boolean
+  relativePath?: string
+  markdown?: string
+  error?: string
 }
 
 function parseImageDataUrl(dataUrl: string) {
@@ -504,6 +520,77 @@ function ensureWorkspacePath(rootPath: string, relativePath: string) {
   }
 }
 
+function ensureWorkspaceAssetPath(rootPath: string, relativePath: string) {
+  const normalizedRelativePath = normalizeRelativeWorkspacePath(relativePath)
+  const absoluteRoot = path.resolve(rootPath)
+  const absoluteTarget = path.resolve(absoluteRoot, normalizedRelativePath)
+  const relative = path.relative(absoluteRoot, absoluteTarget)
+
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error('禁止访问工作区外部路径')
+  }
+
+  const extension = path.extname(absoluteTarget).toLowerCase()
+  const allowedImageExtensions = new Set(Object.values(IMAGE_MIME_EXTENSIONS).flatMap((extensionName) => (
+    extensionName === 'jpg' ? ['.jpg', '.jpeg'] : [`.${extensionName}`]
+  )))
+  if (!allowedImageExtensions.has(extension)) {
+    throw new Error('当前仅支持 png、jpg、webp、gif 或 svg 图片')
+  }
+
+  return {
+    normalizedRelativePath,
+    absoluteTarget,
+  }
+}
+
+function workspaceAssetPathFromUrl(rawUrl: string) {
+  try {
+    const url = new URL(rawUrl)
+    if (url.protocol !== 'katopgpt-workspace:' || url.hostname !== 'asset') return null
+    const rootPath = url.searchParams.get('root')
+    const relativePath = url.searchParams.get('path')
+    if (!rootPath || !relativePath) return null
+    return ensureWorkspaceAssetPath(rootPath, relativePath).absoluteTarget
+  } catch {
+    return null
+  }
+}
+
+function formatTimestampForFileName(timestamp: Date) {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return [
+    timestamp.getFullYear(),
+    pad(timestamp.getMonth() + 1),
+    pad(timestamp.getDate()),
+    '-',
+    pad(timestamp.getHours()),
+    pad(timestamp.getMinutes()),
+    pad(timestamp.getSeconds()),
+  ].join('')
+}
+
+async function getAvailableWorkspaceAssetPath(rootPath: string, extension: string) {
+  const assetDir = 'assets'
+  let index = 0
+
+  while (true) {
+    const suffix = index === 0 ? '' : `-${index}`
+    const relativePath = `${assetDir}/pasted-image-${formatTimestampForFileName(new Date())}${suffix}.${extension}`
+    const { normalizedRelativePath, absoluteTarget } = ensureWorkspaceAssetPath(rootPath, relativePath)
+
+    try {
+      await fs.access(absoluteTarget)
+      index += 1
+    } catch {
+      return {
+        normalizedRelativePath,
+        absoluteTarget,
+      }
+    }
+  }
+}
+
 async function collectWorkspaceDocuments(rootPath: string, currentRelativePath = ''): Promise<string[]> {
   const currentAbsolutePath = path.join(rootPath, currentRelativePath)
   const entries = await fs.readdir(currentAbsolutePath, { withFileTypes: true })
@@ -583,6 +670,34 @@ async function deleteWorkspaceDocument(rootPath: string, relativePath: string) {
   const { absoluteTarget } = ensureWorkspacePath(rootPath, relativePath)
   await fs.unlink(absoluteTarget)
   return true
+}
+
+async function saveWorkspaceImage(
+  rootPath: string,
+  currentDocumentPath: string,
+  imageDataUrl: string,
+  _fileName?: string
+): Promise<SaveWorkspaceImageResult> {
+  try {
+    ensureWorkspacePath(rootPath, currentDocumentPath)
+    const image = parseImageDataUrl(imageDataUrl)
+    const extension = image.mimeType === 'image/jpeg' ? 'jpg' : image.extension
+    const { normalizedRelativePath, absoluteTarget } = await getAvailableWorkspaceAssetPath(rootPath, extension)
+
+    await fs.mkdir(path.dirname(absoluteTarget), { recursive: true })
+    await fs.writeFile(absoluteTarget, image.buffer)
+
+    return {
+      ok: true,
+      relativePath: normalizedRelativePath,
+      markdown: `![图片](${normalizedRelativePath})`,
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : '图片写入失败，请确认工作区可写',
+    }
+  }
 }
 
 function extractApiErrorMessage(errorBody: unknown, fallback: string) {
@@ -1309,6 +1424,9 @@ function registerWorkspaceIpcHandlers() {
   ipcMain.handle('workspace:createDocument', (_event, rootPath: string, relativePath: string, content: string) => createWorkspaceDocument(rootPath, relativePath, content))
   ipcMain.handle('workspace:renameDocument', (_event, rootPath: string, oldRelativePath: string, newRelativePath: string) => renameWorkspaceDocument(rootPath, oldRelativePath, newRelativePath))
   ipcMain.handle('workspace:deleteDocument', (_event, rootPath: string, relativePath: string) => deleteWorkspaceDocument(rootPath, relativePath))
+  ipcMain.handle('workspace:saveImage', (_event, rootPath: string, currentDocumentPath: string, imageDataUrl: string, fileName?: string) =>
+    saveWorkspaceImage(rootPath, currentDocumentPath, imageDataUrl, fileName)
+  )
 }
 
 function registerDocumentIpcHandlers() {
@@ -1367,6 +1485,22 @@ app.whenReady().then(() => {
       const buffer = await fs.readFile(filePath)
       const extension = path.extname(filePath).toLowerCase()
       const contentType = Object.entries(IMAGE_MIME_EXTENSIONS).find(([, item]) => `.${item}` === extension)?.[0] ?? 'image/png'
+      return new Response(buffer, { headers: { 'Content-Type': contentType } })
+    } catch {
+      return new Response('Not found', { status: 404 })
+    }
+  })
+  protocol.handle('katopgpt-workspace', async (request) => {
+    const filePath = workspaceAssetPathFromUrl(request.url)
+    if (!filePath) {
+      return new Response('Not found', { status: 404 })
+    }
+
+    try {
+      const buffer = await fs.readFile(filePath)
+      const extension = path.extname(filePath).toLowerCase()
+      const contentType = Object.entries(IMAGE_MIME_EXTENSIONS)
+        .find(([, item]) => `.${item}` === extension || (item === 'jpg' && extension === '.jpeg'))?.[0] ?? 'image/png'
       return new Response(buffer, { headers: { 'Content-Type': contentType } })
     } catch {
       return new Response('Not found', { status: 404 })

@@ -14,7 +14,7 @@ import remarkGfm from 'remark-gfm'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { Copy, Check, User, Bot, FileText, Download, ExternalLink, Sparkles } from 'lucide-react'
-import type { ImageAttachment, Message } from '../types'
+import type { FileAttachment, ImageAttachment, Message } from '../types'
 import SourcesPanel from './SourcesPanel'
 import { normalizeExternalUrl, openExternalUrl } from '../utils/externalLinks'
 import MermaidBlock from './MermaidBlock'
@@ -33,6 +33,20 @@ const CITATION_RE = /(\[\d+\])/g
 const SKIP_CITATION_TAGS = new Set(['a', 'code', 'pre'])
 const DEFAULT_PREVIEW_COLUMNS = 6
 const CELL_TEXT_PREVIEW_LENGTH = 48
+
+function formatMessageFileSize(size: number) {
+  if (size < 1024) return `${size} B`
+  if (size < 1048576) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / 1048576).toFixed(1)} MB`
+}
+
+function getMessageSpreadsheetSummary(file: FileAttachment) {
+  const schema = file.spreadsheetSchema
+  if (!schema?.sheets.length) return null
+  const totalRows = schema.sheets.reduce((sum, sheet) => sum + sheet.rowCount, 0)
+  const totalColumns = schema.sheets.reduce((sum, sheet) => sum + sheet.columnCount, 0)
+  return `${schema.sheets.length} 表 / ${totalRows} 行 / ${totalColumns} 列`
+}
 
 function handleExternalAnchorClick(event: React.MouseEvent<HTMLAnchorElement>, rawUrl?: string | null) {
   event.preventDefault()
@@ -582,6 +596,16 @@ const MessageBubble = memo(function MessageBubble({ message, onContinueImageEdit
                   >
                     <FileText size={14} className="text-primary-400 shrink-0" />
                     <span className="text-xs text-primary-300 truncate max-w-[150px]">{file.name}</span>
+                    <span className="text-[10px] text-primary-200/70">{file.fileType ?? 'file'}</span>
+                    <span className="text-[10px] text-primary-200/60">{formatMessageFileSize(file.size)}</span>
+                    {file.isTruncated && (
+                      <span className="rounded-full bg-amber-300/10 px-1.5 py-0.5 text-[10px] text-amber-100">已压缩</span>
+                    )}
+                    {getMessageSpreadsheetSummary(file) && (
+                      <span className="rounded-full bg-emerald-300/10 px-1.5 py-0.5 text-[10px] text-emerald-100">
+                        {getMessageSpreadsheetSummary(file)}
+                      </span>
+                    )}
                   </div>
                 ))}
               </div>

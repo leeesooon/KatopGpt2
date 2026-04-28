@@ -5,11 +5,21 @@ import MermaidBlock from './MermaidBlock'
 
 interface DocumentPreviewProps {
   content: string
+  workspaceRootPath?: string
   onScroll?: (progress: number) => void
   scrollRef?: MutableRefObject<HTMLDivElement | null>
 }
 
-export default function DocumentPreview({ content, onScroll, scrollRef }: DocumentPreviewProps) {
+function isExternalOrDataUrl(url: string) {
+  return /^(?:https?:|data:|blob:|katopgpt-)/i.test(url)
+}
+
+function buildWorkspaceImageUrl(workspaceRootPath: string | undefined, src: string | undefined) {
+  if (!workspaceRootPath || !src || isExternalOrDataUrl(src) || src.startsWith('#')) return src
+  return `katopgpt-workspace://asset?root=${encodeURIComponent(workspaceRootPath)}&path=${encodeURIComponent(src)}`
+}
+
+export default function DocumentPreview({ content, workspaceRootPath, onScroll, scrollRef }: DocumentPreviewProps) {
   const markdownComponents = {
     code({ className, children, ...props }: any) {
       const match = /language-(\w+)/.exec(className || '')
@@ -23,6 +33,16 @@ export default function DocumentPreview({ content, onScroll, scrollRef }: Docume
         <code className={className} {...props}>
           {children}
         </code>
+      )
+    },
+    img({ src, alt, ...props }: any) {
+      return (
+        <img
+          {...props}
+          src={buildWorkspaceImageUrl(workspaceRootPath, src)}
+          alt={alt ?? '图片'}
+          className="my-4 max-w-full rounded-xl border border-[#d6c8aa] bg-white/50 p-1"
+        />
       )
     },
   }

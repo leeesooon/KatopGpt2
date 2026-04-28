@@ -1,6 +1,5 @@
 ﻿import { useEffect, useMemo, useRef, useState } from 'react'
 import { Send, Square, ImagePlus, Paperclip, X, FileText, Search, Loader2, SquareArrowOutUpRight, Download, Sparkles } from 'lucide-react'
-import { v4 as uuidv4 } from 'uuid'
 import ModelSelector from './ModelSelector'
 import { useChatStore } from '../store/chatStore'
 import { useWorkspaceStore } from '../store/workspaceStore'
@@ -8,13 +7,22 @@ import type { ChatInputMode, DocumentAgentMode, ImageAttachment, FileAttachment 
 import {
   FILE_INPUT_ACCEPT,
   IMAGE_PROMPT_PRESETS,
-  getFileExtension,
-  isExtractableDocument,
-  looksLikeBinaryText,
 } from './inputAreaAttachments'
+import { useAttachmentProcessor } from './useAttachmentProcessor'
 
 interface InputAreaProps {
-  onSend: (content: string, images: ImageAttachment[], files: FileAttachment[]) => void
+  onSend: (
+    content: string,
+    images: ImageAttachment[],
+    files: FileAttachment[],
+    options?: {
+      imageSeries?: {
+        enabled: boolean
+        count: number
+        mode: 'template_parallel' | 'sequential'
+      }
+    }
+  ) => void
   onStop: () => void
   onExportSpreadsheet?: () => void
   imageReferenceDraft?: ImageAttachment | null
@@ -59,18 +67,37 @@ export default function InputArea({
   } = useWorkspaceStore()
   const [input, setInput] = useState('')
   const [workspaceWindowOpen, setWorkspaceWindowOpen] = useState(false)
-  const [images, setImages] = useState<ImageAttachment[]>([])
-  const [files, setFiles] = useState<FileAttachment[]>([])
-  const [pendingFiles, setPendingFiles] = useState<string[]>([])
-  const [attachmentError, setAttachmentError] = useState<string | null>(null)
   const [isPromptPanelOpen, setIsPromptPanelOpen] = useState(false)
+  const [isImageSeriesMode, setIsImageSeriesMode] = useState(false)
+  const [imageSeriesCount, setImageSeriesCount] = useState(4)
+  const [imageSeriesMode, setImageSeriesMode] = useState<'template_parallel' | 'sequential'>('template_parallel')
   const [isDragOver, setIsDragOver] = useState(false)
+  const [expandedFileId, setExpandedFileId] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const dragCounterRef = useRef(0)
-  const isProcessingFiles = pendingFiles.length > 0
+  const previousInputModeRef = useRef<ChatInputMode>(inputMode)
   const isImageMode = inputMode === 'image'
+  const {
+    images,
+    files,
+    attachmentTasks,
+    attachmentError,
+    isProcessingFiles,
+    processFiles,
+    processImageFiles,
+    retryTask,
+    removeTask,
+    addImageAttachment,
+    removeImage,
+    removeFile,
+    clearAttachments,
+    clearFiles,
+    clearImages,
+    setAttachmentError,
+    formatFileSize,
+  } = useAttachmentProcessor({ isImageMode })
 
   useEffect(() => {
     if (!isStreaming && textareaRef.current) {
@@ -79,25 +106,27 @@ export default function InputArea({
   }, [isStreaming])
 
   useEffect(() => {
+    const enteredImageMode = previousInputModeRef.current !== 'image' && isImageMode
+    previousInputModeRef.current = inputMode
     if (isImageMode) {
-      if (!imageReferenceDraft) {
-        setImages([])
+      if (enteredImageMode && !imageReferenceDraft) {
+        clearImages()
       }
-      setFiles([])
+      clearFiles()
       setAttachmentError(null)
     }
-  }, [imageReferenceDraft, isImageMode])
+  }, [clearFiles, clearImages, imageReferenceDraft, inputMode, isImageMode, setAttachmentError])
 
   useEffect(() => {
     if (!imageReferenceDraft) return
-    setImages([imageReferenceDraft])
-    setFiles([])
+    clearAttachments()
+    addImageAttachment(imageReferenceDraft)
     setAttachmentError('已添加参考图，请输入修改要求')
     requestAnimationFrame(() => {
       textareaRef.current?.focus()
     })
     onConsumeImageReferenceDraft?.()
-  }, [imageReferenceDraft, onConsumeImageReferenceDraft])
+  }, [addImageAttachment, clearAttachments, imageReferenceDraft, onConsumeImageReferenceDraft, setAttachmentError])
 
   useEffect(() => {
     if (!composerDraft) return
@@ -136,11 +165,15 @@ export default function InputArea({
     const trimmed = input.trim()
     if (isImageMode && (!trimmed || disabled || isProcessingFiles)) return
     if ((!trimmed && images.length === 0 && files.length === 0) || disabled || isProcessingFiles) return
-    onSend(trimmed, images, files)
+    onSend(trimmed, images, files, {
+      imageSeries: {
+        enabled: isImageMode && isImageSeriesMode,
+        count: imageSeriesCount,
+        mode: imageSeriesMode,
+      },
+    })
     setInput('')
-    setImages([])
-    setFiles([])
-    setAttachmentError(null)
+    clearAttachments()
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
@@ -165,136 +198,18 @@ export default function InputArea({
     }
   }
 
-  const readFileAsDataUrl = (file: File) =>
-    new Promise<string>((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = () => resolve(reader.result as string)
-      reader.onerror = () => reject(new Error(`读取文件失败：${file.name}`))
-      reader.readAsDataURL(file)
-    })
-
-  const readFileAsText = (file: File) =>
-    new Promise<string>((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = () => resolve(reader.result as string)
-      reader.onerror = () => reject(new Error(`读取文件失败：${file.name}`))
-      reader.readAsText(file)
-    })
-
-  const readFileAsArrayBuffer = (file: File) =>
-    new Promise<ArrayBuffer>((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = () => resolve(reader.result as ArrayBuffer)
-      reader.onerror = () => reject(new Error(`读取文件失败：${file.name}`))
-      reader.readAsArrayBuffer(file)
-    })
-
-  const addImageFile = async (file: File) => {
-    const base64 = await readFileAsDataUrl(file)
-    setImages((prev) => {
-      const nextImage = { id: uuidv4(), base64, name: file.name }
-      return isImageMode ? [nextImage] : [...prev, nextImage]
-    })
-  }
-
-  const addTextFile = async (file: File) => {
-    const content = await readFileAsText(file)
-    if (looksLikeBinaryText(content)) {
-      throw new Error('该文件看起来是二进制内容，请使用可解析的文本文件或表格文件（.csv/.xlsx）')
-    }
-
-    setFiles((prev) => [
-      ...prev,
-      { id: uuidv4(), name: file.name, size: file.size, content, fileType: 'text' },
-    ])
-  }
-
-  const addExtractedDocumentFile = async (file: File) => {
-    if (!window.electronAPI?.extractDocumentText) {
-      throw new Error('当前环境暂不支持自动提取该文档，请使用桌面版应用')
-    }
-
-    const data = await readFileAsArrayBuffer(file)
-    const result = await window.electronAPI.extractDocumentText({
-      fileName: file.name,
-      mimeType: file.type,
-      data,
-    })
-
-    if (!result.ok || !result.content) {
-      throw new Error(result.error ?? '自动提取文本失败')
-    }
-
-    const content = result.content
-
-    setFiles((prev) => [
-      ...prev,
-      {
-        id: uuidv4(),
-        name: file.name,
-        size: file.size,
-        content,
-        fileType: result.fileType,
-        spreadsheetSessionId: result.spreadsheetSessionId,
-        spreadsheetSchema: result.spreadsheetSchema,
-      },
-    ])
-  }
-
-  const processSingleFile = async (file: File) => {
-    if (file.type.startsWith('image/')) {
-      await addImageFile(file)
-      return
-    }
-
-    setAttachmentError(null)
-    setPendingFiles((prev) => [...prev, file.name])
-
-    try {
-      if (isExtractableDocument(file)) {
-        await addExtractedDocumentFile(file)
-      } else {
-        await addTextFile(file)
-      }
-    } catch (error) {
-      setAttachmentError(error instanceof Error ? error.message : `处理文件失败：${file.name}`)
-    } finally {
-      setPendingFiles((prev) => {
-        const index = prev.indexOf(file.name)
-        if (index < 0) return prev
-        return prev.filter((_, currentIndex) => currentIndex !== index)
-      })
-    }
-  }
-
-  const processFiles = async (fileList: FileList | File[]) => {
-    for (const file of Array.from(fileList)) {
-      await processSingleFile(file)
-    }
-  }
-
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files
     if (!fileList) return
-    Array.from(fileList).forEach((file) => {
-      if (file.type.startsWith('image/')) void addImageFile(file)
-    })
+    processImageFiles(fileList)
     e.target.value = ''
   }
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files
     if (!fileList) return
-    void processFiles(fileList)
+    processFiles(fileList)
     e.target.value = ''
-  }
-
-  const removeImage = (id: string) => {
-    setImages((prev) => prev.filter((img) => img.id !== id))
-  }
-
-  const removeFile = (id: string) => {
-    setFiles((prev) => prev.filter((f) => f.id !== id))
   }
 
   const handlePaste = (e: React.ClipboardEvent) => {
@@ -304,7 +219,7 @@ export default function InputArea({
         e.preventDefault()
         const file = item.getAsFile()
         if (!file) continue
-        void addImageFile(file)
+        processImageFiles([file])
       }
     }
   }
@@ -341,7 +256,7 @@ export default function InputArea({
 
     const droppedFiles = e.dataTransfer.files
     if (droppedFiles.length > 0) {
-      void processFiles(droppedFiles)
+      processFiles(droppedFiles)
     }
   }
 
@@ -391,6 +306,24 @@ export default function InputArea({
     }
 
     setPanelVisible(true)
+  }
+
+  const pendingAttachmentTasks = attachmentTasks.filter((task) => task.status !== 'ready')
+
+  const getTaskStatusText = (status: string) => {
+    if (status === 'queued') return '等待处理'
+    if (status === 'reading') return '读取中'
+    if (status === 'extracting') return '提取中'
+    if (status === 'error') return '失败'
+    return '已完成'
+  }
+
+  const getSpreadsheetSummary = (file: FileAttachment) => {
+    const schema = file.spreadsheetSchema
+    if (!schema?.sheets.length) return null
+    const totalRows = schema.sheets.reduce((sum, sheet) => sum + sheet.rowCount, 0)
+    const totalColumns = schema.sheets.reduce((sum, sheet) => sum + sheet.columnCount, 0)
+    return `${schema.sheets.length} 个工作表 / ${totalRows} 行 / ${totalColumns} 列`
   }
 
   return (
@@ -460,19 +393,59 @@ export default function InputArea({
             </button>
           )}
           {isImageMode && (
-            <button
-              onClick={() => setIsPromptPanelOpen((open) => !open)}
-              disabled={isStreaming}
-              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs transition disabled:opacity-50 ${
-                isPromptPanelOpen
-                  ? 'border-fuchsia-300/25 bg-fuchsia-300/10 text-fuchsia-100'
-                  : 'border-white/10 bg-white/5 text-surface-300 hover:bg-white/10 hover:text-white'
-              }`}
-              title="打开提示词增强面板"
-            >
-              <Sparkles size={14} />
-              提示词增强
-            </button>
+            <>
+              <button
+                onClick={() => setIsImageSeriesMode((enabled) => !enabled)}
+                disabled={isStreaming}
+                className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs transition disabled:opacity-50 ${
+                  isImageSeriesMode
+                    ? 'border-cyan-300/25 bg-cyan-300/10 text-cyan-100'
+                    : 'border-white/10 bg-white/5 text-surface-300 hover:bg-white/10 hover:text-white'
+                }`}
+                title="连续生成多张章节图片"
+              >
+                <Sparkles size={14} />
+                连续多图
+              </button>
+              {isImageSeriesMode && (
+                <>
+                  <select
+                    value={imageSeriesCount}
+                    onChange={(event) => setImageSeriesCount(Number(event.target.value))}
+                    disabled={isStreaming}
+                    className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs text-surface-200 outline-none transition disabled:opacity-50"
+                    title="连续多图张数"
+                  >
+                    {[2, 3, 4, 5, 6, 7, 8].map((count) => (
+                      <option key={count} value={count}>{count} 张</option>
+                    ))}
+                  </select>
+                  <select
+                    value={imageSeriesMode}
+                    onChange={(event) => setImageSeriesMode(event.target.value as 'template_parallel' | 'sequential')}
+                    disabled={isStreaming}
+                    className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs text-surface-200 outline-none transition disabled:opacity-50"
+                    title="连续多图生成模式"
+                  >
+                    <option value="template_parallel">首图模板（较快）</option>
+                    <option value="sequential">真串行（更稳）</option>
+                  </select>
+                </>
+              )}
+              <button
+                onClick={() => setIsPromptPanelOpen((open) => !open)}
+                disabled={isStreaming}
+                className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs transition disabled:opacity-50 ${
+                  isPromptPanelOpen
+                    ? 'border-fuchsia-300/25 bg-fuchsia-300/10 text-fuchsia-100'
+                    : 'border-white/10 bg-white/5 text-surface-300 hover:bg-white/10 hover:text-white'
+                }`}
+                title="打开提示词增强面板"
+              >
+                <Sparkles size={14} />
+                提示词增强
+              </button>
+            </>
           )}
         </div>
         {isImageMode && isPromptPanelOpen && (
@@ -540,40 +513,94 @@ export default function InputArea({
 
           {/* File previews */}
           {files.length > 0 && (
-            <div className="flex flex-wrap gap-2 px-2 py-2">
+            <div className="space-y-2 px-2 py-2">
               {files.map((file) => (
                 <div
                   key={file.id}
-                  className="relative group flex items-center gap-1.5 px-2.5 py-1.5
-                             bg-surface-700/40 border border-surface-600/50 rounded-lg"
+                  className="rounded-lg border border-surface-600/50 bg-surface-700/40 px-2.5 py-2"
                 >
-                  <FileText size={14} className="text-primary-400 shrink-0" />
-                  <span className="text-xs text-surface-300 truncate max-w-[120px]">{file.name}</span>
-                  <span className="text-[10px] text-surface-500">
-                    {file.size < 1024
-                      ? `${file.size} B`
-                      : file.size < 1048576
-                        ? `${(file.size / 1024).toFixed(1)} KB`
-                        : `${(file.size / 1048576).toFixed(1)} MB`}
-                  </span>
-                  <button
-                    onClick={() => removeFile(file.id)}
-                    className="ml-0.5 p-0.5 hover:bg-red-500/20 rounded transition-colors"
-                  >
-                    <X size={12} className="text-surface-400 hover:text-red-400" />
-                  </button>
+                  <div className="flex items-center gap-1.5">
+                    <FileText size={14} className="text-primary-400 shrink-0" />
+                    <span className="text-xs text-surface-300 truncate max-w-[150px]">{file.name}</span>
+                    <span className="text-[10px] text-surface-500">{formatFileSize(file.size)}</span>
+                    {file.isTruncated && (
+                      <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-1.5 py-0.5 text-[10px] text-amber-100">
+                        已压缩
+                      </span>
+                    )}
+                    {file.spreadsheetSchema && (
+                      <button
+                        onClick={() => setExpandedFileId((currentId) => currentId === file.id ? null : file.id)}
+                        className="rounded-full border border-emerald-300/20 bg-emerald-300/10 px-1.5 py-0.5 text-[10px] text-emerald-100 transition hover:bg-emerald-300/15"
+                        title="查看表格结构"
+                      >
+                        {getSpreadsheetSummary(file) ?? '表格预览'}
+                      </button>
+                    )}
+                    <button
+                      onClick={() => removeFile(file.id)}
+                      className="ml-auto p-0.5 hover:bg-red-500/20 rounded transition-colors"
+                      title="移除文件"
+                    >
+                      <X size={12} className="text-surface-400 hover:text-red-400" />
+                    </button>
+                  </div>
+                  {file.validationWarning && (
+                    <div className="mt-1 text-[10px] text-amber-200/80">{file.validationWarning}</div>
+                  )}
+                  {expandedFileId === file.id && file.spreadsheetSchema && (
+                    <div className="mt-2 space-y-1 rounded-lg border border-white/8 bg-black/15 p-2 text-[10px] text-surface-300">
+                      {file.spreadsheetSchema.sheets.slice(0, 4).map((sheet) => (
+                        <div key={sheet.name}>
+                          <span className="text-surface-100">{sheet.name}</span>
+                          <span className="text-surface-500"> · {sheet.rowCount} 行 / {sheet.columnCount} 列</span>
+                          <div className="mt-0.5 truncate text-surface-400">
+                            {sheet.columns.slice(0, 8).map((column) => column.name).join('、') || '未识别列名'}
+                            {sheet.columns.length > 8 ? '…' : ''}
+                          </div>
+                        </div>
+                      ))}
+                      {file.spreadsheetSchema.sheets.length > 4 && (
+                        <div className="text-surface-500">还有 {file.spreadsheetSchema.sheets.length - 4} 个工作表未展开</div>
+                      )}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
           )}
 
-          {isProcessingFiles && (
-            <div className="flex items-center gap-2 px-2 pb-2 text-xs text-surface-400">
-              <Loader2 size={14} className="animate-spin text-primary-400" />
-              <span className="truncate">
-                正在提取文档文本：
-                {pendingFiles.length === 1 ? pendingFiles[0] : `${pendingFiles.length} 个文件`}
-              </span>
+          {pendingAttachmentTasks.length > 0 && (
+            <div className="space-y-1 px-2 pb-2">
+              {pendingAttachmentTasks.map((task) => (
+                <div key={task.id} className="flex items-center gap-2 rounded-lg border border-white/8 bg-white/[0.03] px-2 py-1.5 text-xs text-surface-400">
+                  {task.status === 'error' ? (
+                    <span className="h-2 w-2 rounded-full bg-red-400" />
+                  ) : (
+                    <Loader2 size={14} className="animate-spin text-primary-400" />
+                  )}
+                  <span className="min-w-0 flex-1 truncate">
+                    {task.name} · {getTaskStatusText(task.status)}
+                    {task.error ? `：${task.error}` : task.message ? `：${task.message}` : ''}
+                  </span>
+                  <span className="text-[10px] text-surface-500">{formatFileSize(task.size)}</span>
+                  {task.status === 'error' && (
+                    <button
+                      onClick={() => retryTask(task.id)}
+                      className="rounded px-1.5 py-0.5 text-[10px] text-primary-200 transition hover:bg-primary-500/20"
+                    >
+                      重试
+                    </button>
+                  )}
+                  <button
+                    onClick={() => removeTask(task.id)}
+                    className="rounded p-0.5 transition hover:bg-red-500/20"
+                    title="移除任务"
+                  >
+                    <X size={11} className="text-surface-500 hover:text-red-400" />
+                  </button>
+                </div>
+              ))}
             </div>
           )}
 

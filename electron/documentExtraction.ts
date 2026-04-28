@@ -1569,6 +1569,7 @@ export async function extractDocumentText(
       fileType,
       content,
       spreadsheetSessionId: spreadsheetResult?.spreadsheetSessionId,
+      spreadsheetSchema: spreadsheetResult?.spreadsheetSchema,
     }
   } catch (error) {
     return {

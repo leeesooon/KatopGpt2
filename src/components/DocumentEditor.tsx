@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { EditorSelection, EditorState, RangeSetBuilder } from '@codemirror/state'
 import type { Extension, SelectionRange } from '@codemirror/state'
 import {
@@ -37,6 +37,7 @@ interface DocumentEditorProps {
   onCursorLineChange?: (line: number) => void
   onScroll?: (progress: number) => void
   onSave?: () => void
+  onPasteImage?: (image: File) => Promise<string>
 }
 
 interface DecorationEntry {
@@ -317,6 +318,7 @@ const DocumentEditor = forwardRef<DocumentEditorHandle, DocumentEditorProps>(fun
   onCursorLineChange,
   onScroll,
   onSave,
+  onPasteImage,
 }, ref) {
   const hostRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
@@ -326,6 +328,8 @@ const DocumentEditor = forwardRef<DocumentEditorHandle, DocumentEditorProps>(fun
   const onCursorLineChangeRef = useRef(onCursorLineChange)
   const onScrollRef = useRef(onScroll)
   const onSaveRef = useRef(onSave)
+  const onPasteImageRef = useRef(onPasteImage)
+  const [pasteError, setPasteError] = useState<string | null>(null)
 
   const stats = useMemo(() => {
     const characters = content.length
@@ -354,6 +358,10 @@ const DocumentEditor = forwardRef<DocumentEditorHandle, DocumentEditorProps>(fun
   useEffect(() => {
     onSaveRef.current = onSave
   }, [onSave])
+
+  useEffect(() => {
+    onPasteImageRef.current = onPasteImage
+  }, [onPasteImage])
 
   useImperativeHandle(ref, () => ({
     focus: () => {
@@ -396,6 +404,36 @@ const DocumentEditor = forwardRef<DocumentEditorHandle, DocumentEditorProps>(fun
       placeholder('在这里写 Markdown，或使用文档助手生成初稿。'),
       livePreviewPlugin,
       scrollProgressExtension(onScrollRef),
+      EditorView.domEventHandlers({
+        paste: (event, view) => {
+          const imageFile = Array.from(event.clipboardData?.files ?? [])
+            .find((file) => file.type.startsWith('image/'))
+          if (!imageFile || !onPasteImageRef.current) return false
+
+          event.preventDefault()
+          void onPasteImageRef.current(imageFile)
+            .then((markdown) => {
+              if (!markdown) return
+              const range = view.state.selection.main
+              const from = Math.min(range.from, range.to)
+              const to = Math.max(range.from, range.to)
+              const before = from > 0 && !/\n$/.test(view.state.doc.sliceString(Math.max(0, from - 1), from)) ? '\n\n' : ''
+              const after = to < view.state.doc.length && !/^\n/.test(view.state.doc.sliceString(to, Math.min(view.state.doc.length, to + 1))) ? '\n\n' : ''
+              const insertText = `${before}${markdown}${after}`
+              view.dispatch({
+                changes: { from, to, insert: insertText },
+                selection: EditorSelection.cursor(from + insertText.length),
+                scrollIntoView: true,
+              })
+              setPasteError(null)
+            })
+            .catch((error) => {
+              setPasteError(error instanceof Error ? error.message : '图片写入失败，请确认工作区可写')
+              setTimeout(() => setPasteError(null), 4000)
+            })
+          return true
+        },
+      }),
       keymap.of([
         {
           key: 'Mod-b',
@@ -461,6 +499,7 @@ const DocumentEditor = forwardRef<DocumentEditorHandle, DocumentEditorProps>(fun
       <div className="flex shrink-0 items-center justify-between border-b border-surface-700/40 px-5 py-3 text-[11px] uppercase tracking-[0.28em] text-surface-400">
         <span>Live Preview</span>
         <div className="flex items-center gap-3 normal-case tracking-normal text-surface-500">
+          {pasteError && <span className="text-rose-300">{pasteError}</span>}
           <span>{stats.lines} 行</span>
           <span>{stats.words} 词</span>
           <span>{stats.characters} 字符</span>

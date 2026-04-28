@@ -2,7 +2,7 @@ import { resolveApiConfig, supportsImageGeneration } from '../types'
 import type { ApiConfig, AppSettings, FileAttachment, Message } from '../types'
 import type { SpreadsheetExecutionPlan } from '../services/chatApi'
 
-const MAX_CONTEXT_COUNTED_FILE_CHARS = 12000
+const MAX_CONTEXT_COUNTED_FILE_CHARS = 30000
 const IMAGE_GENERATION_QUALITY_PROMPT = '自然真实的人体结构，正常五指，手部清晰自然，面部五官协调，肢体比例合理，避免多余手指、畸形手、扭曲肢体、崩坏面部、低质量细节。'
 
 export interface ContextStats {
@@ -15,7 +15,7 @@ export function calculateContextStats(messages: Message[]): ContextStats {
     (stats, message) => {
       const imageChars = message.images?.length ? message.images.length * 120 : 0
       const fileChars = message.files?.reduce(
-        (total, file) => total + Math.min(file.content.length, MAX_CONTEXT_COUNTED_FILE_CHARS),
+        (total, file) => total + Math.min((file.contextContent ?? file.content).length, MAX_CONTEXT_COUNTED_FILE_CHARS),
         0
       ) ?? 0
       return {

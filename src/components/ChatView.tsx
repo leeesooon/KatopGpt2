@@ -2,7 +2,7 @@
 import { MessageSquarePlus, Sparkles, ArrowDown } from 'lucide-react'
 import { useChatStore } from '../store/chatStore'
 import { useWorkspaceStore } from '../store/workspaceStore'
-import { streamChat, parseSpreadsheetIntent, generateImage, cancelGenerateImage, ChatApiError } from '../services/chatApi'
+import { streamChat, parseSpreadsheetIntent, generateImage, cancelGenerateImage, completeChatText, ChatApiError } from '../services/chatApi'
 import { recognizeImages } from '../services/ocr'
 import { resolveApiConfig } from '../types'
 import { prepareDocumentAgentRequest } from '../services/agentOrchestrator'
@@ -27,6 +27,95 @@ import {
   summarizeSpreadsheetPlan,
 } from './chatViewUtils'
 
+interface ImageSeriesSendOptions {
+  imageSeries?: {
+    enabled: boolean
+    count: number
+    mode: 'template_parallel' | 'sequential'
+  }
+}
+
+interface ImageSeriesChapterPlan {
+  title: string
+  prompt: string
+}
+
+interface ImageSeriesPlan {
+  setting: string
+  chapters: ImageSeriesChapterPlan[]
+}
+
+interface ImageSeriesChapterState {
+  index: number
+  title: string
+  prompt: string
+  enhancedPrompt?: string
+  status: 'pending' | 'generating' | 'completed' | 'stopped' | 'error'
+  revisedPrompt?: string
+  imageName?: string
+}
+
+const MIN_IMAGE_SERIES_COUNT = 2
+const MAX_IMAGE_SERIES_COUNT = 8
+
+function clampImageSeriesCount(count: number) {
+  return Math.min(MAX_IMAGE_SERIES_COUNT, Math.max(MIN_IMAGE_SERIES_COUNT, Math.round(count)))
+}
+
+function stripJsonCodeFence(value: string) {
+  return value
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim()
+}
+
+function parseImageSeriesPlan(rawText: string, fallbackTopic: string, count: number): ImageSeriesPlan {
+  const parsed = JSON.parse(stripJsonCodeFence(rawText)) as Partial<ImageSeriesPlan>
+  const chapters = Array.isArray(parsed.chapters)
+    ? parsed.chapters
+        .slice(0, count)
+        .map((chapter, index) => ({
+          title: typeof chapter?.title === 'string' && chapter.title.trim()
+            ? chapter.title.trim()
+            : `第 ${index + 1} 章`,
+          prompt: typeof chapter?.prompt === 'string' && chapter.prompt.trim()
+            ? chapter.prompt.trim()
+            : `${fallbackTopic}，第 ${index + 1} 张章节图`,
+        }))
+    : []
+
+  if (chapters.length < count) {
+    throw new Error('章节拆分结果数量不足，请重试。')
+  }
+
+  return {
+    setting: typeof parsed.setting === 'string' ? parsed.setting.trim() : '',
+    chapters,
+  }
+}
+
+function buildImageSeriesPlanningPrompt(topic: string, count: number, webContext?: string) {
+  return [
+    `主题：${topic}`,
+    webContext ? `网页内容：\n${webContext}` : '',
+    `张数：${count}`,
+    '',
+    '请优先根据网页内容总结核心章节/要点，再拆成连续章节分镜，并返回严格 JSON，不要输出 Markdown，不要输出解释。',
+    'JSON 格式：{"setting":"统一角色、画风、世界观和视觉一致性设定","chapters":[{"title":"章节标题","prompt":"这一张图片的详细生图提示词"}]}',
+    '要求：每张图对应一个不同章节，内容连续但画面有变化；统一角色外观、服装、色彩、镜头语言和画风；提示词使用中文。',
+  ].filter(Boolean).join('\n')
+}
+
+function buildImageSeriesChapterPrompt(setting: string, chapter: ImageSeriesChapterPlan, index: number, count: number) {
+  return [
+    setting ? `统一设定：${setting}` : '',
+    `连续章节图 ${index + 1}/${count}：${chapter.title}`,
+    chapter.prompt,
+    '保持与系列前后图片一致的角色、画风、色彩和世界观，同时突出本章节独立内容。',
+  ].filter(Boolean).join('\n\n')
+}
+
 export default function ChatView() {
   const {
     conversations,
@@ -45,7 +134,7 @@ export default function ChatView() {
   } = useChatStore()
 
   const abortMapRef = useRef<Map<string, AbortController>>(new Map())
-  const imageGenerationRequestMapRef = useRef<Map<string, string>>(new Map())
+  const imageGenerationRequestMapRef = useRef<Map<string, Set<string>>>(new Map())
   const [streamingDrafts, setStreamingDrafts] = useState<Record<string, string>>({})
   const [inputMode, setInputMode] = useState<ChatInputMode>('chat')
   const [imageReferenceDraft, setImageReferenceDraft] = useState<ImageAttachment | null>(null)
@@ -84,7 +173,22 @@ export default function ChatView() {
     setImageReferenceDraft,
   })
 
-  const handleSend = async (content: string, images: ImageAttachment[], files: FileAttachment[]) => {
+  const registerImageRequest = (conversationId: string, requestId: string) => {
+    const requestIds = imageGenerationRequestMapRef.current.get(conversationId) ?? new Set<string>()
+    requestIds.add(requestId)
+    imageGenerationRequestMapRef.current.set(conversationId, requestIds)
+  }
+
+  const unregisterImageRequest = (conversationId: string, requestId: string) => {
+    const requestIds = imageGenerationRequestMapRef.current.get(conversationId)
+    if (!requestIds) return
+    requestIds.delete(requestId)
+    if (requestIds.size === 0) {
+      imageGenerationRequestMapRef.current.delete(conversationId)
+    }
+  }
+
+  const handleSend = async (content: string, images: ImageAttachment[], files: FileAttachment[], options?: ImageSeriesSendOptions) => {
     let convId = activeConversationId
     if (!convId) {
       convId = createConversation()
@@ -114,9 +218,330 @@ export default function ChatView() {
         updateConversationTitle(convId, title || '生图对话')
       }
 
+      if (options?.imageSeries?.enabled) {
+        const plannerSelection = settings.imageGeneration.plannerProviderId && settings.imageGeneration.plannerModel
+          ? {
+              providerId: settings.imageGeneration.plannerProviderId,
+              model: settings.imageGeneration.plannerModel,
+            }
+          : settings.activeModel
+        const chatConfig = resolveApiConfig(settings.providers, plannerSelection)
+        if (!chatConfig) {
+          addMessage(convId, {
+            role: 'assistant',
+            content: '请先在设置中配置“章节总结模型”，用于拆分连续多图章节。',
+            metadata: { kind: 'image_generation' },
+          })
+          return
+        }
+
+        const seriesCount = clampImageSeriesCount(options.imageSeries.count)
+        const seriesId = `${convId}-${Date.now()}`
+        const splitController = new AbortController()
+        abortMapRef.current.set(convId, splitController)
+        setConversationStreaming(convId, true)
+
+        const assistantMessage = addMessage(convId, {
+          role: 'assistant',
+          content: '正在拆分章节...',
+          metadata: {
+            kind: 'image_generation',
+            originalPrompt: content,
+            providerId: settings.imageGeneration.providerId,
+            model: imageConfig.model,
+            size: settings.imageGeneration.size,
+            quality: settings.imageGeneration.quality,
+            seriesId,
+          },
+        })
+
+        try {
+          let webSources: SearchResult[] = []
+          patchMessage(convId, assistantMessage.id, {
+            content: '正在读取网页内容...',
+            metadata: {
+              kind: 'image_generation',
+              originalPrompt: content,
+              providerId: settings.imageGeneration.providerId,
+              model: imageConfig.model,
+              size: settings.imageGeneration.size,
+              quality: settings.imageGeneration.quality,
+              seriesId,
+            },
+          })
+
+          const webPages = await readWebPagesFromText(content)
+          webSources = webPages.sources
+          const webContext = webPages.sources.length > 0
+            ? formatWebPageContext(webPages.sources, 5000)
+            : ''
+          patchMessage(convId, assistantMessage.id, {
+            content: webContext ? '正在总结网页并拆分章节...' : '正在拆分章节...',
+            searchResults: webSources.length > 0 ? webSources : undefined,
+            metadata: {
+              kind: 'image_generation',
+              originalPrompt: content,
+              providerId: settings.imageGeneration.providerId,
+              model: imageConfig.model,
+              size: settings.imageGeneration.size,
+              quality: settings.imageGeneration.quality,
+              seriesId,
+            },
+          })
+
+          const planText = await completeChatText(
+            chatConfig,
+            [
+              {
+                role: 'system',
+                content: '你是专业连续插画分镜策划。你只输出严格 JSON，不输出 Markdown 或解释。',
+              },
+              {
+                role: 'user',
+                content: buildImageSeriesPlanningPrompt(content, seriesCount, webContext),
+              },
+            ],
+            0.4,
+            1800,
+            splitController.signal
+          )
+          const seriesPlan = parseImageSeriesPlan(planText, content, seriesCount)
+          let seriesChapters: ImageSeriesChapterState[] = seriesPlan.chapters.map((chapter, index) => ({
+            index,
+            title: chapter.title,
+            prompt: chapter.prompt,
+            status: 'pending' as const,
+          }))
+          const buildPlaceholderImages = (completedImages: ImageAttachment[]) => [
+            ...completedImages,
+            ...seriesChapters.slice(completedImages.length).map((chapter) => ({
+              id: `series-${seriesId}-${chapter.index}`,
+              name: `${chapter.index + 1}-${chapter.title}.png`,
+              isGenerating: true,
+            })),
+          ]
+
+          const seriesMode = options.imageSeries.mode
+          let completedImages: ImageAttachment[] = []
+          const initialReference = images.find((image) => image.base64)
+          const chapterImageSlots: ImageAttachment[] = seriesChapters.map((chapter) => ({
+            id: `series-${seriesId}-${chapter.index}`,
+            name: `${chapter.index + 1}-${chapter.title}.png`,
+            isGenerating: true,
+          }))
+          const syncSeriesMessage = (statusText: string) => {
+            patchMessage(convId, assistantMessage.id, {
+              content: statusText,
+              images: chapterImageSlots,
+              searchResults: webSources.length > 0 ? webSources : undefined,
+              metadata: {
+                kind: 'image_generation',
+                originalPrompt: content,
+                providerId: settings.imageGeneration.providerId,
+                model: imageConfig.model,
+                size: settings.imageGeneration.size,
+                quality: settings.imageGeneration.quality,
+                seriesId,
+                seriesMode,
+                seriesChapters,
+              },
+            })
+          }
+          const readResultReference = async (result: { imageBase64?: string; imageUrl?: string }, imageName: string, index: number) => {
+            let referenceBase64 = result.imageBase64
+            if (!referenceBase64 && result.imageUrl && window.electronAPI?.readImage) {
+              const readResult = await window.electronAPI.readImage(result.imageUrl)
+              if (readResult.ok && readResult.dataUrl) {
+                referenceBase64 = readResult.dataUrl
+              }
+            }
+            return referenceBase64
+              ? {
+                  id: `series-reference-${seriesId}-${index}`,
+                  base64: referenceBase64,
+                  name: imageName,
+                }
+              : null
+          }
+          const markRemainingStopped = (fromIndex: number) => {
+            seriesChapters = seriesChapters.map((item) =>
+              item.index < fromIndex ? item : { ...item, status: 'stopped' as const }
+            )
+            for (let slotIndex = fromIndex; slotIndex < chapterImageSlots.length; slotIndex += 1) {
+              chapterImageSlots[slotIndex] = {
+                id: `series-stopped-${seriesId}-${slotIndex}`,
+                name: `${slotIndex + 1}-${seriesPlan.chapters[slotIndex].title}.png`,
+                isGenerating: true,
+              }
+            }
+          }
+          const generateChapterImage = async (index: number, referenceImage?: ImageAttachment) => {
+            const chapter = seriesPlan.chapters[index]
+            const chapterPrompt = buildImageSeriesChapterPrompt(seriesPlan.setting, chapter, index, seriesCount)
+            const enhancedPrompt = buildImageGenerationPrompt(chapterPrompt)
+            seriesChapters = seriesChapters.map((item) =>
+              item.index === index
+                ? { ...item, enhancedPrompt, status: 'generating' as const }
+                : item
+            )
+            const requestId = `${seriesId}-${index}-${Date.now()}`
+            registerImageRequest(convId, requestId)
+            try {
+              const result = await generateImage(imageConfig, {
+                requestId,
+                prompt: enhancedPrompt,
+                images: referenceImage ? [referenceImage] : [],
+                size: settings.imageGeneration.size,
+                quality: settings.imageGeneration.quality,
+              })
+              if (!result.ok || (!result.imageUrl && !result.imageBase64)) {
+                return { ok: false as const, error: result.error || '生成图片失败', stopped: result.error?.includes('已停止') ?? false }
+              }
+
+              const imageName = result.fileName ?? `series-${index + 1}-${Date.now()}.png`
+              const imageAttachment: ImageAttachment = {
+                id: `series-generated-${seriesId}-${index}`,
+                base64: result.imageBase64,
+                url: result.imageUrl,
+                filePath: result.filePath,
+                name: imageName,
+              }
+              const reference = await readResultReference(result, imageName, index)
+              seriesChapters = seriesChapters.map((item) =>
+                item.index === index
+                  ? {
+                      ...item,
+                      status: 'completed' as const,
+                      revisedPrompt: result.revisedPrompt,
+                      imageName,
+                    }
+                  : item
+              )
+              return { ok: true as const, image: imageAttachment, reference }
+            } finally {
+              unregisterImageRequest(convId, requestId)
+            }
+          }
+
+          syncSeriesMessage(`正在生成连续多图（0/${seriesCount}）...`)
+
+          if (seriesMode === 'sequential') {
+            let previousReference = initialReference
+            for (let index = 0; index < seriesChapters.length; index += 1) {
+              if (splitController.signal.aborted) {
+                throw new DOMException('Aborted', 'AbortError')
+              }
+
+              syncSeriesMessage(`正在生成连续多图（${index + 1}/${seriesCount}）：${seriesPlan.chapters[index].title}`)
+              const result = await generateChapterImage(index, previousReference)
+              if (!result.ok) {
+                const stopped = result.stopped
+                seriesChapters = seriesChapters.map((item) =>
+                  item.index < index
+                    ? item
+                    : {
+                        ...item,
+                        status: stopped ? 'stopped' as const : item.index === index ? 'error' as const : 'stopped' as const,
+                      }
+                )
+                syncSeriesMessage(stopped
+                  ? `已停止连续多图，已完成 ${completedImages.length}/${seriesCount} 张。`
+                  : `连续多图生成中断：${result.error}\n已完成 ${completedImages.length}/${seriesCount} 张。`)
+                return
+              }
+
+              completedImages = [...completedImages, result.image]
+              chapterImageSlots[index] = result.image
+              if (result.reference) {
+                previousReference = result.reference
+              }
+              syncSeriesMessage(index + 1 === seriesCount
+                ? `已生成连续多图：${seriesPlan.chapters.map((item, chapterIndex) => `${chapterIndex + 1}. ${item.title}`).join(' / ')}`
+                : `正在生成连续多图（${index + 1}/${seriesCount}）...`)
+            }
+          } else {
+            syncSeriesMessage(`正在生成风格模板：${seriesPlan.chapters[0].title}`)
+            const templateResult = await generateChapterImage(0, initialReference)
+            if (!templateResult.ok) {
+              seriesChapters = seriesChapters.map((item) => ({
+                ...item,
+                status: item.index === 0 ? 'error' as const : 'stopped' as const,
+              }))
+              syncSeriesMessage(`连续多图生成中断：${templateResult.error}\n已完成 0/${seriesCount} 张。`)
+              return
+            }
+
+            completedImages = [templateResult.image]
+            chapterImageSlots[0] = templateResult.image
+            const styleReference = templateResult.reference
+            if (!styleReference) {
+              markRemainingStopped(1)
+              syncSeriesMessage('风格模板读取失败，无法并发生成剩余章节。')
+              return
+            }
+
+            seriesChapters = seriesChapters.map((item) =>
+              item.index > 0 ? { ...item, status: 'generating' as const } : item
+            )
+            syncSeriesMessage(`正在并发生成剩余章节（1/${seriesCount}）...`)
+            const remainingIndexes = seriesChapters.slice(1).map((chapter) => chapter.index)
+            const settledResults = await Promise.allSettled(
+              remainingIndexes.map(async (index) => ({ index, result: await generateChapterImage(index, styleReference) }))
+            )
+            let successCount = 1
+            for (const settled of settledResults) {
+              if (settled.status === 'fulfilled') {
+                const { index, result } = settled.value
+                if (result.ok) {
+                  successCount += 1
+                  completedImages = [...completedImages, result.image]
+                  chapterImageSlots[index] = result.image
+                } else {
+                  seriesChapters = seriesChapters.map((item) =>
+                    item.index === index
+                      ? { ...item, status: result.stopped ? 'stopped' as const : 'error' as const }
+                      : item
+                  )
+                }
+              } else {
+                const failedIndex = remainingIndexes[settledResults.indexOf(settled)]
+                seriesChapters = seriesChapters.map((item) =>
+                  item.index === failedIndex ? { ...item, status: 'error' as const } : item
+                )
+              }
+              syncSeriesMessage(`正在并发生成剩余章节（${successCount}/${seriesCount}）...`)
+            }
+            syncSeriesMessage(successCount === seriesCount
+              ? `已生成连续多图：${seriesPlan.chapters.map((item, chapterIndex) => `${chapterIndex + 1}. ${item.title}`).join(' / ')}`
+              : `连续多图部分完成：已完成 ${successCount}/${seriesCount} 张。`)
+          }
+        } catch (error) {
+          patchMessage(convId, assistantMessage.id, {
+            content: error instanceof Error && error.name === 'AbortError'
+              ? '已停止连续多图章节拆分。'
+              : `连续多图生成失败：${error instanceof Error ? error.message : '未知错误'}`,
+            images: [],
+            metadata: {
+              kind: 'image_generation',
+              originalPrompt: content,
+              providerId: settings.imageGeneration.providerId,
+              model: imageConfig.model,
+              size: settings.imageGeneration.size,
+              quality: settings.imageGeneration.quality,
+              seriesId,
+            },
+          })
+        } finally {
+          setConversationStreaming(convId, false)
+          imageGenerationRequestMapRef.current.delete(convId)
+          abortMapRef.current.delete(convId)
+        }
+        return
+      }
+
       setConversationStreaming(convId, true)
       const requestId = `${convId}-${Date.now()}`
-      imageGenerationRequestMapRef.current.set(convId, requestId)
+      registerImageRequest(convId, requestId)
       const generatedAt = Date.now()
       const referenceImages = images.slice(0, 1)
       const hasReferenceImage = referenceImages.length > 0
@@ -180,7 +605,7 @@ export default function ChatView() {
         })
       } finally {
         setConversationStreaming(convId, false)
-        imageGenerationRequestMapRef.current.delete(convId)
+        unregisterImageRequest(convId, requestId)
       }
       return
     }
@@ -503,9 +928,11 @@ export default function ChatView() {
 
   const handleStop = () => {
     if (!activeConversationId) return
-    const imageRequestId = imageGenerationRequestMapRef.current.get(activeConversationId)
-    if (imageRequestId) {
-      void cancelGenerateImage(imageRequestId)
+    const imageRequestIds = imageGenerationRequestMapRef.current.get(activeConversationId)
+    if (imageRequestIds && imageRequestIds.size > 0) {
+      for (const requestId of imageRequestIds) {
+        void cancelGenerateImage(requestId)
+      }
       return
     }
     const controller = abortMapRef.current.get(activeConversationId)

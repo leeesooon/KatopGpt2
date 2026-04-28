@@ -211,6 +211,13 @@ interface ImageFileResult {
   dataUrl?: string
 }
 
+interface SaveWorkspaceImageResult {
+  ok: boolean
+  relativePath?: string
+  markdown?: string
+  error?: string
+}
+
 type ChatStreamEvent =
   | { streamId: string; type: 'chunk'; chunk: string }
   | { streamId: string; type: 'done' }
@@ -239,6 +246,7 @@ interface ElectronAPI {
   createWorkspaceDocument: (rootPath: string, relativePath: string, content: string) => Promise<boolean>
   renameWorkspaceDocument: (rootPath: string, oldRelativePath: string, newRelativePath: string) => Promise<boolean>
   deleteWorkspaceDocument: (rootPath: string, relativePath: string) => Promise<boolean>
+  saveWorkspaceImage: (rootPath: string, currentDocumentPath: string, imageDataUrl: string, fileName?: string) => Promise<SaveWorkspaceImageResult>
   extractDocumentText: (request: ExtractDocumentTextRequest) => Promise<ExtractDocumentTextResult>
   executeSpreadsheetInstruction: (request: ExecuteSpreadsheetInstructionRequest) => Promise<ExecuteSpreadsheetInstructionResult>
   executeSpreadsheetPlan: (request: ExecuteSpreadsheetPlanRequest) => Promise<ExecuteSpreadsheetInstructionResult>

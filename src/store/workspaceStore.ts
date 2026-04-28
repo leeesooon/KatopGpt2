@@ -11,6 +11,7 @@ import { useChatStore } from './chatStore'
 
 type TaskStatus = 'idle' | 'running' | 'ready' | 'failed'
 type SuggestionApplyMode = 'replace-document' | 'append-document' | 'replace-selection'
+type SaveSource = 'manual' | 'auto'
 
 interface ComposerDraft {
   text: string
@@ -47,6 +48,7 @@ interface WorkspaceSession {
   taskState: TaskState
   isWorkspaceLoading: boolean
   isSaving: boolean
+  saveSource: SaveSource | null
   error: string | null
 }
 
@@ -58,6 +60,7 @@ interface WorkspaceState extends WorkspaceSession {
   closeActiveDocument: () => void
   refreshWorkspace: () => Promise<void>
   updateActiveDocumentContent: (content: string) => void
+  saveDocument: (relativePath: string, source?: SaveSource) => Promise<void>
   saveActiveDocument: () => Promise<void>
   createDocument: (relativePath: string, initialContent?: string) => Promise<boolean>
   createDocumentFromContent: (content: string, suggestedName?: string) => Promise<boolean>
@@ -116,6 +119,7 @@ function createEmptySession(): WorkspaceSession {
     taskState: EMPTY_TASK_STATE,
     isWorkspaceLoading: false,
     isSaving: false,
+    saveSource: null,
     error: null,
   }
 }
@@ -161,6 +165,14 @@ function sanitizeDocumentSuggestion(content: string) {
     .replace(/(?:\[(?:\d+)\])+(?=\s|$|[，。；、,.])/g, '')
     .replace(/【\d+(?::\d+)?†[^】]*】/g, '')
     .trim()
+}
+
+function getDocumentRevision(document: WorkspaceDocument) {
+  return document.revision ?? document.lastSavedRevision ?? 0
+}
+
+function getNextDocumentRevision(document: WorkspaceDocument) {
+  return getDocumentRevision(document) + 1
 }
 
 function getActiveConversationId() {
@@ -282,6 +294,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
             isDirty: false,
             lastLoadedAt: now,
             lastSavedAt: now,
+            revision: 0,
+            lastSavedRevision: 0,
           },
         },
       }))
@@ -308,6 +322,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     setSessionState(set, (session) => {
       const document = session.documents[activeDocumentPath]
       if (!document) return {}
+      if (document.content === content) return {}
+
+      const revision = getNextDocumentRevision(document)
 
       return {
         documents: {
@@ -316,40 +333,69 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
             ...document,
             content,
             isDirty: true,
+            revision,
           },
         },
       }
     })
   },
 
-  saveActiveDocument: async () => {
-    const { currentWorkspace, activeDocumentPath, documents } = get()
-    if (!currentWorkspace || !activeDocumentPath || !window.electronAPI?.writeWorkspaceDocument) return
+  saveDocument: async (relativePath, source = 'manual') => {
+    const { currentWorkspace, documents } = get()
+    if (!currentWorkspace || !window.electronAPI?.writeWorkspaceDocument) return
 
-    const document = documents[activeDocumentPath]
-    if (!document) return
+    const normalizedPath = normalizeRelativePath(relativePath)
+    const document = documents[normalizedPath]
+    if (!document || !document.isDirty || document.isPendingNaming) return
 
-    setSessionState(set, { isSaving: true, error: null })
+    const contentToSave = document.content
+    const revisionToSave = getDocumentRevision(document)
+
+    setSessionState(set, { isSaving: true, saveSource: source, error: null })
 
     try {
-      await window.electronAPI.writeWorkspaceDocument(currentWorkspace.rootPath, activeDocumentPath, document.content)
-      setSessionState(set, (session) => ({
-        isSaving: false,
-        documents: {
-          ...session.documents,
-          [activeDocumentPath]: {
-            ...session.documents[activeDocumentPath],
-            isDirty: false,
-            lastSavedAt: Date.now(),
+      await window.electronAPI.writeWorkspaceDocument(currentWorkspace.rootPath, normalizedPath, contentToSave)
+      const savedAt = Date.now()
+      setSessionState(set, (session) => {
+        const currentDocument = session.documents[normalizedPath]
+        if (!currentDocument) {
+          return { isSaving: false, saveSource: source }
+        }
+
+        const shouldClearDirty = getDocumentRevision(currentDocument) === revisionToSave
+          && currentDocument.content === contentToSave
+
+        return {
+          isSaving: false,
+          saveSource: source,
+          documents: {
+            ...session.documents,
+            [normalizedPath]: {
+              ...currentDocument,
+              isDirty: shouldClearDirty ? false : currentDocument.isDirty,
+              lastSavedAt: savedAt,
+              lastSavedRevision: revisionToSave,
+            },
           },
-        },
-      }))
+        }
+      })
     } catch (error) {
       setSessionState(set, {
         isSaving: false,
-        error: error instanceof Error ? error.message : '保存文档失败',
+        saveSource: source,
+        error: error instanceof Error
+          ? error.message
+          : source === 'auto'
+            ? '自动保存文档失败'
+            : '保存文档失败',
       })
     }
+  },
+
+  saveActiveDocument: async () => {
+    const activeDocumentPath = get().activeDocumentPath
+    if (!activeDocumentPath) return
+    await get().saveDocument(activeDocumentPath, 'manual')
   },
 
   createDocument: async (relativePath, initialContent = '') => {
@@ -359,7 +405,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const normalizedPath = normalizeRelativePath(relativePath)
     if (!normalizedPath) return false
 
-    setSessionState(set, { isSaving: true, error: null })
+    setSessionState(set, { isSaving: true, saveSource: null, error: null })
 
     try {
       await window.electronAPI.createWorkspaceDocument(workspace.rootPath, normalizedPath, initialContent)
@@ -378,6 +424,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
             isDirty: false,
             lastLoadedAt: now,
             lastSavedAt: now,
+            revision: 0,
+            lastSavedRevision: 0,
           },
         },
       }))
@@ -418,6 +466,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
               ...createdDocument,
               content,
               isDirty: false,
+              revision: createdDocument.revision ?? 0,
+              lastSavedRevision: createdDocument.lastSavedRevision ?? createdDocument.revision ?? 0,
               isPendingNaming: true,
               pendingInitialContent: content,
             }
@@ -428,6 +478,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
               isDirty: false,
               lastLoadedAt: createdAt,
               lastSavedAt: createdAt,
+              revision: 0,
+              lastSavedRevision: 0,
               isPendingNaming: true,
               pendingInitialContent: content,
             },
@@ -479,18 +531,18 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const normalizedNewPath = normalizeRelativePath(newRelativePath)
     if (!normalizedOldPath || !normalizedNewPath) return false
 
-    setSessionState(set, { isSaving: true, error: null })
+    setSessionState(set, { isSaving: true, saveSource: null, error: null })
 
     try {
       const existingDocument = get().documents[normalizedOldPath]
-      const pendingInitialContent = typeof existingDocument?.pendingInitialContent === 'string'
-        ? existingDocument.pendingInitialContent
+      const pendingContentToWrite = existingDocument?.isPendingNaming
+        ? existingDocument.content
         : null
-      const shouldWritePendingContent = Boolean(existingDocument?.isPendingNaming && pendingInitialContent !== null && window.electronAPI?.writeWorkspaceDocument)
+      const shouldWritePendingContent = Boolean(pendingContentToWrite !== null && window.electronAPI?.writeWorkspaceDocument)
 
       await window.electronAPI.renameWorkspaceDocument(workspace.rootPath, normalizedOldPath, normalizedNewPath)
-      if (shouldWritePendingContent && pendingInitialContent !== null) {
-        await window.electronAPI.writeWorkspaceDocument(workspace.rootPath, normalizedNewPath, pendingInitialContent)
+      if (shouldWritePendingContent && pendingContentToWrite !== null) {
+        await window.electronAPI.writeWorkspaceDocument(workspace.rootPath, normalizedNewPath, pendingContentToWrite)
       }
 
       const completedAt = Date.now()
@@ -499,17 +551,20 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         const nextDocuments = { ...session.documents }
 
         if (existingDocument) {
+          const revision = existingDocument.revision ?? 0
           delete nextDocuments[normalizedOldPath]
           nextDocuments[normalizedNewPath] = {
             ...existingDocument,
             relativePath: normalizedNewPath,
             title: titleFromPath(normalizedNewPath),
-            content: shouldWritePendingContent && pendingInitialContent !== null ? pendingInitialContent : existingDocument.content,
+            content: shouldWritePendingContent && pendingContentToWrite !== null ? pendingContentToWrite : existingDocument.content,
             isDirty: shouldWritePendingContent ? false : existingDocument.isDirty,
             isPendingNaming: false,
             pendingInitialContent: undefined,
             lastLoadedAt: shouldWritePendingContent ? completedAt : existingDocument.lastLoadedAt,
             lastSavedAt: shouldWritePendingContent ? completedAt : existingDocument.lastSavedAt,
+            revision,
+            lastSavedRevision: shouldWritePendingContent ? revision : existingDocument.lastSavedRevision,
           }
         }
 
@@ -549,7 +604,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const normalizedPath = normalizeRelativePath(relativePath)
     if (!normalizedPath) return false
 
-    setSessionState(set, { isSaving: true, error: null })
+    setSessionState(set, { isSaving: true, saveSource: null, error: null })
 
     try {
       await window.electronAPI.deleteWorkspaceDocument(workspace.rootPath, normalizedPath)
@@ -625,7 +680,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       title: title ?? '文档建议已生成',
       message: mode === 'rewrite'
         ? '请确认是否替换当前选区，确认后建议卡片会自动收起。'
-        : '可以将结果替换到当前文档、追加到末尾，或新建为独立文档。',
+        : mode === 'expand'
+          ? '已生成增量扩写内容，可追加到当前文档。'
+          : '可以将结果替换到当前文档、追加到末尾，或新建为独立文档。',
     },
   }),
 
@@ -649,7 +706,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
     let nextContent = document.content
 
-    if (mode === 'replace-document') {
+    if (latestSuggestion.mode === 'expand' && mode === 'replace-selection') {
+      if (!selection || selection.start === selection.end) return
+      const insertText = `\n\n${latestSuggestion.content.trim()}`
+      nextContent = `${document.content.slice(0, selection.end)}${insertText}${document.content.slice(selection.end)}`
+    } else if (latestSuggestion.mode === 'expand' && mode === 'replace-document') {
+      nextContent = `${document.content.trimEnd()}\n\n${latestSuggestion.content.trim()}`.trim()
+    } else if (mode === 'replace-document') {
       nextContent = latestSuggestion.content
     } else if (mode === 'append-document') {
       nextContent = `${document.content.trimEnd()}\n\n${latestSuggestion.content.trim()}`.trim()
@@ -658,6 +721,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       nextContent = `${document.content.slice(0, selection.start)}${latestSuggestion.content}${document.content.slice(selection.end)}`
     }
 
+    const revision = getNextDocumentRevision(document)
+
     setSessionState(set, (session) => ({
       documents: {
         ...session.documents,
@@ -665,16 +730,19 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           ...document,
           content: nextContent,
           isDirty: true,
+          revision,
         },
       },
       taskState: {
         status: 'ready',
         title: session.taskState.title,
-        message: mode === 'replace-document'
-          ? '建议已写入当前文档，别忘了保存。'
-          : mode === 'append-document'
-            ? '建议已追加到当前文档末尾，别忘了保存。'
-            : '建议已替换当前选区，别忘了保存。',
+        message: latestSuggestion.mode === 'expand'
+          ? '扩写内容已增量写入当前文档，别忘了保存。'
+          : mode === 'replace-document'
+            ? '建议已写入当前文档，别忘了保存。'
+            : mode === 'append-document'
+              ? '建议已追加到当前文档末尾，别忘了保存。'
+              : '建议已替换当前选区，别忘了保存。',
       },
       latestSuggestion: null,
     }))

@@ -132,7 +132,7 @@ function logSpreadsheetPlanner(reason: SpreadsheetPlannerFailureReason, details:
   console.warn('[spreadsheet-planner]', reason, details)
 }
 
-const MAX_FILE_CONTEXT_CHARS = 12000
+const MAX_FILE_CONTEXT_CHARS = 30000
 
 function clipFileContext(content: string) {
   if (content.length <= MAX_FILE_CONTEXT_CHARS) {
@@ -169,7 +169,7 @@ function buildApiMessages(
     if (m.files && m.files.length > 0) {
       const fileParts = m.files.map((f) => {
         const label = `[文件: ${f.name}]`
-        return `${label}\n\`\`\`\n${clipFileContext(f.content)}\n\`\`\``
+        return `${label}\n\`\`\`\n${clipFileContext(f.contextContent ?? f.content)}\n\`\`\``
       })
       textContent = fileParts.join('\n\n') + (textContent ? '\n\n' + textContent : '')
     }

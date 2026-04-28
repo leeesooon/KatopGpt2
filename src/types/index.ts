@@ -20,6 +20,8 @@ export type ImageGenerationQuality = 'auto' | 'low' | 'medium' | 'high'
 export interface ImageGenerationSettings {
   providerId?: string
   model?: string
+  plannerProviderId?: string
+  plannerModel?: string
   size: ImageGenerationSize
   quality: ImageGenerationQuality
   count: 1
@@ -46,6 +48,11 @@ export interface FileAttachment {
   fileType?: 'text' | 'pdf' | 'pptx' | 'docx' | 'xlsx' | 'csv'
   spreadsheetSessionId?: string
   spreadsheetSchema?: SpreadsheetWorkbookSchema
+  originalContentLength?: number
+  isTruncated?: boolean
+  previewContent?: string
+  contextContent?: string
+  validationWarning?: string
 }
 
 export type DocumentAgentMode = 'chat' | 'create' | 'rewrite' | 'expand' | 'summarize'
@@ -71,6 +78,8 @@ export interface WorkspaceDocument {
   isDirty: boolean
   lastLoadedAt: number
   lastSavedAt?: number
+  revision?: number
+  lastSavedRevision?: number
   isPendingNaming?: boolean
   pendingInitialContent?: string
 }
@@ -111,6 +120,17 @@ export interface Message {
     model?: string
     size?: ImageGenerationSize
     quality?: ImageGenerationQuality
+    seriesId?: string
+    seriesMode?: 'template_parallel' | 'sequential'
+    seriesChapters?: Array<{
+      index: number
+      title: string
+      prompt: string
+      enhancedPrompt?: string
+      status: 'pending' | 'generating' | 'completed' | 'stopped' | 'error'
+      revisedPrompt?: string
+      imageName?: string
+    }>
   }
   /** Search results attached to this message (for assistant responses) */
   searchResults?: SearchResult[]

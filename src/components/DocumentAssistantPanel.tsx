@@ -73,6 +73,7 @@ export default function DocumentAssistantPanel({
   onCreateFromSuggestion,
 }: DocumentAssistantPanelProps) {
   const isRewriteSuggestion = latestSuggestion?.mode === 'rewrite'
+  const isExpandSuggestion = latestSuggestion?.mode === 'expand'
   const originalText = isRewriteSuggestion ? selection?.text ?? '' : activeDocument?.content ?? ''
   const diffLines = latestSuggestion ? buildLineDiff(originalText, latestSuggestion.content) : []
 
@@ -164,6 +165,18 @@ export default function DocumentAssistantPanel({
               >
                 替换选区
               </button>
+            ) : isExpandSuggestion ? (
+              <>
+                <button
+                  onClick={() => onApplySuggestion(selection ? 'replace-selection' : 'append-document')}
+                  className="btn-primary col-span-2 rounded-full px-4 py-2 text-xs"
+                >
+                  {selection ? '插入到选区后' : '追加扩写内容'}
+                </button>
+                <button onClick={onCreateFromSuggestion} className="btn-ghost rounded-full border border-white/10 px-4 py-2 text-xs">
+                  新建文档
+                </button>
+              </>
             ) : (
               <>
                 <button onClick={() => onApplySuggestion('replace-document')} className="btn-primary rounded-full px-4 py-2 text-xs">

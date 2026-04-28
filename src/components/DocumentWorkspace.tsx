@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeftToLine,
   ArrowRightToLine,
@@ -24,6 +24,7 @@ import DocumentPreview from './DocumentPreview'
 import AgentActionBar from './AgentActionBar'
 import DocumentAssistantPanel from './DocumentAssistantPanel'
 import DocumentOutline, { buildMarkdownOutline } from './DocumentOutline'
+import { useWorkspaceAutoSave } from './useWorkspaceAutoSave'
 
 const MODE_LABELS: Record<DocumentEditorMode, string> = {
   write: '编辑',
@@ -36,7 +37,7 @@ type SideTab = 'assistant' | 'outline' | 'info'
 function buildComposerDraft(mode: DocumentAgentMode, documentTitle?: string) {
   if (mode === 'create') return '请帮我生成一份 Markdown 初稿，主题是：'
   if (mode === 'rewrite') return '请改写我当前选中的内容，风格要求：'
-  if (mode === 'expand') return `请扩写当前文档《${documentTitle ?? '当前文档'}》，重点补充：`
+  if (mode === 'expand') return `请为当前文档《${documentTitle ?? '当前文档'}》增量补充一段内容，重点补充：`
   return `请总结当前文档《${documentTitle ?? '当前文档'}》，输出方向：`
 }
 
@@ -56,6 +57,15 @@ function formatTime(timestamp?: number) {
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
+  })
+}
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result as string)
+    reader.onerror = () => reject(new Error(`读取图片失败：${file.name}`))
+    reader.readAsDataURL(file)
   })
 }
 
@@ -87,10 +97,12 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
     taskState,
     isWorkspaceLoading,
     isSaving,
+    saveSource,
     error,
     openWorkspace,
     openDocument,
     updateActiveDocumentContent,
+    saveDocument,
     saveActiveDocument,
     createDocument,
     createDocumentFromSuggestion,
@@ -108,14 +120,20 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
 
   const activeDocument = activeDocumentPath ? documents[activeDocumentPath] ?? null : null
   const documentStats = useMemo(() => getDocumentStats(activeDocument?.content ?? ''), [activeDocument?.content])
+  useWorkspaceAutoSave({
+    activeDocumentPath,
+    activeDocument,
+    isSaving,
+    saveDocument,
+  })
 
   const saveStatus = useMemo(() => {
     if (!activeDocument) return { label: '未打开文档', tone: 'text-surface-400 border-white/10 bg-white/5' }
-    if (error) return { label: '保存失败', tone: 'text-rose-200 border-rose-400/25 bg-rose-400/10' }
-    if (isSaving) return { label: '保存中', tone: 'text-sky-200 border-sky-400/25 bg-sky-400/10' }
+    if (error) return { label: saveSource === 'auto' ? '自动保存失败' : '保存失败', tone: 'text-rose-200 border-rose-400/25 bg-rose-400/10' }
+    if (isSaving) return { label: saveSource === 'auto' ? '自动保存中' : '保存中', tone: 'text-sky-200 border-sky-400/25 bg-sky-400/10' }
     if (activeDocument.isDirty) return { label: '未保存', tone: 'text-amber-200 border-amber-400/25 bg-amber-400/10' }
-    return { label: '已保存', tone: 'text-emerald-200 border-emerald-400/25 bg-emerald-400/10' }
-  }, [activeDocument, error, isSaving])
+    return { label: saveSource === 'auto' ? '已自动保存' : '已保存', tone: 'text-emerald-200 border-emerald-400/25 bg-emerald-400/10' }
+  }, [activeDocument, error, isSaving, saveSource])
 
   const statusTone = useMemo(() => {
     if (taskState.status === 'running') return 'text-sky-200 border-sky-400/25 bg-sky-400/10'
@@ -232,6 +250,26 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
     setActiveLine(line)
     editorScrollRef.current?.focusLine(line)
   }
+
+  const handlePasteImage = useCallback(async (image: File) => {
+    if (!currentWorkspace || !activeDocumentPath || !window.electronAPI?.saveWorkspaceImage) {
+      throw new Error('请先打开工作区和 Markdown 文档')
+    }
+
+    const dataUrl = await readFileAsDataUrl(image)
+    const result = await window.electronAPI.saveWorkspaceImage(
+      currentWorkspace.rootPath,
+      activeDocumentPath,
+      dataUrl,
+      image.name
+    )
+
+    if (!result.ok || !result.markdown) {
+      throw new Error(result.error ?? '图片写入失败，请确认工作区可写')
+    }
+
+    return result.markdown
+  }, [activeDocumentPath, currentWorkspace])
 
   if (!currentWorkspace) {
     return (
@@ -432,11 +470,13 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
                   onCursorLineChange={setActiveLine}
                   onScroll={(progress) => syncScroll('editor', progress)}
                   onSave={() => void saveActiveDocument()}
+                  onPasteImage={handlePasteImage}
                 />
               )}
               {editorMode !== 'write' && (
                 <DocumentPreview
                   content={activeDocument?.content ?? ''}
+                  workspaceRootPath={currentWorkspace.rootPath}
                   scrollRef={previewScrollRef}
                   onScroll={(progress) => syncScroll('preview', progress)}
                 />

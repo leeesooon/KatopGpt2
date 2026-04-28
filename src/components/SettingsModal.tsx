@@ -85,6 +85,8 @@ export default function SettingsModal() {
   const [showTavilyKey, setShowTavilyKey] = useState(false)
   const [imageProviderId, setImageProviderId] = useState(settings.imageGeneration.providerId ?? '')
   const [imageModel, setImageModel] = useState(settings.imageGeneration.model ?? '')
+  const [imagePlannerProviderId, setImagePlannerProviderId] = useState(settings.imageGeneration.plannerProviderId ?? '')
+  const [imagePlannerModel, setImagePlannerModel] = useState(settings.imageGeneration.plannerModel ?? '')
   const [imageSize, setImageSize] = useState<ImageGenerationSize>(settings.imageGeneration.size)
   const [imageQuality, setImageQuality] = useState<ImageGenerationQuality>(settings.imageGeneration.quality)
 
@@ -223,6 +225,8 @@ export default function SettingsModal() {
       imageGeneration: {
         providerId: imageProviderId || undefined,
         model: imageModel || undefined,
+        plannerProviderId: imagePlannerProviderId || undefined,
+        plannerModel: imagePlannerModel || undefined,
         size: imageSize,
         quality: imageQuality,
         count: 1,
@@ -676,6 +680,35 @@ export default function SettingsModal() {
                 </select>
               </div>
               <div className="space-y-1.5">
+                <label className="text-xs font-medium text-surface-400">章节总结服务商</label>
+                <select
+                  value={imagePlannerProviderId}
+                  onChange={(e) => {
+                    setImagePlannerProviderId(e.target.value)
+                    setImagePlannerModel('')
+                  }}
+                  className="input-field"
+                >
+                  <option value="">使用当前聊天模型</option>
+                  {settings.providers.map((provider) => (
+                    <option key={provider.id} value={provider.id}>{provider.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-surface-400">章节总结模型</label>
+                <select
+                  value={imagePlannerModel}
+                  onChange={(e) => setImagePlannerModel(e.target.value)}
+                  className="input-field"
+                >
+                  <option value="">使用当前聊天模型</option>
+                  {(settings.providers.find((provider) => provider.id === imagePlannerProviderId)?.models ?? [])
+                    .filter((model) => model.capabilities?.chat ?? true)
+                    .map((model) => <option key={model.name} value={model.name}>{model.name}</option>)}
+                </select>
+              </div>
+              <div className="space-y-1.5">
                 <label className="text-xs font-medium text-surface-400">图片尺寸</label>
                 <select value={imageSize} onChange={(e) => setImageSize(e.target.value as ImageGenerationSize)} className="input-field">
                   <option value="1024x1024">1024×1024 方图</option>
@@ -694,7 +727,7 @@ export default function SettingsModal() {
               </div>
             </div>
             <p className="text-[10px] text-surface-500">
-              使用 OpenAI 兼容的 /images/generations 接口。请在模型标签上点亮“生图”能力，API Key 仍保存在对应服务商配置中。
+              使用 OpenAI 兼容的 /images/generations 接口。连续多图会用“章节总结模型”拆分网页和主题；未配置时使用当前聊天模型。
             </p>
           </section>
 

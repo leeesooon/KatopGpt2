@@ -205,6 +205,13 @@ interface ImageFileResult {
   dataUrl?: string
 }
 
+interface SaveWorkspaceImageResult {
+  ok: boolean
+  relativePath?: string
+  markdown?: string
+  error?: string
+}
+
 type ChatStreamEvent =
   | { streamId: string; type: 'chunk'; chunk: string }
   | { streamId: string; type: 'done' }
@@ -264,6 +271,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   createWorkspaceDocument: (rootPath: string, relativePath: string, content: string) => ipcRenderer.invoke('workspace:createDocument', rootPath, relativePath, content),
   renameWorkspaceDocument: (rootPath: string, oldRelativePath: string, newRelativePath: string) => ipcRenderer.invoke('workspace:renameDocument', rootPath, oldRelativePath, newRelativePath),
   deleteWorkspaceDocument: (rootPath: string, relativePath: string) => ipcRenderer.invoke('workspace:deleteDocument', rootPath, relativePath),
+  saveWorkspaceImage: (rootPath: string, currentDocumentPath: string, imageDataUrl: string, fileName?: string) =>
+    ipcRenderer.invoke('workspace:saveImage', rootPath, currentDocumentPath, imageDataUrl, fileName),
   extractDocumentText: (request: ExtractDocumentTextRequest) => ipcRenderer.invoke('files:extractDocumentText', request),
   executeSpreadsheetInstruction: (request: ExecuteSpreadsheetInstructionRequest) => ipcRenderer.invoke('files:executeSpreadsheetInstruction', request),
   executeSpreadsheetPlan: (request: ExecuteSpreadsheetPlanRequest) => ipcRenderer.invoke('files:executeSpreadsheetPlan', request),

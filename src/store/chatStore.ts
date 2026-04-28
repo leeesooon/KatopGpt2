@@ -269,7 +269,7 @@ export const useChatStore = create<ChatState>()(
     }),
     {
       name: 'katop-gpt-storage',
-      version: 7,
+      version: 8,
       partialize: (state) => ({
         conversations: state.conversations,
         activeConversationId: state.activeConversationId,
@@ -392,6 +392,16 @@ export const useChatStore = create<ChatState>()(
               ...conversation,
               summary: conversation.summary,
             }))
+          }
+        }
+        if (version <= 7) {
+          const settings = state.settings as AppSettings | undefined
+          if (settings) {
+            settings.imageGeneration = {
+              ...DEFAULT_SETTINGS.imageGeneration,
+              ...settings.imageGeneration,
+              count: 1,
+            }
           }
         }
         return state as unknown as ChatState
