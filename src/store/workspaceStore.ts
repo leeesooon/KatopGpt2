@@ -76,7 +76,7 @@ interface WorkspaceState extends WorkspaceSession {
   clearPendingAction: () => void
   consumeComposerDraft: () => void
   startTask: (title: string) => void
-  completeTask: (content: string, mode: DocumentAgentMode, sourceMessageId?: string, title?: string) => void
+  completeTask: (content: string, mode: DocumentAgentMode, sourceMessageId?: string, title?: string, message?: string) => void
   failTask: (message: string, title?: string) => void
   clearTaskState: () => void
   applyLatestSuggestion: (mode: SuggestionApplyMode) => void
@@ -660,6 +660,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   startTask: (title) => setSessionState(set, {
     pendingAction: 'chat',
+    latestSuggestion: null,
     taskState: {
       status: 'running',
       title,
@@ -667,7 +668,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     },
   }),
 
-  completeTask: (content, mode, sourceMessageId, title) => setSessionState(set, {
+  completeTask: (content, mode, sourceMessageId, title, message) => setSessionState(set, {
     latestSuggestion: {
       content: sanitizeDocumentSuggestion(content),
       sourceMessageId,
@@ -678,11 +679,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     taskState: {
       status: 'ready',
       title: title ?? '文档建议已生成',
-      message: mode === 'rewrite'
+      message: message ?? (mode === 'rewrite'
         ? '请确认是否替换当前选区，确认后建议卡片会自动收起。'
         : mode === 'expand'
           ? '已生成增量扩写内容，可追加到当前文档。'
-          : '可以将结果替换到当前文档、追加到末尾，或新建为独立文档。',
+          : '可以将结果替换到当前文档、追加到末尾，或新建为独立文档。'),
     },
   }),
 
@@ -737,12 +738,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         status: 'ready',
         title: session.taskState.title,
         message: latestSuggestion.mode === 'expand'
-          ? '扩写内容已增量写入当前文档，别忘了保存。'
+          ? '扩写内容已增量写入当前文档。'
           : mode === 'replace-document'
-            ? '建议已写入当前文档，别忘了保存。'
+            ? '建议已写入当前文档。'
             : mode === 'append-document'
-              ? '建议已追加到当前文档末尾，别忘了保存。'
-              : '建议已替换当前选区，别忘了保存。',
+              ? '建议已追加到当前文档末尾。'
+              : '建议已替换当前选区。',
       },
       latestSuggestion: null,
     }))

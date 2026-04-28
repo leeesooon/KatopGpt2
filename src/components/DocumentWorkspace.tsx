@@ -15,16 +15,18 @@ import {
   SquareArrowOutUpRight,
   X,
 } from 'lucide-react'
+import { useChatStore } from '../store/chatStore'
 import { useWorkspaceStore } from '../store/workspaceStore'
 import type { DocumentAgentMode, DocumentEditorMode } from '../types'
 import WorkspaceFileTree from './WorkspaceFileTree'
 import DocumentEditor from './DocumentEditor'
 import type { DocumentEditorHandle } from './DocumentEditor'
 import DocumentPreview from './DocumentPreview'
-import AgentActionBar from './AgentActionBar'
 import DocumentAssistantPanel from './DocumentAssistantPanel'
 import DocumentOutline, { buildMarkdownOutline } from './DocumentOutline'
 import { useWorkspaceAutoSave } from './useWorkspaceAutoSave'
+import { useDocumentAgentRunner } from './useDocumentAgentRunner'
+import type { RunnableDocumentAgentMode } from './useDocumentAgentRunner'
 
 const MODE_LABELS: Record<DocumentEditorMode, string> = {
   write: '编辑',
@@ -74,10 +76,18 @@ interface DocumentWorkspaceProps {
 }
 
 export default function DocumentWorkspace({ standalone = false }: DocumentWorkspaceProps) {
+  const chatSettings = useChatStore((state) => state.settings)
+  const setActiveModel = useChatStore((state) => state.setActiveModel)
   const [isTreeCollapsed, setIsTreeCollapsed] = useState(false)
   const [treeWidth, setTreeWidth] = useState(220)
-  const [sidePanelWidth, setSidePanelWidth] = useState(320)
+  const [sidePanelWidth, setSidePanelWidth] = useState(420)
   const [sideTab, setSideTab] = useState<SideTab>('assistant')
+  const [assistantMode, setAssistantMode] = useState<RunnableDocumentAgentMode>('expand')
+  const [assistantInstruction, setAssistantInstruction] = useState(() => buildComposerDraft('expand'))
+  const [assistantSearchEnabled, setAssistantSearchEnabled] = useState(() => {
+    const state = useChatStore.getState()
+    return state.searchEnabled || state.settings.enableSearchByDefault
+  })
   const [activeLine, setActiveLine] = useState<number | null>(null)
   const workspaceBodyRef = useRef<HTMLDivElement>(null)
   const editorScrollRef = useRef<DocumentEditorHandle>(null)
@@ -112,13 +122,38 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
     setPanelVisible,
     setPanelWidth,
     setSelection,
-    queueComposerDraft,
     applyLatestSuggestion,
     clearLatestSuggestion,
     updateLatestSuggestionContent,
   } = useWorkspaceStore()
 
   const activeDocument = activeDocumentPath ? documents[activeDocumentPath] ?? null : null
+  const assistantModelOptions = useMemo(() => chatSettings.providers.flatMap((provider) =>
+    provider.models.map((model) => ({
+      value: `${provider.id}::${model.name}`,
+      providerId: provider.id,
+      providerName: provider.name,
+      model: model.name,
+      label: `${provider.name} / ${model.name}`,
+    }))
+  ), [chatSettings.providers])
+  const activeAssistantModelValue = useMemo(() => {
+    if (!chatSettings.activeModel) return ''
+    return assistantModelOptions.find((option) =>
+      option.providerId === chatSettings.activeModel?.providerId
+      && option.model === chatSettings.activeModel?.model
+    )?.value ?? ''
+  }, [assistantModelOptions, chatSettings.activeModel])
+  const assistantSearchApiKey = chatSettings.searchEngine === 'tavily'
+    ? chatSettings.tavilyApiKey
+    : chatSettings.serperApiKey
+  const isAssistantSearchAvailable = Boolean(assistantSearchApiKey)
+  const assistantSearchEngineLabel = chatSettings.searchEngine === 'tavily' ? 'Tavily' : 'Serper'
+  const documentAgentRunner = useDocumentAgentRunner({
+    activeDocument,
+    selection,
+    searchEnabled: assistantSearchEnabled && isAssistantSearchAvailable,
+  })
   const documentStats = useMemo(() => getDocumentStats(activeDocument?.content ?? ''), [activeDocument?.content])
   useWorkspaceAutoSave({
     activeDocumentPath,
@@ -141,10 +176,36 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
     if (taskState.status === 'ready') return 'text-emerald-200 border-emerald-400/25 bg-emerald-400/10'
     return 'text-surface-300 border-white/10 bg-white/5'
   }, [taskState.status])
+  const isAssistantGenerating = documentAgentRunner.hasActiveRun && taskState.status === 'running'
 
-  const handleAction = (mode: DocumentAgentMode) => {
+  const handleAssistantModeChange = (mode: RunnableDocumentAgentMode) => {
     setSideTab('assistant')
-    queueComposerDraft(mode, buildComposerDraft(mode, activeDocument?.title))
+    setAssistantMode(mode)
+    setAssistantInstruction(buildComposerDraft(mode, activeDocument?.title))
+  }
+
+  const handleRunAssistant = () => {
+    void documentAgentRunner.run(assistantMode, assistantInstruction)
+  }
+
+  const handleRetryAssistant = () => {
+    void documentAgentRunner.retry()
+  }
+
+  const handleApplySuggestion = (mode: Parameters<typeof applyLatestSuggestion>[0]) => {
+    documentAgentRunner.reset()
+    applyLatestSuggestion(mode)
+  }
+
+  const handleClearSuggestion = () => {
+    documentAgentRunner.reset()
+    clearLatestSuggestion()
+  }
+
+  const handleAssistantModelChange = (value: string) => {
+    const option = assistantModelOptions.find((item) => item.value === value)
+    if (!option) return
+    setActiveModel({ providerId: option.providerId, model: option.model })
   }
 
   const handleCreateFromSuggestion = async () => {
@@ -431,7 +492,7 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
           )}
 
           <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden gap-4">
-            <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-[24px] border border-white/10 bg-white/[0.04] px-4 py-3">
+            <div className="flex shrink-0 flex-wrap items-center gap-3 rounded-[24px] border border-white/10 bg-white/[0.04] px-4 py-3">
               <div className="flex items-center gap-2">
                 {!isTreeCollapsed && (
                   <button onClick={() => setIsTreeCollapsed(true)} className="btn-ghost rounded-full border border-white/10 px-3 py-2 text-xs">
@@ -450,11 +511,10 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
                   ))}
                 </div>
               </div>
-              <AgentActionBar
-                onAction={handleAction}
-                hasActiveDocument={Boolean(activeDocument)}
-                hasSelection={Boolean(selection)}
-              />
+              <div className="ml-auto hidden items-center gap-2 rounded-full border border-white/10 bg-black/10 px-3 py-1.5 text-[11px] text-surface-500 xl:flex">
+                <Sparkles size={12} className="text-amber-200/70" />
+                右侧 AI 建议中运行文档任务
+              </div>
             </div>
 
             <div
@@ -527,9 +587,26 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
                   activeDocument={activeDocument}
                   selection={selection}
                   latestSuggestion={latestSuggestion}
-                  taskState={taskState}
-                  onApplySuggestion={applyLatestSuggestion}
-                  onClearSuggestion={clearLatestSuggestion}
+                  selectedMode={assistantMode}
+                  instruction={assistantInstruction}
+                  streamingContent={documentAgentRunner.streamingContent}
+                  hasActiveRun={isAssistantGenerating}
+                  hasApiConfig={documentAgentRunner.hasApiConfig}
+                  canRetry={documentAgentRunner.canRetry}
+                  modelOptions={assistantModelOptions}
+                  activeModelValue={activeAssistantModelValue}
+                  searchEnabled={assistantSearchEnabled && isAssistantSearchAvailable}
+                  searchAvailable={isAssistantSearchAvailable}
+                  searchEngineLabel={assistantSearchEngineLabel}
+                  onModelChange={handleAssistantModelChange}
+                  onSearchEnabledChange={setAssistantSearchEnabled}
+                  onModeChange={handleAssistantModeChange}
+                  onInstructionChange={setAssistantInstruction}
+                  onRun={handleRunAssistant}
+                  onStop={documentAgentRunner.stop}
+                  onRetry={handleRetryAssistant}
+                  onApplySuggestion={handleApplySuggestion}
+                  onClearSuggestion={handleClearSuggestion}
                   onUpdateSuggestion={updateLatestSuggestionContent}
                   onCreateFromSuggestion={handleCreateFromSuggestion}
                 />
