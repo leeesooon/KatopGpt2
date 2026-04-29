@@ -6,6 +6,7 @@ export interface WorkspaceImageViewPayload {
   src: string
   alt: string
   title: string
+  svg?: string
 }
 
 export function normalizeWorkspaceImageSource(rawSource: string | undefined) {

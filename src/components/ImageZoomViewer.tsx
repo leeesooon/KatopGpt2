@@ -4,25 +4,47 @@ import { createPortal } from 'react-dom'
 import { Minus, RotateCcw, Plus, X } from 'lucide-react'
 import type { WorkspaceImageViewPayload } from './workspaceMarkdown'
 
-interface DocumentImageViewerProps {
+interface ImageZoomViewerProps {
   image: WorkspaceImageViewPayload | null
   scale: number
-  offset: { x: number; y: number }
+  offset: ViewerOffset
   onScaleChange: (scale: number) => void
-  onOffsetChange: (offset: { x: number; y: number }) => void
+  onOffsetChange: (offset: ViewerOffset) => void
   onClose: () => void
 }
 
 const DRAG_THRESHOLD = 4
 
+interface ViewerOffset {
+  x: number
+  y: number
+}
+
+interface ViewerSize {
+  width: number
+  height: number
+}
+
 function clampValue(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value))
 }
 
+function isSameOffset(left: ViewerOffset, right: ViewerOffset) {
+  return left.x === right.x && left.y === right.y
+}
+
+function isSameSize(left: ViewerSize, right: ViewerSize) {
+  return left.width === right.width && left.height === right.height
+}
+
+function buildViewerTransform(offset: ViewerOffset, scale: number) {
+  return `translate3d(${offset.x}px, ${offset.y}px, 0) scale(${scale})`
+}
+
 function getPanBounds(
   scale: number,
-  stageSize: { width: number; height: number },
-  imageSize: { width: number; height: number }
+  stageSize: ViewerSize,
+  imageSize: ViewerSize
 ) {
   if (!stageSize.width || !stageSize.height || !imageSize.width || !imageSize.height) {
     return { maxX: 0, maxY: 0 }
@@ -38,10 +60,10 @@ function getPanBounds(
 }
 
 function clampViewerOffset(
-  nextOffset: { x: number; y: number },
+  nextOffset: ViewerOffset,
   scale: number,
-  stageSize: { width: number; height: number },
-  imageSize: { width: number; height: number }
+  stageSize: ViewerSize,
+  imageSize: ViewerSize
 ) {
   const { maxX, maxY } = getPanBounds(scale, stageSize, imageSize)
 
@@ -55,16 +77,19 @@ function clampViewerOffset(
   }
 }
 
-export default function DocumentImageViewer({
+export default function ImageZoomViewer({
   image,
   scale,
   offset,
   onScaleChange,
   onOffsetChange,
   onClose,
-}: DocumentImageViewerProps) {
+}: ImageZoomViewerProps) {
   const stageRef = useRef<HTMLDivElement>(null)
-  const imageRef = useRef<HTMLImageElement>(null)
+  const contentRef = useRef<HTMLElement | null>(null)
+  const liveOffsetRef = useRef<ViewerOffset>(offset)
+  const liveScaleRef = useRef(scale)
+  const frameRef = useRef<number | null>(null)
   const dragRef = useRef<{
     pointerId: number
     startX: number
@@ -77,6 +102,37 @@ export default function DocumentImageViewer({
   const [isDragging, setIsDragging] = useState(false)
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 })
   const [imageSize, setImageSize] = useState({ width: 0, height: 0 })
+
+  const writeTransform = (nextOffset: ViewerOffset, nextScale: number) => {
+    const content = contentRef.current
+    if (!content) return
+
+    content.style.transform = buildViewerTransform(nextOffset, nextScale)
+  }
+
+  const applyTransformNow = (nextOffset: ViewerOffset, nextScale: number) => {
+    liveOffsetRef.current = nextOffset
+    liveScaleRef.current = nextScale
+
+    if (frameRef.current !== null) {
+      window.cancelAnimationFrame(frameRef.current)
+      frameRef.current = null
+    }
+
+    writeTransform(nextOffset, nextScale)
+  }
+
+  const applyTransform = (nextOffset: ViewerOffset, nextScale = liveScaleRef.current) => {
+    liveOffsetRef.current = nextOffset
+    liveScaleRef.current = nextScale
+
+    if (frameRef.current !== null) return
+
+    frameRef.current = window.requestAnimationFrame(() => {
+      frameRef.current = null
+      writeTransform(liveOffsetRef.current, liveScaleRef.current)
+    })
+  }
 
   useEffect(() => {
     if (!image) return
@@ -95,20 +151,31 @@ export default function DocumentImageViewer({
   }, [image, onClose])
 
   useEffect(() => {
+    return () => {
+      if (frameRef.current !== null) {
+        window.cancelAnimationFrame(frameRef.current)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
     if (!image) return
 
     const measure = () => {
       const stage = stageRef.current
-      const currentImage = imageRef.current
+      const currentContent = contentRef.current
 
-      setStageSize({
+      const nextStageSize = {
         width: stage?.clientWidth ?? 0,
         height: stage?.clientHeight ?? 0,
-      })
-      setImageSize({
-        width: currentImage?.offsetWidth ?? 0,
-        height: currentImage?.offsetHeight ?? 0,
-      })
+      }
+      const nextImageSize = {
+        width: currentContent?.offsetWidth ?? 0,
+        height: currentContent?.offsetHeight ?? 0,
+      }
+
+      setStageSize((currentSize) => isSameSize(currentSize, nextStageSize) ? currentSize : nextStageSize)
+      setImageSize((currentSize) => isSameSize(currentSize, nextImageSize) ? currentSize : nextImageSize)
     }
 
     measure()
@@ -118,7 +185,7 @@ export default function DocumentImageViewer({
       : null
 
     if (stageRef.current) observer?.observe(stageRef.current)
-    if (imageRef.current) observer?.observe(imageRef.current)
+    if (contentRef.current) observer?.observe(contentRef.current)
     window.addEventListener('resize', measure)
 
     return () => {
@@ -129,14 +196,30 @@ export default function DocumentImageViewer({
 
   useEffect(() => {
     if (!image) return
-    const nextOffset = clampViewerOffset(offset, scale, stageSize, imageSize)
-    if (nextOffset.x !== offset.x || nextOffset.y !== offset.y) {
+    const baseOffset = isDragging ? liveOffsetRef.current : offset
+    const nextOffset = clampViewerOffset(baseOffset, scale, stageSize, imageSize)
+
+    applyTransformNow(nextOffset, scale)
+
+    if (!isDragging && !isSameOffset(nextOffset, offset)) {
       onOffsetChange(nextOffset)
     }
-  }, [image, imageSize, offset.x, offset.y, onOffsetChange, scale, stageSize])
+  }, [
+    image,
+    imageSize.height,
+    imageSize.width,
+    isDragging,
+    offset.x,
+    offset.y,
+    onOffsetChange,
+    scale,
+    stageSize.height,
+    stageSize.width,
+  ])
 
   useEffect(() => {
     if (!image) return
+    applyTransformNow(offset, scale)
     suppressBackdropCloseRef.current = false
     dragRef.current = null
     setIsDragging(false)
@@ -145,8 +228,31 @@ export default function DocumentImageViewer({
   if (!image) return null
   if (typeof document === 'undefined') return null
 
+  const setContentElement = (element: HTMLElement | null) => {
+    contentRef.current = element
+    if (element) {
+      element.style.transform = buildViewerTransform(isDragging ? liveOffsetRef.current : offset, scale)
+    }
+  }
+
+  const measureContent = () => {
+    const nextImageSize = {
+      width: contentRef.current?.offsetWidth ?? 0,
+      height: contentRef.current?.offsetHeight ?? 0,
+    }
+    setImageSize((currentSize) => isSameSize(currentSize, nextImageSize) ? currentSize : nextImageSize)
+  }
+
   const { maxX, maxY } = getPanBounds(scale, stageSize, imageSize)
   const canPan = maxX > 0 || maxY > 0
+  const hasSvgContent = Boolean(image.svg)
+  const visibleOffset = isDragging ? liveOffsetRef.current : offset
+  const contentStyle = {
+    transform: buildViewerTransform(visibleOffset, scale),
+    transformOrigin: 'center center',
+    transition: isDragging ? 'none' : 'transform 140ms ease-out',
+    willChange: canPan ? 'transform' : undefined,
+  }
 
   const handleBackdropClick = () => {
     if (suppressBackdropCloseRef.current) {
@@ -163,8 +269,8 @@ export default function DocumentImageViewer({
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
-      originX: offset.x,
-      originY: offset.y,
+      originX: liveOffsetRef.current.x,
+      originY: liveOffsetRef.current.y,
       moved: false,
     }
     suppressBackdropCloseRef.current = false
@@ -183,10 +289,13 @@ export default function DocumentImageViewer({
       if (distance < DRAG_THRESHOLD) return
       dragRef.current.moved = true
       suppressBackdropCloseRef.current = true
+      if (contentRef.current) {
+        contentRef.current.style.transition = 'none'
+      }
       setIsDragging(true)
     }
 
-    onOffsetChange(
+    applyTransform(
       clampViewerOffset(
         {
           x: dragRef.current.originX + deltaX,
@@ -195,7 +304,8 @@ export default function DocumentImageViewer({
         scale,
         stageSize,
         imageSize
-      )
+      ),
+      scale
     )
   }
 
@@ -205,8 +315,14 @@ export default function DocumentImageViewer({
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
-    suppressBackdropCloseRef.current = dragRef.current.moved
+    const hasMoved = dragRef.current.moved
+    suppressBackdropCloseRef.current = hasMoved
     dragRef.current = null
+
+    if (hasMoved && !isSameOffset(liveOffsetRef.current, offset)) {
+      onOffsetChange(liveOffsetRef.current)
+    }
+
     setIsDragging(false)
   }
 
@@ -217,7 +333,7 @@ export default function DocumentImageViewer({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[90] flex items-center justify-center bg-[#020617]/82 px-4 py-6 backdrop-blur-md"
+      className="fixed inset-0 z-[90] flex transform-gpu items-center justify-center bg-[#020617]/82 px-4 py-6 backdrop-blur-md"
       onClick={handleBackdropClick}
     >
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(56,189,248,0.12),transparent_30%),radial-gradient(circle_at_20%_80%,rgba(245,158,11,0.1),transparent_25%)]" />
@@ -278,25 +394,24 @@ export default function DocumentImageViewer({
             onWheel={handleWheel}
             style={{ touchAction: 'none' }}
           >
-            <img
-              ref={imageRef}
-              src={image.src}
-              alt={image.alt}
-              draggable={false}
-              className="max-h-full max-w-full select-none object-contain"
-              onLoad={() => {
-                setImageSize({
-                  width: imageRef.current?.offsetWidth ?? 0,
-                  height: imageRef.current?.offsetHeight ?? 0,
-                })
-              }}
-              style={{
-                transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
-                transformOrigin: 'center center',
-                transition: isDragging ? 'none' : 'transform 140ms ease-out',
-                willChange: canPan ? 'transform' : undefined,
-              }}
-            />
+            {hasSvgContent ? (
+              <div
+                ref={setContentElement}
+                className="image-zoom-viewer-svg max-h-full max-w-full select-none transform-gpu"
+                dangerouslySetInnerHTML={{ __html: image.svg ?? '' }}
+                style={contentStyle}
+              />
+            ) : (
+              <img
+                ref={setContentElement}
+                src={image.src}
+                alt={image.alt}
+                draggable={false}
+                className="max-h-full max-w-full select-none object-contain transform-gpu"
+                onLoad={measureContent}
+                style={contentStyle}
+              />
+            )}
           </div>
 
           <div className="absolute bottom-4 left-1/2 -translate-x-1/2 rounded-full border border-white/10 bg-[#0b1421]/88 px-3 py-1.5 text-xs text-surface-200 shadow-[0_12px_28px_rgba(0,0,0,0.3)]">

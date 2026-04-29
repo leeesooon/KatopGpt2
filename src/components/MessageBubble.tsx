@@ -19,10 +19,12 @@ import SourcesPanel from './SourcesPanel'
 import { normalizeExternalUrl, openExternalUrl } from '../utils/externalLinks'
 import MermaidBlock from './MermaidBlock'
 import { useWorkspaceStore } from '../store/workspaceStore'
+import type { WorkspaceImageViewPayload } from './workspaceMarkdown'
 
 interface MessageBubbleProps {
   message: Message
   onContinueImageEdit?: (image: ImageAttachment) => void
+  onOpenImagePreview?: (image: WorkspaceImageViewPayload) => void
 }
 
 type CitationContainerTag = 'blockquote' | 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6' | 'li' | 'p' | 'td' | 'th'
@@ -396,7 +398,7 @@ function MarkdownTable({ children, sources }: { children: ReactNode; sources: { 
   )
 }
 
-const MessageBubble = memo(function MessageBubble({ message, onContinueImageEdit }: MessageBubbleProps) {
+const MessageBubble = memo(function MessageBubble({ message, onContinueImageEdit, onOpenImagePreview }: MessageBubbleProps) {
   const isUser = message.role === 'user'
   const [showCopyButton, setShowCopyButton] = useState(false)
   const [copiedMessage, setCopiedMessage] = useState(false)
@@ -426,7 +428,7 @@ const MessageBubble = memo(function MessageBubble({ message, onContinueImageEdit
 
         if (match) {
           if (match[1] === 'mermaid') {
-            return <MermaidBlock chart={value} variant="dark" />
+            return <MermaidBlock chart={value} variant="dark" onOpenDiagram={onOpenImagePreview} />
           }
           return <CodeBlock language={match[1]} value={value} />
         }
@@ -506,7 +508,7 @@ const MessageBubble = memo(function MessageBubble({ message, onContinueImageEdit
       li: createCitationContainer('li'),
       p: createCitationContainer('p'),
     }
-  }, [message.searchResults])
+  }, [message.searchResults, onOpenImagePreview])
 
   const handleCopyMessage = async () => {
     await navigator.clipboard.writeText(message.content)

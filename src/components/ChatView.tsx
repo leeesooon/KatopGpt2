@@ -1,4 +1,4 @@
-﻿import { useRef, useCallback, useState } from 'react'
+﻿import { useEffect, useRef, useCallback, useState } from 'react'
 import { MessageSquarePlus, Sparkles, ArrowDown } from 'lucide-react'
 import { useChatStore } from '../store/chatStore'
 import { useWorkspaceStore } from '../store/workspaceStore'
@@ -10,12 +10,16 @@ import { SearchApiError } from '../services/searchApi'
 import { readWebPagesFromText, formatWebPageContext } from '../services/webpage'
 import { runAgenticSearch } from '../services/agenticSearch'
 import { buildConversationSummary, buildSmartContextMessages, shouldUpdateConversationSummary } from '../services/contextManager'
-import type { ChatInputMode, ImageAttachment, FileAttachment, SearchResult } from '../types'
+import { buildAssistantSystemPrompt, resolveAssistantProfile, searchAssistantKnowledge } from '../services/assistantProfiles'
+import type { AssistantProfile, ChatInputMode, ImageAttachment, FileAttachment, SearchResult } from '../types'
 import MessageBubble from './MessageBubble'
 import InputArea from './InputArea'
+import ImageZoomViewer from './ImageZoomViewer'
+import RoleAvatar from './RoleAvatar'
 import { useChatScroll } from './useChatScroll'
 import { useChatSideActions } from './useChatSideActions'
 import katopLogo from '../assets/katop-logo.png'
+import type { WorkspaceImageViewPayload } from './workspaceMarkdown'
 
 import {
   buildImageGenerationPrompt,
@@ -56,8 +60,22 @@ interface ImageSeriesChapterState {
   imageName?: string
 }
 
+interface RoleFlashState {
+  key: number
+  name: string
+  description: string
+  emoji: string
+  avatarId?: string
+}
+
 const MIN_IMAGE_SERIES_COUNT = 2
 const MAX_IMAGE_SERIES_COUNT = 8
+const IMAGE_SCALE_MIN = 0.5
+const IMAGE_SCALE_MAX = 4
+
+function clampImageScale(scale: number) {
+  return Math.min(IMAGE_SCALE_MAX, Math.max(IMAGE_SCALE_MIN, Math.round(scale * 100) / 100))
+}
 
 function clampImageSeriesCount(count: number) {
   return Math.min(MAX_IMAGE_SERIES_COUNT, Math.max(MIN_IMAGE_SERIES_COUNT, Math.round(count)))
@@ -198,17 +216,25 @@ export default function ChatView() {
     patchMessage,
     updateConversationTitle,
     updateConversationSummary,
+    setConversationAssistantProfile,
     setConversationStreaming,
     attachSearchResults,
   } = useChatStore()
 
   const abortMapRef = useRef<Map<string, AbortController>>(new Map())
   const imageGenerationRequestMapRef = useRef<Map<string, Set<string>>>(new Map())
+  const roleFlashTimerRef = useRef<number | null>(null)
+  const previousConversationIdRef = useRef<string | null>(null)
   const [streamingDrafts, setStreamingDrafts] = useState<Record<string, string>>({})
   const [inputMode, setInputMode] = useState<ChatInputMode>('chat')
   const [imageReferenceDraft, setImageReferenceDraft] = useState<ImageAttachment | null>(null)
+  const [roleFlash, setRoleFlash] = useState<RoleFlashState | null>(null)
+  const [previewImage, setPreviewImage] = useState<WorkspaceImageViewPayload | null>(null)
+  const [previewScale, setPreviewScale] = useState(1)
+  const [previewOffset, setPreviewOffset] = useState({ x: 0, y: 0 })
 
   const activeConversation = conversations.find((c) => c.id === activeConversationId)
+  const activeAssistantProfileId = activeConversation?.assistantProfileId ?? settings.activeAssistantProfileId
   const messages = activeConversation?.messages ?? []
   const renderedMessages = messages.map((message) => {
     const draftContent = streamingDrafts[message.id]
@@ -242,6 +268,22 @@ export default function ChatView() {
     setImageReferenceDraft,
   })
 
+  const handleOpenImagePreview = useCallback((image: WorkspaceImageViewPayload) => {
+    setPreviewImage(image)
+    setPreviewScale(1)
+    setPreviewOffset({ x: 0, y: 0 })
+  }, [])
+
+  const handleCloseImagePreview = useCallback(() => {
+    setPreviewImage(null)
+    setPreviewScale(1)
+    setPreviewOffset({ x: 0, y: 0 })
+  }, [])
+
+  const handlePreviewScaleChange = useCallback((scale: number) => {
+    setPreviewScale(clampImageScale(scale))
+  }, [])
+
   const registerImageRequest = (conversationId: string, requestId: string) => {
     const requestIds = imageGenerationRequestMapRef.current.get(conversationId) ?? new Set<string>()
     requestIds.add(requestId)
@@ -257,13 +299,63 @@ export default function ChatView() {
     }
   }
 
+  const showRoleFlash = useCallback((profile: AssistantProfile) => {
+    if (roleFlashTimerRef.current !== null) {
+      window.clearTimeout(roleFlashTimerRef.current)
+    }
+
+    setRoleFlash({
+      key: Date.now(),
+      name: profile.name,
+      description: profile.description,
+      emoji: profile.emoji || '★',
+      avatarId: profile.avatarId,
+    })
+    roleFlashTimerRef.current = window.setTimeout(() => {
+      setRoleFlash(null)
+      roleFlashTimerRef.current = null
+    }, 1150)
+  }, [])
+
+  const handleRoleSelected = useCallback((profile: AssistantProfile) => {
+    if (!activeConversationId) return
+    setConversationAssistantProfile(activeConversationId, profile.id)
+    showRoleFlash(profile)
+  }, [activeConversationId, setConversationAssistantProfile, showRoleFlash])
+
+  useEffect(() => {
+    if (!activeConversationId) {
+      previousConversationIdRef.current = null
+      return
+    }
+
+    const previousConversationId = previousConversationIdRef.current
+    previousConversationIdRef.current = activeConversationId
+    if (!previousConversationId || previousConversationId === activeConversationId) return
+
+    const profile = resolveAssistantProfile(settings, activeAssistantProfileId)
+    if (profile) {
+      showRoleFlash(profile)
+    }
+  }, [activeAssistantProfileId, activeConversationId, settings, showRoleFlash])
+
+  useEffect(() => {
+    return () => {
+      if (roleFlashTimerRef.current !== null) {
+        window.clearTimeout(roleFlashTimerRef.current)
+      }
+    }
+  }, [])
+
   const handleSend = async (content: string, images: ImageAttachment[], files: FileAttachment[], options?: ImageSeriesSendOptions) => {
     let convId = activeConversationId
     if (!convId) {
       convId = createConversation()
     }
 
-    const previousMessages = useChatStore.getState().conversations.find((c) => c.id === convId)?.messages ?? []
+    const conversationForRequest = useChatStore.getState().conversations.find((c) => c.id === convId)
+    const previousMessages = conversationForRequest?.messages ?? []
+    const assistantProfileIdForRequest = conversationForRequest?.assistantProfileId ?? settings.activeAssistantProfileId
 
     if (inputMode === 'image') {
       const imageConfig = resolveImageGenerationConfig(settings)
@@ -842,6 +934,8 @@ export default function ChatView() {
     let referenceSources: SearchResult[] = []
     const referenceSections: string[] = []
     const apiKey = settings.searchEngine === 'tavily' ? settings.tavilyApiKey : settings.serperApiKey
+    const knowledgeResult = searchAssistantKnowledge(settings, messageContent, assistantProfileIdForRequest)
+    const assistantSystemPrompt = buildAssistantSystemPrompt(settings, knowledgeResult.context || undefined, assistantProfileIdForRequest)
 
     const webPages = await readWebPagesFromText(messageContent)
     if (webPages.sources.length > 0) {
@@ -923,7 +1017,7 @@ export default function ChatView() {
       const stream = streamChat(
         apiConfig,
         currentMessages,
-        settings.systemPrompt,
+        assistantSystemPrompt,
         settings.temperature,
         settings.maxTokens,
         abortController.signal,
@@ -962,7 +1056,9 @@ export default function ChatView() {
 
       // Attach reference sources if any
       if (referenceSources.length > 0) {
-        attachSearchResults(convId!, assistantMsg.id, referenceSources)
+        attachSearchResults(convId!, assistantMsg.id, [...referenceSources, ...knowledgeResult.sources])
+      } else if (knowledgeResult.sources.length > 0) {
+        attachSearchResults(convId!, assistantMsg.id, knowledgeResult.sources)
       }
     } catch (err: unknown) {
       cancelPendingMessageUpdate()
@@ -1040,7 +1136,23 @@ export default function ChatView() {
   }
 
   return (
-    <div className="flex-1 flex flex-col min-w-0">
+    <div className="relative flex-1 flex flex-col min-w-0">
+      {roleFlash && (
+        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center pb-24">
+          <div key={roleFlash.key} className="role-flash-card">
+            <RoleAvatar avatarId={roleFlash.avatarId} emoji={roleFlash.emoji} size="xl" />
+            <div className="mt-3 text-center">
+              <div className="text-sm font-semibold text-amber-50">已切换角色</div>
+              <div className="mt-0.5 text-base font-semibold text-surface-100">{roleFlash.name}</div>
+              {roleFlash.description && (
+                <div className="mt-1 max-w-56 truncate text-xs text-surface-400">
+                  {roleFlash.description}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       {/* Messages */}
       <div className="flex-1 overflow-y-auto relative" ref={scrollContainerRef}>
         <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
@@ -1051,7 +1163,12 @@ export default function ChatView() {
             </div>
           )}
           {renderedMessages.map((msg) => (
-            <MessageBubble key={msg.id} message={msg} onContinueImageEdit={handleContinueImageEdit} />
+            <MessageBubble
+              key={msg.id}
+              message={msg}
+              onContinueImageEdit={handleContinueImageEdit}
+              onOpenImagePreview={handleOpenImagePreview}
+            />
           ))}
 
           <div ref={messagesEndRef} />
@@ -1090,6 +1207,16 @@ export default function ChatView() {
         isImageGenerating={isImageGenerating}
         disabled={!apiConfigured}
         contextStats={contextStats}
+        activeAssistantProfileId={activeAssistantProfileId}
+        onRoleSelected={handleRoleSelected}
+      />
+      <ImageZoomViewer
+        image={previewImage}
+        scale={previewScale}
+        offset={previewOffset}
+        onScaleChange={handlePreviewScaleChange}
+        onOffsetChange={setPreviewOffset}
+        onClose={handleCloseImagePreview}
       />
     </div>
   )

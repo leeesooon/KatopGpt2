@@ -1,14 +1,22 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { v4 as uuidv4 } from 'uuid'
-import type { Conversation, Message, AppSettings, ApiProvider, ModelSelection, ModelConfig, SearchResult } from '../types'
+import type { Conversation, Message, AppSettings, ApiProvider, ModelSelection, ModelConfig, SearchResult, AssistantProfile, KnowledgeDocument } from '../types'
 import { DEFAULT_SETTINGS } from '../types'
+import {
+  cloneProfileAsCustom,
+  getDefaultAssistantProfiles,
+  mergeBuiltInAssistantProfiles,
+  resolveDefaultAssistantProfile,
+  resetBuiltInProfile,
+} from '../services/assistantProfiles'
 
 interface ChatState {
   conversations: Conversation[]
   activeConversationId: string | null
   settings: AppSettings
   isSettingsOpen: boolean
+  isAssistantProfilesOpen: boolean
   /** Set of conversation IDs currently streaming */
   streamingConvIds: string[]
   /** Enable web search for current message */
@@ -21,6 +29,7 @@ interface ChatState {
   setActiveConversation: (id: string) => void
   updateConversationTitle: (id: string, title: string) => void
   updateConversationSummary: (id: string, summary: Conversation['summary']) => void
+  setConversationAssistantProfile: (conversationId: string, profileId: string) => void
 
   // Message actions
   addMessage: (conversationId: string, message: Omit<Message, 'id' | 'timestamp'>) => Message
@@ -39,6 +48,18 @@ interface ChatState {
   // Settings actions
   updateSettings: (settings: Partial<Pick<AppSettings, 'systemPrompt' | 'temperature' | 'maxTokens' | 'contextWindowSize' | 'searchEngine' | 'serperApiKey' | 'tavilyApiKey' | 'enableSearchByDefault' | 'imageGeneration'>>) => void
   setSettingsOpen: (open: boolean) => void
+  setAssistantProfilesOpen: (open: boolean) => void
+
+  // Assistant profile actions
+  createAssistantProfile: (profile: Omit<AssistantProfile, 'id' | 'createdAt' | 'updatedAt' | 'knowledgeDocuments'> & { knowledgeDocuments?: KnowledgeDocument[] }) => string
+  updateAssistantProfile: (id: string, updates: Partial<Omit<AssistantProfile, 'id' | 'createdAt'>>) => void
+  duplicateAssistantProfile: (id: string) => string | null
+  deleteAssistantProfile: (id: string) => void
+  resetAssistantProfile: (id: string) => void
+  setDefaultAssistantProfile: (id: string) => void
+  addKnowledgeDocument: (profileId: string, document: KnowledgeDocument) => void
+  updateKnowledgeDocument: (profileId: string, documentId: string, updates: Partial<Omit<KnowledgeDocument, 'id' | 'createdAt'>>) => void
+  deleteKnowledgeDocument: (profileId: string, documentId: string) => void
 
   // Streaming — per conversation
   setConversationStreaming: (convId: string, streaming: boolean) => void
@@ -53,17 +74,24 @@ export const useChatStore = create<ChatState>()(
     (set, get) => ({
       conversations: [],
       activeConversationId: null,
-      settings: DEFAULT_SETTINGS,
+      settings: {
+        ...DEFAULT_SETTINGS,
+        assistantProfiles: getDefaultAssistantProfiles(),
+        activeAssistantProfileId: 'builtin-general',
+      },
       isSettingsOpen: false,
+      isAssistantProfilesOpen: false,
       streamingConvIds: [],
       searchEnabled: false,
 
       createConversation: () => {
         const id = uuidv4()
+        const defaultProfile = resolveDefaultAssistantProfile(get().settings)
         const conversation: Conversation = {
           id,
           title: '新对话',
           messages: [],
+          assistantProfileId: defaultProfile?.id,
           createdAt: Date.now(),
           updatedAt: Date.now(),
         }
@@ -104,6 +132,16 @@ export const useChatStore = create<ChatState>()(
         set((state) => ({
           conversations: state.conversations.map((c) =>
             c.id === id ? { ...c, summary, updatedAt: Date.now() } : c
+          ),
+        }))
+      },
+
+      setConversationAssistantProfile: (conversationId, profileId) => {
+        set((state) => ({
+          conversations: state.conversations.map((conversation) =>
+            conversation.id === conversationId
+              ? { ...conversation, assistantProfileId: profileId, updatedAt: Date.now() }
+              : conversation
           ),
         }))
       },
@@ -237,6 +275,185 @@ export const useChatStore = create<ChatState>()(
       },
 
       setSettingsOpen: (open) => set({ isSettingsOpen: open }),
+      setAssistantProfilesOpen: (open) => set({ isAssistantProfilesOpen: open }),
+
+      createAssistantProfile: (profile) => {
+        const id = uuidv4()
+        const now = Date.now()
+        const newProfile: AssistantProfile = {
+          ...profile,
+          id,
+          isBuiltIn: false,
+          isHidden: false,
+          knowledgeDocuments: profile.knowledgeDocuments ?? [],
+          createdAt: now,
+          updatedAt: now,
+        }
+        set((state) => ({
+          settings: {
+            ...state.settings,
+            assistantProfiles: [...state.settings.assistantProfiles, newProfile],
+          },
+        }))
+        return id
+      },
+
+      updateAssistantProfile: (id, updates) => {
+        set((state) => {
+          const updatedProfiles = state.settings.assistantProfiles.map((profile) =>
+              profile.id === id
+                ? { ...profile, ...updates, updatedAt: Date.now() }
+                : profile
+          )
+          const currentDefault = updatedProfiles.find((profile) => profile.id === state.settings.activeAssistantProfileId)
+          const fallback = updatedProfiles.find((profile) => profile.isDefault && !profile.isHidden)
+            ?? updatedProfiles.find((profile) => !profile.isHidden)
+            ?? null
+          const activeAssistantProfileId = currentDefault && !currentDefault.isHidden
+            ? currentDefault.id
+            : fallback?.id ?? null
+
+          return {
+            settings: {
+              ...state.settings,
+              activeAssistantProfileId,
+              assistantProfiles: updatedProfiles.map((profile) => ({
+                ...profile,
+                isDefault: profile.id === activeAssistantProfileId,
+              })),
+            },
+          }
+        })
+      },
+
+      duplicateAssistantProfile: (id) => {
+        const profile = get().settings.assistantProfiles.find((item) => item.id === id)
+        if (!profile) return null
+        const duplicate = cloneProfileAsCustom(profile, uuidv4())
+        set((state) => ({
+          settings: {
+            ...state.settings,
+            assistantProfiles: [...state.settings.assistantProfiles, duplicate],
+          },
+        }))
+        return duplicate.id
+      },
+
+      deleteAssistantProfile: (id) => {
+        set((state) => {
+          const target = state.settings.assistantProfiles.find((profile) => profile.id === id)
+          if (!target) return {}
+
+          const assistantProfiles = target.isBuiltIn
+            ? state.settings.assistantProfiles.map((profile) =>
+                profile.id === id ? { ...profile, isHidden: true, updatedAt: Date.now() } : profile
+              )
+            : state.settings.assistantProfiles.filter((profile) => profile.id !== id)
+          const visibleProfiles = assistantProfiles.filter((profile) => !profile.isHidden)
+          const fallback = visibleProfiles.find((profile) => profile.isDefault) ?? visibleProfiles[0] ?? null
+          const activeAssistantProfileId = state.settings.activeAssistantProfileId === id || target.isDefault
+            ? fallback?.id ?? null
+            : state.settings.activeAssistantProfileId
+          const conversations = state.conversations.map((conversation) =>
+            conversation.assistantProfileId === id
+              ? { ...conversation, assistantProfileId: fallback?.id, updatedAt: Date.now() }
+              : conversation
+          )
+
+          return {
+            conversations,
+            settings: {
+              ...state.settings,
+              assistantProfiles: assistantProfiles.map((profile) => ({
+                ...profile,
+                isDefault: profile.id === activeAssistantProfileId,
+              })),
+              activeAssistantProfileId,
+            },
+          }
+        })
+      },
+
+      resetAssistantProfile: (id) => {
+        set((state) => ({
+          settings: {
+            ...state.settings,
+            assistantProfiles: state.settings.assistantProfiles.map((profile) =>
+              profile.id === id ? resetBuiltInProfile(profile) : profile
+            ),
+          },
+        }))
+      },
+
+      setDefaultAssistantProfile: (id) => {
+        set((state) => ({
+          settings: {
+            ...state.settings,
+            activeAssistantProfileId: id,
+            assistantProfiles: state.settings.assistantProfiles.map((profile) => ({
+              ...profile,
+              isDefault: profile.id === id,
+              isHidden: profile.id === id ? false : profile.isHidden,
+              updatedAt: profile.id === id ? Date.now() : profile.updatedAt,
+            })),
+          },
+        }))
+      },
+
+      addKnowledgeDocument: (profileId, document) => {
+        set((state) => ({
+          settings: {
+            ...state.settings,
+            assistantProfiles: state.settings.assistantProfiles.map((profile) =>
+              profile.id === profileId
+                ? {
+                    ...profile,
+                    knowledgeDocuments: [...profile.knowledgeDocuments, document],
+                    updatedAt: Date.now(),
+                  }
+                : profile
+            ),
+          },
+        }))
+      },
+
+      updateKnowledgeDocument: (profileId, documentId, updates) => {
+        set((state) => ({
+          settings: {
+            ...state.settings,
+            assistantProfiles: state.settings.assistantProfiles.map((profile) =>
+              profile.id === profileId
+                ? {
+                    ...profile,
+                    knowledgeDocuments: profile.knowledgeDocuments.map((document) =>
+                      document.id === documentId
+                        ? { ...document, ...updates, updatedAt: Date.now() }
+                        : document
+                    ),
+                    updatedAt: Date.now(),
+                  }
+                : profile
+            ),
+          },
+        }))
+      },
+
+      deleteKnowledgeDocument: (profileId, documentId) => {
+        set((state) => ({
+          settings: {
+            ...state.settings,
+            assistantProfiles: state.settings.assistantProfiles.map((profile) =>
+              profile.id === profileId
+                ? {
+                    ...profile,
+                    knowledgeDocuments: profile.knowledgeDocuments.filter((document) => document.id !== documentId),
+                    updatedAt: Date.now(),
+                  }
+                : profile
+            ),
+          },
+        }))
+      },
 
       setConversationStreaming: (convId, streaming) =>
         set((state) => ({
@@ -269,7 +486,7 @@ export const useChatStore = create<ChatState>()(
     }),
     {
       name: 'katop-gpt-storage',
-      version: 8,
+      version: 11,
       partialize: (state) => ({
         conversations: state.conversations,
         activeConversationId: state.activeConversationId,
@@ -403,6 +620,43 @@ export const useChatStore = create<ChatState>()(
               count: 1,
             }
           }
+        }
+        if (version <= 8) {
+          const settings = state.settings as AppSettings | undefined
+          if (settings) {
+            settings.assistantProfiles = mergeBuiltInAssistantProfiles(settings.assistantProfiles)
+            settings.activeAssistantProfileId = settings.activeAssistantProfileId
+              ?? settings.assistantProfiles.find((profile) => profile.isDefault && !profile.isHidden)?.id
+              ?? settings.assistantProfiles.find((profile) => !profile.isHidden)?.id
+              ?? null
+          }
+        }
+        const settings = state.settings as AppSettings | undefined
+        if (settings) {
+          settings.assistantProfiles = mergeBuiltInAssistantProfiles(settings.assistantProfiles)
+          settings.activeAssistantProfileId = settings.activeAssistantProfileId
+            ?? settings.assistantProfiles.find((profile) => profile.isDefault && !profile.isHidden)?.id
+            ?? settings.assistantProfiles.find((profile) => !profile.isHidden)?.id
+            ?? null
+          settings.assistantProfiles = settings.assistantProfiles.map((profile) => ({
+            ...profile,
+            isDefault: profile.id === settings.activeAssistantProfileId,
+          }))
+        } else {
+          state.settings = {
+            ...DEFAULT_SETTINGS,
+            assistantProfiles: getDefaultAssistantProfiles(),
+            activeAssistantProfileId: 'builtin-general',
+          }
+        }
+        const finalSettings = state.settings as AppSettings
+        const defaultAssistantProfileId = resolveDefaultAssistantProfile(finalSettings)?.id
+        const conversations = state.conversations as Conversation[] | undefined
+        if (Array.isArray(conversations)) {
+          state.conversations = conversations.map((conversation) => ({
+            ...conversation,
+            assistantProfileId: conversation.assistantProfileId ?? defaultAssistantProfileId,
+          }))
         }
         return state as unknown as ChatState
       },

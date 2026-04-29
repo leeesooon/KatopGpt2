@@ -55,7 +55,7 @@ export default function DocumentPreview({ content, workspaceRootPath, onScroll, 
       const value = String(children).replace(/\n$/, '')
 
       if (match?.[1] === 'mermaid') {
-        return <MermaidBlock chart={value} variant="paper" />
+        return <MermaidBlock chart={value} variant="paper" onOpenDiagram={onImageOpen} />
       }
 
       return (

@@ -21,7 +21,7 @@ import type { DocumentAgentMode, DocumentEditorMode } from '../types'
 import WorkspaceFileTree from './WorkspaceFileTree'
 import DocumentEditor from './DocumentEditor'
 import type { DocumentEditorHandle } from './DocumentEditor'
-import DocumentImageViewer from './DocumentImageViewer'
+import ImageZoomViewer from './ImageZoomViewer'
 import DocumentPreview from './DocumentPreview'
 import DocumentAssistantPanel from './DocumentAssistantPanel'
 import DocumentOutline, { buildMarkdownOutline } from './DocumentOutline'
@@ -707,7 +707,7 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
           </section>
         </div>
       </div>
-      <DocumentImageViewer
+      <ImageZoomViewer
         image={viewerImage}
         scale={viewerScale}
         offset={viewerOffset}

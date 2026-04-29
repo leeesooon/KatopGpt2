@@ -83,6 +83,45 @@
            focus:outline-none focus:border-primary-500/60 focus:ring-1 focus:ring-primary-500/30
            transition-all duration-200 text-sm;
   }
+
+  .role-flash-card {
+    @apply flex flex-col items-center rounded-[28px] border border-amber-200/20 bg-surface-950/90 px-8 py-7 shadow-2xl backdrop-blur-2xl;
+    animation: roleFlashPop 1.15s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    box-shadow:
+      0 30px 90px rgba(0, 0, 0, 0.42),
+      0 0 70px rgba(251, 191, 36, 0.18),
+      inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  }
+
+  .role-flash-icon {
+    @apply flex h-24 w-24 items-center justify-center rounded-[24px] border border-amber-200/20 bg-amber-200/10 text-5xl text-amber-50;
+    box-shadow:
+      0 18px 50px rgba(251, 191, 36, 0.16),
+      inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  }
+}
+
+@keyframes roleFlashPop {
+  0% {
+    opacity: 0;
+    transform: translateY(12px) scale(0.78);
+    filter: blur(8px);
+  }
+  18% {
+    opacity: 1;
+    transform: translateY(0) scale(1.08);
+    filter: blur(0);
+  }
+  42% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-14px) scale(0.92);
+    filter: blur(4px);
+  }
 }
 
 /* Markdown content styles */
@@ -415,6 +454,24 @@
 .mermaid-diagram svg {
   max-width: 100%;
   height: auto;
+}
+
+.image-zoom-viewer-svg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.image-zoom-viewer-svg svg {
+  display: block;
+  max-width: min(100%, 90vw);
+  max-height: 100%;
+  height: auto;
+  background: transparent;
+}
+
+.image-zoom-viewer-svg svg foreignObject {
+  overflow: visible;
 }
 
 .workspace-markdown .mermaid-shell code,

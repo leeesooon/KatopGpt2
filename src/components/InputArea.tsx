@@ -1,9 +1,14 @@
 ﻿import { useEffect, useMemo, useRef, useState } from 'react'
-import { Send, Square, ImagePlus, Paperclip, X, FileText, Search, Loader2, SquareArrowOutUpRight, Download, Sparkles } from 'lucide-react'
+import {
+  Send, Square, ImagePlus, Paperclip, X, FileText, Search, Loader2,
+  SquareArrowOutUpRight, Download, Sparkles, ChevronUp, Check, SlidersHorizontal,
+} from 'lucide-react'
 import ModelSelector from './ModelSelector'
+import RoleAvatar from './RoleAvatar'
 import { useChatStore } from '../store/chatStore'
 import { useWorkspaceStore } from '../store/workspaceStore'
-import type { ChatInputMode, DocumentAgentMode, ImageAttachment, FileAttachment } from '../types'
+import { buildAssistantSystemPrompt, resolveAssistantProfile } from '../services/assistantProfiles'
+import type { AssistantProfile, ChatInputMode, DocumentAgentMode, ImageAttachment, FileAttachment } from '../types'
 import {
   FILE_INPUT_ACCEPT,
   IMAGE_PROMPT_PRESETS,
@@ -39,6 +44,8 @@ interface InputAreaProps {
     messageCount: number
     messageChars: number
   }
+  activeAssistantProfileId?: string | null
+  onRoleSelected?: (profile: AssistantProfile) => void
 }
 
 export default function InputArea({
@@ -56,8 +63,15 @@ export default function InputArea({
   isImageGenerating = false,
   disabled,
   contextStats,
+  activeAssistantProfileId,
+  onRoleSelected,
 }: InputAreaProps) {
-  const { searchEnabled, setSearchEnabled, settings } = useChatStore()
+  const {
+    searchEnabled,
+    setSearchEnabled,
+    settings,
+    setAssistantProfilesOpen,
+  } = useChatStore()
   const {
     pendingAction,
     composerDraft,
@@ -72,10 +86,12 @@ export default function InputArea({
   const [imageSeriesCount, setImageSeriesCount] = useState(4)
   const [imageSeriesMode, setImageSeriesMode] = useState<'template_parallel' | 'sequential'>('template_parallel')
   const [isDragOver, setIsDragOver] = useState(false)
+  const [isRoleSelectorOpen, setIsRoleSelectorOpen] = useState(false)
   const [expandedFileId, setExpandedFileId] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const roleSelectorRef = useRef<HTMLDivElement>(null)
   const dragCounterRef = useRef(0)
   const previousInputModeRef = useRef<ChatInputMode>(inputMode)
   const isImageMode = inputMode === 'image'
@@ -153,6 +169,19 @@ export default function InputArea({
       }
     }
   }, [])
+
+  useEffect(() => {
+    if (!isRoleSelectorOpen) return
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!roleSelectorRef.current?.contains(event.target as Node)) {
+        setIsRoleSelectorOpen(false)
+      }
+    }
+
+    document.addEventListener('mousedown', handlePointerDown)
+    return () => document.removeEventListener('mousedown', handlePointerDown)
+  }, [isRoleSelectorOpen])
 
   const adjustHeight = () => {
     const el = textareaRef.current
@@ -277,7 +306,7 @@ export default function InputArea({
 
   const contextIndicator = useMemo(() => {
     const draftChars = input.trim().length
-    const systemChars = settings.systemPrompt.trim().length
+    const systemChars = buildAssistantSystemPrompt(settings, undefined, activeAssistantProfileId).trim().length
     const totalChars = systemChars + contextStats.messageChars + draftChars
     const estimatedTokens = Math.max(1, Math.round(totalChars / 2))
 
@@ -286,9 +315,20 @@ export default function InputArea({
       totalChars,
       estimatedTokens,
     }
-  }, [contextStats.messageChars, contextStats.messageCount, input, settings.systemPrompt])
+  }, [activeAssistantProfileId, contextStats.messageChars, contextStats.messageCount, input, settings])
 
   const isDocumentAssistantOpen = isPanelVisible || workspaceWindowOpen
+  const activeAssistant = resolveAssistantProfile(settings, activeAssistantProfileId)
+  const visibleAssistantProfiles = settings.assistantProfiles.filter((profile) => !profile.isHidden)
+  const enabledKnowledgeCount = activeAssistant?.knowledgeDocuments.filter((document) => document.enabled).length ?? 0
+
+  const handleSelectRole = (profileId: string) => {
+    const selectedProfile = visibleAssistantProfiles.find((profile) => profile.id === profileId)
+    setIsRoleSelectorOpen(false)
+    if (selectedProfile) {
+      onRoleSelected?.(selectedProfile)
+    }
+  }
 
   const handleToggleDocumentAssistant = async () => {
     if (isDocumentAssistantOpen) {
@@ -347,11 +387,87 @@ export default function InputArea({
 
       <div className="max-w-3xl mx-auto">
         <div className="mb-2 flex items-center gap-2">
-          <div className="inline-flex rounded-full border border-white/10 bg-white/5 p-0.5 text-xs">
+          {!isImageMode && activeAssistant && (
+            <div ref={roleSelectorRef} className="relative">
+              {isRoleSelectorOpen && (
+                <div className="absolute bottom-full left-0 z-30 mb-2 w-72 overflow-hidden rounded-2xl border border-amber-300/20 bg-surface-950/95 shadow-2xl shadow-black/35 backdrop-blur-xl animate-slide-up">
+                  <div className="border-b border-white/8 px-3 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs font-medium text-amber-100">选择角色</p>
+                      <button
+                        onClick={() => {
+                          setAssistantProfilesOpen(true)
+                          setIsRoleSelectorOpen(false)
+                        }}
+                        className="inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] text-surface-400 transition hover:bg-white/10 hover:text-white"
+                      >
+                        <SlidersHorizontal size={12} />
+                        配置
+                      </button>
+                    </div>
+                  </div>
+                  <div className="max-h-72 overflow-y-auto p-2">
+                    {visibleAssistantProfiles.map((profile) => {
+                      const isActiveRole = profile.id === activeAssistant.id
+                      const profileKnowledgeCount = profile.knowledgeDocuments.filter((document) => document.enabled).length
+
+                      return (
+                        <button
+                          key={profile.id}
+                          onClick={() => handleSelectRole(profile.id)}
+                          className={`flex w-full items-start gap-2.5 rounded-xl px-2.5 py-2 text-left transition ${
+                            isActiveRole
+                              ? 'bg-amber-300/12 text-amber-50'
+                              : 'text-surface-300 hover:bg-white/[0.06] hover:text-white'
+                          }`}
+                        >
+                          <RoleAvatar avatarId={profile.avatarId} emoji={profile.emoji} size="xs" className="mt-0.5" />
+                          <span className="min-w-0 flex-1">
+                            <span className="flex items-center gap-1.5">
+                              <span className="truncate text-sm font-medium">{profile.name}</span>
+                              {isActiveRole && <Check size={13} className="shrink-0 text-amber-200" />}
+                            </span>
+                            <span className="mt-0.5 line-clamp-1 text-[11px] text-surface-500">
+                              {profileKnowledgeCount > 0
+                                ? `${profile.description || '自定义角色'} · ${profileKnowledgeCount} 个知识资料`
+                                : profile.description || '自定义角色'}
+                            </span>
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+              <button
+                onClick={() => setIsRoleSelectorOpen((open) => !open)}
+                className={`group/role inline-flex h-8 items-center overflow-hidden rounded-full border border-amber-300/20 bg-amber-300/10 text-xs text-amber-50 transition-[max-width,border-color,background-color,box-shadow] duration-200 hover:max-w-[224px] hover:border-amber-200/30 hover:bg-amber-300/15 focus-visible:max-w-[224px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/25 ${
+                  isRoleSelectorOpen ? 'max-w-[224px]' : 'max-w-8'
+                }`}
+                title={`角色：${activeAssistant.name}`}
+              >
+                <span className="flex h-8 w-8 shrink-0 items-center justify-center">
+                  <RoleAvatar avatarId={activeAssistant.avatarId} emoji={activeAssistant.emoji} size="xs" />
+                </span>
+                <span className={`flex w-max min-w-0 items-center gap-1.5 pr-2 transition-opacity duration-200 ${
+                  isRoleSelectorOpen
+                    ? 'opacity-100'
+                    : 'opacity-0 group-hover/role:opacity-100 group-focus-visible/role:opacity-100'
+                }`}>
+                  <span className="max-w-[132px] truncate">角色：{activeAssistant.name}</span>
+                  {enabledKnowledgeCount > 0 && (
+                    <span className="shrink-0 text-amber-200/80">+{enabledKnowledgeCount} 资料</span>
+                  )}
+                  <ChevronUp size={13} className={`shrink-0 text-amber-200/80 transition ${isRoleSelectorOpen ? 'rotate-180' : ''}`} />
+                </span>
+              </button>
+            </div>
+          )}
+          <div className="inline-flex h-8 items-center rounded-full border border-white/10 bg-white/5 p-0.5 text-xs">
             <button
               onClick={() => onInputModeChange('chat')}
               disabled={isStreaming}
-              className={`rounded-full px-3 py-1 transition disabled:opacity-50 ${
+              className={`h-7 rounded-full px-3 transition disabled:opacity-50 ${
                 !isImageMode ? 'bg-primary-500/20 text-primary-200' : 'text-surface-400 hover:text-white'
               }`}
               title="切换到聊天模式"
@@ -361,7 +477,7 @@ export default function InputArea({
             <button
               onClick={() => onInputModeChange('image')}
               disabled={isStreaming}
-              className={`inline-flex items-center gap-1 rounded-full px-3 py-1 transition disabled:opacity-50 ${
+              className={`inline-flex h-7 items-center gap-1 rounded-full px-3 transition disabled:opacity-50 ${
                 isImageMode ? 'bg-fuchsia-500/20 text-fuchsia-200' : 'text-surface-400 hover:text-white'
               }`}
               title="切换到生图模式"
@@ -374,7 +490,7 @@ export default function InputArea({
             <button
               onClick={() => void handleToggleDocumentAssistant()}
               disabled={isImageMode}
-              className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-surface-300 transition hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              className="inline-flex h-8 items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 text-xs text-surface-300 transition hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
               title="打开文档助手"
             >
               <SquareArrowOutUpRight size={14} />
@@ -385,7 +501,7 @@ export default function InputArea({
             <button
               onClick={onExportSpreadsheet}
               disabled={disabled || isExportingSpreadsheet}
-              className="inline-flex items-center gap-2 rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1.5 text-xs text-emerald-100 transition hover:bg-emerald-300/15 disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex h-8 items-center gap-2 rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 text-xs text-emerald-100 transition hover:bg-emerald-300/15 disabled:cursor-not-allowed disabled:opacity-50"
               title={spreadsheetName ? `导出当前表格：${spreadsheetName}` : '导出当前表格'}
             >
               {isExportingSpreadsheet ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}

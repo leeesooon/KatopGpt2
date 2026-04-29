@@ -4,6 +4,7 @@ import Sidebar from './components/Sidebar'
 import ChatView from './components/ChatView'
 import DocumentWorkspace from './components/DocumentWorkspace'
 import SettingsModal from './components/SettingsModal'
+import AssistantProfileModal from './components/AssistantProfileModal'
 
 export default function App() {
   const isWorkspaceWindow = useMemo(() => {
@@ -33,6 +34,7 @@ export default function App() {
         <DocumentWorkspace />
       </div>
       <SettingsModal />
+      <AssistantProfileModal />
       </div>
     </div>
   )

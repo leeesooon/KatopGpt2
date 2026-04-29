@@ -10,6 +10,7 @@ import type {
 import type {
   SpreadsheetExecutionPlan,
   SpreadsheetIntentParseResult,
+  SpreadsheetPlanFilter,
 } from '../../electron/shared/spreadsheetPlan'
 import {
   spreadsheetPlannerResultSchema,
@@ -130,6 +131,77 @@ type SpreadsheetPlannerFailureReason =
 
 function logSpreadsheetPlanner(reason: SpreadsheetPlannerFailureReason, details: Record<string, unknown>) {
   console.warn('[spreadsheet-planner]', reason, details)
+}
+
+function inferSpreadsheetRateLabel(instruction: string) {
+  if (/未完成率/i.test(instruction)) return '未完成率'
+  if (/不合格率/i.test(instruction)) return '不合格率'
+  if (/不良率/i.test(instruction)) return '不良率'
+  if (/失败率/i.test(instruction)) return '失败率'
+  if (/成功率/i.test(instruction)) return '成功率'
+  if (/通过率/i.test(instruction)) return '通过率'
+  if (/合格率/i.test(instruction)) return '合格率'
+  if (/完成率/i.test(instruction)) return '完成率'
+  if (/(占比|比例|分布)/i.test(instruction)) return '占比'
+  if (/率/i.test(instruction)) return '率'
+  return null
+}
+
+function doesFilterMatchRateLabel(filter: SpreadsheetPlanFilter, rateLabel: string) {
+  const text = `${filter.column}${filter.value}`
+  if (rateLabel === '未完成率') return /未完成/i.test(text)
+  if (rateLabel === '不合格率') return /不合格/i.test(text)
+  if (rateLabel === '不良率') return /不良/i.test(text)
+  if (rateLabel === '失败率') return /失败/i.test(text)
+  if (rateLabel === '成功率') return /成功/i.test(text)
+  if (rateLabel === '通过率') return /已通过|通过/i.test(text)
+  if (rateLabel === '合格率') return /合格/i.test(text)
+  if (rateLabel === '完成率') return /已完成|完成/i.test(text) && !/未完成/i.test(text)
+  return false
+}
+
+function normalizeSpreadsheetRatePlan(plan: SpreadsheetExecutionPlan, instruction: string): SpreadsheetExecutionPlan {
+  const rateLabel = inferSpreadsheetRateLabel(instruction)
+  if (!rateLabel) {
+    return plan
+  }
+
+  const isAggregationLike = plan.intent === 'count' || plan.intent === 'analysis' || plan.intent === 'aggregation'
+  if (!isAggregationLike && plan.intent !== 'rate') {
+    return plan
+  }
+
+  const nextPlan: SpreadsheetExecutionPlan = {
+    ...plan,
+    intent: 'rate',
+    rateLabel: plan.rateLabel ?? rateLabel,
+  }
+
+  if ((!nextPlan.rateFilters || nextPlan.rateFilters.length === 0) && plan.filters?.length) {
+    const rateFilters = plan.filters.filter((filter) => doesFilterMatchRateLabel(filter, rateLabel))
+    if (rateFilters.length > 0) {
+      nextPlan.filters = plan.filters.filter((filter) => !doesFilterMatchRateLabel(filter, rateLabel))
+      nextPlan.rateFilters = rateFilters
+    }
+  }
+
+  return nextPlan
+}
+
+function normalizeSpreadsheetIntentResult(result: SpreadsheetIntentParseResult | null, instruction: string) {
+  if (!result?.plan) {
+    return result
+  }
+
+  const normalizedPlan = normalizeSpreadsheetRatePlan(result.plan, instruction)
+  if (normalizedPlan === result.plan) {
+    return result
+  }
+
+  return {
+    ...result,
+    plan: normalizedPlan,
+  }
 }
 
 const MAX_FILE_CONTEXT_CHARS = 30000
@@ -642,7 +714,9 @@ export async function parseSpreadsheetIntent(
     '如果只是普通问答、解释结果、闲聊，则 shouldExecute=false。',
     '如果用户用了口语化表达，比如“有多少”“做个图”“顺便画个图”“按刚才那个结果画一下”“导出来”，也要尽量改写成可执行指令。',
     '如果用户提到“人数”“多少人”“每个部门多少人”，通常应理解为 count 计数。',
-    '如果用户提到“岗位分布”“部门分布”“占比分布”“人员分布”，通常应理解为先按对应字段分组计数；未明确图表类型但明显要看分布时，可默认柱状图。',
+    '如果用户提到“未完成率”“完成率”“通过率”“合格率”“不良率”“成功率”“失败率”，通常应理解为 rate：按分组统计某个条件在总量中的占比。',
+    '如果用户只是想筛选后统计总条数，例如“待下内容包含烘箱，统计数量”，不要强行补分组列；可以直接用 filter + aggregate(count)。',
+    '如果用户提到“岗位分布”“部门分布”“占比分布”“人员分布”“部门占比”“岗位占比”，通常应理解为先按对应字段分组计数或占比；未明确图表类型但明显要看分布时，可默认柱状图。',
     '如果用户没有明确图表类型但明确要画图，默认改写成“生成柱状图”。',
     '如果用户没有重复说明分组字段，但最近上下文里已有刚生成的统计结果，可以沿用最近那次统计意图。',
     `你必须调用函数 ${spreadsheetPlannerToolDefinition.function.name} 返回结果，不要输出额外自然语言。`,
@@ -652,8 +726,9 @@ export async function parseSpreadsheetIntent(
     'aggregate.metrics.type 只能是 count / sum / avg。',
     'chart.chartType 只能是 bar / line / pie / horizontalBar。',
     '如果需要兼容旧执行器，也可补充 groupByColumns/valueColumn/filters/selectColumns/sortBy/topN/chartType 等顶层字段，但 steps 是首选。',
+    '如果用户在问“率/占比/比例”，可以补充 rateLabel 和 rateFilters；rateFilters 只表示分子条件，filters 仍然表示公共筛选条件。',
     'filters 里的 operator 只能是 eq / contains / gt / gte / lt / lte。',
-    'intent 只能是 analysis / detail_filter / aggregation / chart / export / script。',
+    'intent 只能是 analysis / detail_filter / aggregation / rate / chart / export / script。',
     '只有当内建操作明显不够时，才使用 script。script.language 只能使用 python。',
     'python script 会收到这些预定义变量：INPUT_WORKBOOK, SCHEMA_PATH, OUTPUT_DIR, RESULT_PATH, SESSION_INFO。脚本必须把标准 JSON 结果写入 RESULT_PATH。',
     'RESULT_PATH JSON 推荐结构：{"ok":true,"message":"...","createdSheetNames":["..."],"exportedFilePath":"...xlsx","chartPaths":["...png"],"preview":{"headers":[...],"rows":[...]}}。失败时写 {"ok": false, "error": "..."}。',
@@ -664,10 +739,13 @@ export async function parseSpreadsheetIntent(
     '- 备注包含返工，按责任人统计金额平均值',
     '- 客户原因包含客户待下，筛选完整明细，输出新工作表',
     '- 分析钣金设计部的人员岗位分布',
-    'plan 示例：{"intent":"aggregation","steps":[{"op":"filter","conditions":[{"column":"单据状态","operator":"eq","value":"单据未完成"}]},{"op":"group_by","columns":["责任人"]},{"op":"aggregate","metrics":[{"type":"count","as":"数量"}]},{"op":"chart","chartType":"bar"}],"targetSheetName":"未完成责任人统计","explanation":"统计未完成单据并生成柱状图"}',
+    'plan 示例：{"intent":"rate","rateLabel":"未完成率","rateFilters":[{"column":"单据状态","operator":"eq","value":"单据未完成"}],"groupByColumns":["部门"],"targetSheetName":"各部门未完成率","explanation":"按部门统计未完成率"}',
+    '分组计数示例：{"intent":"aggregation","steps":[{"op":"filter","conditions":[{"column":"单据状态","operator":"eq","value":"单据未完成"}]},{"op":"group_by","columns":["责任人"]},{"op":"aggregate","metrics":[{"type":"count","as":"数量"}]},{"op":"chart","chartType":"bar"}],"targetSheetName":"未完成责任人统计","explanation":"统计未完成单据并生成柱状图"}',
     '分布分析示例：{"intent":"analysis","steps":[{"op":"filter","conditions":[{"column":"部门","operator":"eq","value":"钣金设计部"}]},{"op":"group_by","columns":["岗位名称"]},{"op":"aggregate","metrics":[{"type":"count","as":"人数"}]},{"op":"sort","by":"人数","direction":"desc"},{"op":"chart","chartType":"bar"}],"targetSheetName":"钣金设计部岗位分布"}',
     '筛选明细示例：{"intent":"detail_filter","steps":[{"op":"filter","conditions":[{"column":"客户原因","operator":"contains","value":"客户待下"}]},{"op":"export","target":"new_sheet","sheetName":"客户待下明细"}],"targetSheetName":"客户待下明细"}',
     '如果用户说“把部门人数最多的前三个列出来并生成图表”，优先输出 steps：filter/group_by/aggregate/sort/top_n/chart，不要用 script。',
+    '如果用户说“筛选后统计总数量”，优先输出 steps：filter/aggregate(count)，不要强行添加 group_by。',
+    '如果用户说“按部门统计未完成率”，优先输出 rate：{"intent":"rate","rateLabel":"未完成率","rateFilters":[{"column":"单据状态","operator":"eq","value":"单据未完成"}],"groupByColumns":["部门"]}。',
     '如果用户说“把刚才那个结果画成饼图”，可以输出：{"intent":"chart","useLastCreatedSheet":true,"steps":[{"op":"chart","chartType":"pie"}]}',
     '如果用户说“导出这个结果”，可以输出：{"intent":"export","useLastCreatedSheet":true,"steps":[{"op":"export","target":"excel_file"}]}',
     '如果用户要复杂改造，可输出 python script，例如：{"intent":"script","script":{"language":"python","summary":"清洗部门列并输出新表","code":"import json\nimport pandas as pd\nfrom pathlib import Path\nresult_path = Path(RESULT_PATH)\n...\nresult_path.write_text(json.dumps({\"ok\": True, \"message\": \"已完成\"}, ensure_ascii=False), encoding=\"utf-8\")"}}',
@@ -700,7 +778,7 @@ export async function parseSpreadsheetIntent(
     signal
   )
   if (functionCallingResult) {
-    return functionCallingResult
+    return normalizeSpreadsheetIntentResult(functionCallingResult, userInstruction)
   }
 
   let content: string | undefined
@@ -804,7 +882,7 @@ export async function parseSpreadsheetIntent(
     })
   }
 
-  return validated.data
+  return normalizeSpreadsheetIntentResult(validated.data, userInstruction)
 }
 
 export async function generateImage(

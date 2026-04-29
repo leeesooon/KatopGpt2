@@ -50,8 +50,8 @@ export function shouldExecuteSpreadsheetInstruction(content: string) {
   const trimmed = content.trim()
   if (!trimmed) return false
 
-  return /(生成.*(?:sheet|工作表|图表|柱状图|折线图|饼图|条形图)|新\s*(?:sheet|工作表)|汇总|合计|求和|平均|均值|计数|条数|个数|数量|人数|多少人|有多少|分组|统计|分析|分布|占比|柱状图|折线图|饼图|条形图|图表)/i.test(trimmed)
-    && /(excel|xlsx|csv|表格|工作表|sheet|按|列|字段|图表|画图|统计图|可视化|岗位|部门)/i.test(trimmed)
+  return /(生成.*(?:sheet|工作表|图表|柱状图|折线图|饼图|条形图)|新\s*(?:sheet|工作表)|汇总|合计|求和|平均|均值|计数|条数|个数|数量|人数|多少人|有多少|分组|统计|分析|分布|占比|比例|率|未完成率|完成率|通过率|合格率|不良率|成功率|失败率|柱状图|折线图|饼图|条形图|图表)/i.test(trimmed)
+    && /(excel|xlsx|csv|表格|工作表|sheet|按|列|字段|图表|画图|统计图|可视化|岗位|部门|占比|比例|未完成率|完成率|通过率|合格率|不良率|成功率|失败率)/i.test(trimmed)
 }
 
 export function shouldExportSpreadsheetSession(content: string) {
@@ -88,17 +88,50 @@ export function summarizeSpreadsheetPlan(plan: SpreadsheetExecutionPlan) {
     return plan.script?.summary ? `执行脚本计划：${plan.script.summary}` : '执行脚本计划'
   }
 
+  if (plan.intent === 'rate') {
+    const groups = plan.groupByColumns?.join(' + ') || '总计'
+    const rateLabel = plan.rateLabel ?? inferRateLabelFromPlan(plan)
+    const baseFilterText = plan.filters?.length
+      ? `，筛选 ${plan.filters.map((filter) => `${filter.column}${filter.operator}${filter.value}`).join('，')}`
+      : ''
+    const rateFilterText = plan.rateFilters?.length
+      ? `，条件 ${plan.rateFilters.map((filter) => `${filter.column}${filter.operator}${filter.value}`).join('，')}`
+      : ''
+    return `按 ${groups} 统计${rateLabel}${baseFilterText}${rateFilterText}${plan.topN ? `，取前 ${plan.topN} 项` : ''}`
+  }
+
+  const hasGroupByColumns = (plan.groupByColumns?.length ?? 0) > 0
   const metricLabel = plan.intent === 'count'
     ? '计数'
     : plan.intent === 'sum'
       ? `汇总 ${plan.valueColumn ?? '数值列'}`
       : `统计 ${plan.valueColumn ?? '数值列'} 平均值`
-  const groups = plan.groupByColumns?.join(' + ') || '未指定分组'
   const filterText = plan.filters?.length
     ? `，筛选 ${plan.filters.map((filter) => `${filter.column}${filter.operator}${filter.value}`).join('，')}`
     : ''
   const topNText = plan.topN ? `，取前 ${plan.topN} 项` : ''
+
+  if (plan.intent === 'count' && !hasGroupByColumns) {
+    return `${plan.filters?.length ? '筛选后统计数量' : '统计总数量'}${topNText}`
+  }
+
+  const groups = plan.groupByColumns?.join(' + ') || '未指定分组'
   return `按 ${groups} ${metricLabel}${filterText}${topNText}`
+}
+
+function inferRateLabelFromPlan(plan: SpreadsheetExecutionPlan) {
+  const rateSource = [...(plan.rateFilters ?? []), ...(plan.filters ?? [])]
+    .map((filter) => `${filter.column}${filter.value}`)
+    .join(' ')
+
+  if (/未完成/i.test(rateSource)) return '未完成率'
+  if (/不合格/i.test(rateSource)) return '不合格率'
+  if (/不良/i.test(rateSource)) return '不良率'
+  if (/失败/i.test(rateSource)) return '失败率'
+  if (/成功/i.test(rateSource)) return '成功率'
+  if (/通过/i.test(rateSource)) return '通过率'
+  if (/合格/i.test(rateSource)) return '合格率'
+  return '占比'
 }
 
 export function resolveImageGenerationConfig(settings: AppSettings): ApiConfig | null {

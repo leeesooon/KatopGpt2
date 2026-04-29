@@ -485,6 +485,7 @@ function extractFilters(instruction: string, headers: string[]) {
 type SpreadsheetOperation =
   | { kind: 'sum'; sourceSheetName: string; groupByColumns: string[]; valueColumn: string; targetSheetName: string; filters: SpreadsheetFilter[]; chartType?: SpreadsheetChartType; topN?: number }
   | { kind: 'count'; sourceSheetName: string; groupByColumns: string[]; targetSheetName: string; filters: SpreadsheetFilter[]; chartType?: SpreadsheetChartType; topN?: number }
+  | { kind: 'rate'; sourceSheetName: string; groupByColumns: string[]; targetSheetName: string; filters: SpreadsheetFilter[]; rateFilters: SpreadsheetFilter[]; rateLabel: string; chartType?: SpreadsheetChartType; topN?: number }
   | { kind: 'avg'; sourceSheetName: string; groupByColumns: string[]; valueColumn: string; targetSheetName: string; filters: SpreadsheetFilter[]; chartType?: SpreadsheetChartType; topN?: number }
 
 interface SpreadsheetFilter {
@@ -506,6 +507,119 @@ function detectChartType(instruction: string): SpreadsheetChartType | undefined 
   if (/饼图/i.test(instruction)) return 'pie'
   if (/(画个?图|画图|做个?图|统计图|图表|可视化|展示成图)/i.test(instruction)) return 'bar'
   return undefined
+}
+
+function inferRateLabelFromInstruction(instruction: string) {
+  if (/未完成率/i.test(instruction)) return '未完成率'
+  if (/不合格率/i.test(instruction)) return '不合格率'
+  if (/不良率/i.test(instruction)) return '不良率'
+  if (/失败率/i.test(instruction)) return '失败率'
+  if (/成功率/i.test(instruction)) return '成功率'
+  if (/通过率/i.test(instruction)) return '通过率'
+  if (/合格率/i.test(instruction)) return '合格率'
+  if (/完成率/i.test(instruction)) return '完成率'
+  if (/(占比|比例|分布)/i.test(instruction)) return '占比'
+  if (/率/i.test(instruction)) return '率'
+  return null
+}
+
+function inferRateLabelFromFilters(filters: SpreadsheetFilter[]) {
+  const combined = filters.map((filter) => `${filter.column}${filter.value}`).join(' ')
+  if (/未完成/i.test(combined)) return '未完成率'
+  if (/不合格/i.test(combined)) return '不合格率'
+  if (/不良/i.test(combined)) return '不良率'
+  if (/失败/i.test(combined)) return '失败率'
+  if (/成功/i.test(combined)) return '成功率'
+  if (/通过/i.test(combined)) return '通过率'
+  if (/合格/i.test(combined)) return '合格率'
+  return '占比'
+}
+
+function buildRateNumeratorLabel(rateLabel: string) {
+  if (rateLabel === '占比' || rateLabel === '比例' || rateLabel === '率') {
+    return '数量'
+  }
+
+  const trimmed = rateLabel.replace(/率$/, '').trim()
+  return trimmed || '数量'
+}
+
+function inferRateFiltersFromHeaders(headers: string[], rateLabel: string): SpreadsheetFilter[] {
+  if (rateLabel === '占比' || rateLabel === '比例' || rateLabel === '率') {
+    return []
+  }
+
+  const candidateColumn = headers.find((header) => /状态|结果|是否|完成|审核|通过|合格|不合格|不良|异常|成功|失败/i.test(header))
+    ?? headers.find((header) => /单据状态|明细状态|状态/i.test(header))
+  if (!candidateColumn) {
+    return [] as SpreadsheetFilter[]
+  }
+
+  if (rateLabel === '未完成率') {
+    return [{
+      column: candidateColumn,
+      operator: 'eq',
+      value: candidateColumn.includes('单据') ? '单据未完成' : '未完成',
+    }]
+  }
+
+  if (rateLabel === '完成率') {
+    return [{
+      column: candidateColumn,
+      operator: 'eq',
+      value: candidateColumn.includes('单据') ? '单据已完成' : '已完成',
+    }]
+  }
+
+  if (rateLabel === '通过率') {
+    return [{
+      column: candidateColumn,
+      operator: 'eq',
+      value: '已通过',
+    }]
+  }
+
+  if (rateLabel === '合格率') {
+    return [{
+      column: candidateColumn,
+      operator: 'eq',
+      value: '合格',
+    }]
+  }
+
+  if (rateLabel === '不合格率') {
+    return [{
+      column: candidateColumn,
+      operator: 'eq',
+      value: '不合格',
+    }]
+  }
+
+  if (rateLabel === '不良率') {
+    return [{
+      column: candidateColumn,
+      operator: 'eq',
+      value: '不良',
+    }]
+  }
+
+  if (rateLabel === '失败率') {
+    return [{
+      column: candidateColumn,
+      operator: 'eq',
+      value: '失败',
+    }]
+  }
+
+  if (rateLabel === '成功率') {
+    return [{
+      column: candidateColumn,
+      operator: 'eq',
+      value: '成功',
+    }]
+  }
+
+  return []
 }
 
 function resolveSheetHeaders(workbook: XLSX.WorkBook, sheetName?: string) {
@@ -651,6 +765,10 @@ function normalizeStepBasedPlan(plan: SpreadsheetExecutionPlan): SpreadsheetExec
     normalized.intent = 'filter_rows'
   }
 
+  if (plan.intent === 'rate') {
+    normalized.intent = 'rate'
+  }
+
   return normalized
 }
 
@@ -672,11 +790,13 @@ function resolvePlanToOperation(workbook: XLSX.WorkBook, plan: SpreadsheetExecut
   const groupByColumns = (normalizedPlan.groupByColumns ?? [])
     .map((column) => resolveHeader(column, headers))
     .filter((column): column is string => Boolean(column))
-  if (groupByColumns.length === 0) {
+  const isCountOperation = normalizedPlan.intent === 'count'
+  const isRateOperation = normalizedPlan.intent === 'rate'
+  if (groupByColumns.length === 0 && !isCountOperation && !isRateOperation) {
     throw new Error('未识别到有效的分组列')
   }
 
-  const filters = (normalizedPlan.filters ?? [])
+  let filters = (normalizedPlan.filters ?? [])
     .map((filter) => {
       const resolvedColumn = resolveHeader(filter.column, headers)
       if (!resolvedColumn) return null
@@ -688,14 +808,53 @@ function resolvePlanToOperation(workbook: XLSX.WorkBook, plan: SpreadsheetExecut
     })
     .filter((filter): filter is SpreadsheetFilter => Boolean(filter))
 
+  let rateFilters = (normalizedPlan.rateFilters ?? [])
+    .map((filter) => {
+      const resolvedColumn = resolveHeader(filter.column, headers)
+      if (!resolvedColumn) return null
+      return {
+        column: resolvedColumn,
+        operator: filter.operator,
+        value: filter.value,
+      }
+    })
+    .filter((filter): filter is SpreadsheetFilter => Boolean(filter))
+
+  const rateLabel = normalizedPlan.rateLabel?.trim() || inferRateLabelFromFilters(rateFilters.length > 0 ? rateFilters : filters)
+  if (isRateOperation && rateFilters.length === 0 && filters.length > 0) {
+    const inferredLabelFromFilters = inferRateLabelFromFilters(filters)
+    if (inferredLabelFromFilters === rateLabel && rateLabel !== '占比') {
+      rateFilters = filters
+      filters = []
+    }
+  }
+
+  if (isRateOperation && rateFilters.length === 0 && rateLabel !== '占比') {
+    rateFilters = inferRateFiltersFromHeaders(headers, rateLabel)
+  }
+
   const chartType = normalizedPlan.chartType
-  const operationIntent = normalizedPlan.intent as SpreadsheetOperation['kind']
-  const targetSheetName = normalizedPlan.targetSheetName || buildDefaultTargetSheetName(operationIntent)
+  const operationIntent: Exclude<SpreadsheetOperation['kind'], 'rate'> = normalizedPlan.intent as Exclude<SpreadsheetOperation['kind'], 'rate'>
+  const targetSheetName = normalizedPlan.targetSheetName || buildDefaultTargetSheetName(operationIntent, rateLabel)
   const topN = typeof normalizedPlan.topN === 'number' && Number.isFinite(normalizedPlan.topN) && normalizedPlan.topN > 0
     ? Math.max(1, Math.floor(normalizedPlan.topN))
     : undefined
 
-  if (normalizedPlan.intent === 'count') {
+  if (isRateOperation) {
+    return {
+      kind: 'rate',
+      sourceSheetName: resolvedSheetName,
+      groupByColumns,
+      targetSheetName,
+      filters,
+      rateFilters,
+      rateLabel,
+      chartType,
+      topN,
+    }
+  }
+
+  if (isCountOperation) {
     return {
       kind: 'count',
       sourceSheetName: resolvedSheetName,
@@ -724,9 +883,10 @@ function resolvePlanToOperation(workbook: XLSX.WorkBook, plan: SpreadsheetExecut
   }
 }
 
-function buildDefaultTargetSheetName(kind: SpreadsheetOperation['kind']) {
+function buildDefaultTargetSheetName(kind: SpreadsheetOperation['kind'], rateLabel?: string) {
   if (kind === 'sum') return `汇总结果_${Date.now()}`
   if (kind === 'avg') return `平均结果_${Date.now()}`
+  if (kind === 'rate') return `${rateLabel || '占比'}_${Date.now()}`
   return `统计结果_${Date.now()}`
 }
 
@@ -742,12 +902,55 @@ function inferSpreadsheetOperation(workbook: XLSX.WorkBook, instruction: string)
   const targetSheetName = detectTargetSheetName(instruction)
   const filters = extractFilters(instruction, headers)
   const chartType = detectChartType(instruction)
+  const inferredRateLabel = inferRateLabelFromInstruction(instruction)
+  const rateLabel = inferredRateLabel ?? '占比'
+  const isCountInstruction = /(计数|数量|条数|个数|有多少|总数|多少条|多少行)/i.test(instruction)
+  const isRateInstruction = Boolean(inferredRateLabel)
 
-  if (groupByColumns.length === 0) {
+  if (groupByColumns.length === 0 && !isCountInstruction && !isRateInstruction) {
     if (chartType) {
       return null
     }
     return null
+  }
+
+  if (isRateInstruction) {
+    let baseFilters = filters
+    let rateFilters: SpreadsheetFilter[] = []
+
+    if (rateLabel !== '占比' && filters.length > 0) {
+      const inferredLabelFromFilters = inferRateLabelFromFilters(filters)
+      if (inferredLabelFromFilters === rateLabel) {
+        rateFilters = filters
+        baseFilters = []
+      }
+    }
+
+    if (rateFilters.length === 0 && rateLabel !== '占比' && filters.length === 0) {
+      rateFilters = inferRateFiltersFromHeaders(headers, rateLabel)
+    }
+
+    return {
+      kind: 'rate',
+      sourceSheetName,
+      groupByColumns,
+      targetSheetName: targetSheetName || buildDefaultTargetSheetName('rate', rateLabel),
+      filters: baseFilters,
+      rateFilters,
+      rateLabel,
+      chartType,
+    }
+  }
+
+  if (groupByColumns.length === 0 && isCountInstruction) {
+    return {
+      kind: 'count',
+      sourceSheetName,
+      groupByColumns,
+      targetSheetName: targetSheetName || buildDefaultTargetSheetName('count'),
+      filters,
+      chartType,
+    }
   }
 
   const avgCandidate = instruction.match(/(?:平均(?:值)?|均值|求平均)\s*[《“"]?([^》”"，。,\s]+)[》”"]?/i)?.[1]
@@ -1358,7 +1561,175 @@ function executeFilterRowsPlan(session: SpreadsheetSession, plan: SpreadsheetExe
   }
 }
 
+function executeRateSpreadsheetOperation(session: SpreadsheetSession, operation: Extract<SpreadsheetOperation, { kind: 'rate' }>) {
+  const sheet = session.workbook.Sheets[operation.sourceSheetName]
+  const records = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
+    raw: false,
+    defval: '',
+  })
+  const baseRecords = operation.filters.length > 0
+    ? records.filter((record) => matchesFilters(record, operation.filters))
+    : records
+
+  if (baseRecords.length === 0) {
+    throw new Error('所选工作表没有可用于统计率的数据')
+  }
+
+  const rateFilters = operation.rateFilters ?? []
+  const isSubsetRate = rateFilters.length > 0
+  const rateLabel = operation.rateLabel || inferRateLabelFromFilters(rateFilters)
+  const numeratorLabel = buildRateNumeratorLabel(rateLabel)
+  const requiresExplicitRateCondition = rateLabel !== '占比' && rateLabel !== '比例' && rateLabel !== '率'
+  if (requiresExplicitRateCondition && rateFilters.length === 0) {
+    throw new Error(`未识别到可用于统计“${rateLabel}”的条件列，请把条件说得更明确一些`)
+  }
+  const totalCount = baseRecords.length
+  const grouped = new Map<string, { numerator: number; denominator: number; groupValues: string[] }>()
+
+  for (const record of baseRecords) {
+    const groupValues = operation.groupByColumns.map((column) => formatSpreadsheetCell(record[column]) || '(空)')
+    const groupKey = groupValues.join(' || ') || '__ALL__'
+    const current = grouped.get(groupKey) ?? { numerator: 0, denominator: 0, groupValues }
+
+    if (isSubsetRate) {
+      current.denominator += 1
+      if (matchesFilters(record, rateFilters)) {
+        current.numerator += 1
+      }
+    } else {
+      current.numerator += 1
+      current.denominator = totalCount
+    }
+
+    grouped.set(groupKey, current)
+  }
+
+  const resultRows: string[][] = operation.groupByColumns.length > 0
+    ? [[...operation.groupByColumns, isSubsetRate ? `${numeratorLabel}数量` : '数量', '总数量', `${rateLabel}(%)`]]
+    : [[isSubsetRate ? `${numeratorLabel}数量` : '数量', '总数量', `${rateLabel}(%)`]]
+
+  const sortedGroups = Array.from(grouped.entries())
+    .sort((left, right) => {
+      const leftMetrics = left[1]
+      const rightMetrics = right[1]
+      const leftRate = leftMetrics.denominator > 0 ? leftMetrics.numerator / leftMetrics.denominator : 0
+      const rightRate = rightMetrics.denominator > 0 ? rightMetrics.numerator / rightMetrics.denominator : 0
+
+      if (rightRate !== leftRate) {
+        return rightRate - leftRate
+      }
+
+      if (rightMetrics.numerator !== leftMetrics.numerator) {
+        return rightMetrics.numerator - leftMetrics.numerator
+      }
+
+      return left[0].localeCompare(right[0], 'zh-CN')
+    })
+
+  const limitedGroups = operation.topN ? sortedGroups.slice(0, operation.topN) : sortedGroups
+
+  limitedGroups.forEach(([, metrics]) => {
+    const rateValue = metrics.denominator > 0 ? (metrics.numerator / metrics.denominator) * 100 : 0
+    const rateText = Number.isInteger(rateValue) ? String(rateValue) : rateValue.toFixed(2)
+    const row = operation.groupByColumns.length > 0
+      ? [...metrics.groupValues, String(metrics.numerator), String(metrics.denominator), rateText]
+      : [String(metrics.numerator), String(metrics.denominator), rateText]
+    resultRows.push(row)
+  })
+
+  const createdSheetName = makeUniqueSheetName(session.workbook, operation.targetSheetName)
+  const nextSheet = XLSX.utils.aoa_to_sheet(resultRows)
+  session.workbook.Sheets[createdSheetName] = nextSheet
+  session.workbook.SheetNames.push(createdSheetName)
+  session.lastCreatedSheetName = createdSheetName
+
+  let chartFileName: string | null = null
+  let chartMarkdown: string | null = null
+  if (operation.chartType) {
+    const labels = resultRows.slice(1).map((row) => {
+      const label = row.slice(0, operation.groupByColumns.length).join(' / ')
+      return label || '全部数据'
+    })
+    const values = resultRows.slice(1).map((row) => parseNumericValue(row[row.length - 1]) ?? 0)
+    const chartTitle = `${createdSheetName} 图表`
+    chartFileName = `${createdSheetName}.svg`
+    session.generatedCharts = session.generatedCharts.filter((chart) => chart.fileName !== chartFileName)
+    session.generatedCharts.push({
+      fileName: chartFileName,
+      title: chartTitle,
+      svgContent: buildChartSvg(operation.chartType, chartTitle, labels, values),
+    })
+    chartMarkdown = buildChartMarkdown(chartTitle, session.generatedCharts[session.generatedCharts.length - 1].svgContent)
+  }
+
+  const preview = renderSpreadsheetPreview(resultRows)
+  const groupLabel = operation.groupByColumns.map((column) => `“${column}”`).join(' + ')
+  const actionLabel = operation.groupByColumns.length > 0
+    ? `按${groupLabel}统计${rateLabel}`
+    : `统计${rateLabel}`
+  const baseFilterLabel = operation.filters.length > 0
+    ? `公共筛选条件：${operation.filters.map((filter) => {
+      const operatorLabel = filter.operator === 'contains'
+        ? '包含'
+        : filter.operator === 'gt'
+          ? '>'
+          : filter.operator === 'gte'
+            ? '>='
+            : filter.operator === 'lt'
+              ? '<'
+              : filter.operator === 'lte'
+                ? '<='
+                : '='
+      return `${filter.column}${operatorLabel}${filter.value}`
+    }).join('，')}`
+    : '公共筛选条件：无'
+  const rateFilterLabel = isSubsetRate
+    ? `率条件：${rateFilters.map((filter) => {
+      const operatorLabel = filter.operator === 'contains'
+        ? '包含'
+        : filter.operator === 'gt'
+          ? '>'
+          : filter.operator === 'gte'
+            ? '>='
+            : filter.operator === 'lt'
+              ? '<'
+              : filter.operator === 'lte'
+                ? '<='
+                : '='
+      return `${filter.column}${operatorLabel}${filter.value}`
+    }).join('，')}`
+    : '率条件：无'
+
+  return {
+    createdSheetName,
+    message: [
+      `已在${session.fileType.toUpperCase()}会话中新增工作表《${createdSheetName}》。`,
+      '',
+      `- 来源工作表：${operation.sourceSheetName}`,
+      `- ${baseFilterLabel}`,
+      `- ${rateFilterLabel}`,
+      `- 执行操作：${actionLabel}`,
+      `- 参与汇总行数：${baseRecords.length}`,
+      ...(operation.topN ? [`- 结果范围：按结果值降序取前 ${operation.topN} 项`] : []),
+      '',
+      '**结果预览**',
+      '',
+      preview,
+      '',
+      ...(chartMarkdown ? [chartMarkdown, ''] : []),
+      ...(chartFileName
+        ? [`已生成图表文件：${chartFileName}，导出表格时会一并导出。`, '']
+        : []),
+      '说明：当前结果已保存在本次应用会话里，后续我可以继续基于这个新工作表做分析或再次汇总。',
+    ].join('\n'),
+  }
+}
+
 function executeSpreadsheetOperation(session: SpreadsheetSession, operation: SpreadsheetOperation) {
+  if (operation.kind === 'rate') {
+    return executeRateSpreadsheetOperation(session, operation)
+  }
+
   const sheet = session.workbook.Sheets[operation.sourceSheetName]
   const records = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
     raw: false,
@@ -1437,7 +1808,10 @@ function executeSpreadsheetOperation(session: SpreadsheetSession, operation: Spr
   let chartFileName: string | null = null
   let chartMarkdown: string | null = null
   if (operation.chartType) {
-    const labels = resultRows.slice(1).map((row) => row.slice(0, operation.groupByColumns.length).join(' / '))
+    const labels = resultRows.slice(1).map((row) => {
+      const label = row.slice(0, operation.groupByColumns.length).join(' / ')
+      return label || '全部数据'
+    })
     const values = resultRows.slice(1).map((row) => parseNumericValue(row[row.length - 1]) ?? 0)
     const chartTitle = `${createdSheetName} 图表`
     chartFileName = `${createdSheetName}.svg`
@@ -1452,8 +1826,13 @@ function executeSpreadsheetOperation(session: SpreadsheetSession, operation: Spr
 
   const preview = renderSpreadsheetPreview(resultRows)
   const groupLabel = operation.groupByColumns.map((column) => `“${column}”`).join(' + ')
+  const hasGroupByColumns = operation.groupByColumns.length > 0
   const actionLabel = operation.kind === 'count'
-    ? `按${groupLabel}计数`
+    ? hasGroupByColumns
+      ? `按${groupLabel}计数`
+      : operation.filters.length > 0
+        ? '筛选后统计数量'
+        : '统计总数量'
     : operation.kind === 'avg'
       ? `按${groupLabel}统计“${operation.valueColumn}”平均值`
       : `按${groupLabel}汇总“${operation.valueColumn}”`

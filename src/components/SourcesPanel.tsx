@@ -20,20 +20,26 @@ export default function SourcesPanel({ sources }: SourcesPanelProps) {
             <li key={i} className="flex items-start gap-2 group">
               <span className="text-surface-500 text-xs mt-0.5 shrink-0">[{i + 1}]</span>
               <div className="flex-1 min-w-0">
-                <a
-                  href={normalizedUrl ?? source.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-sm text-primary-400 hover:text-primary-300 hover:underline 
-                             line-clamp-2 break-words transition-colors flex items-start gap-1"
-                  onClick={(event) => {
-                    event.preventDefault()
-                    openExternalUrl(normalizedUrl ?? source.url)
-                  }}
-                >
-                  <span className="flex-1">{source.title || normalizedUrl || source.url}</span>
-                  <ExternalLink size={12} className="shrink-0 mt-0.5 opacity-0 group-hover:opacity-100 transition-opacity" />
-                </a>
+                {normalizedUrl ? (
+                  <a
+                    href={normalizedUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm text-primary-400 hover:text-primary-300 hover:underline 
+                               line-clamp-2 break-words transition-colors flex items-start gap-1"
+                    onClick={(event) => {
+                      event.preventDefault()
+                      openExternalUrl(normalizedUrl)
+                    }}
+                  >
+                    <span className="flex-1">{source.title || normalizedUrl}</span>
+                    <ExternalLink size={12} className="shrink-0 mt-0.5 opacity-0 group-hover:opacity-100 transition-opacity" />
+                  </a>
+                ) : (
+                  <div className="line-clamp-2 break-words text-sm text-surface-300">
+                    {source.title || '知识资料'}
+                  </div>
+                )}
                 {source.date && (
                   <p className="text-xs text-surface-500 mt-0.5">{source.date}</p>
                 )}

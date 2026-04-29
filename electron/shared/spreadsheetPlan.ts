@@ -55,11 +55,13 @@ export type SpreadsheetPlanStep =
     }
 
 export interface SpreadsheetExecutionPlan {
-  intent: 'count' | 'sum' | 'avg' | 'chart' | 'export' | 'script' | 'filter_rows' | 'analysis' | 'detail_filter' | 'aggregation'
+  intent: 'count' | 'rate' | 'sum' | 'avg' | 'chart' | 'export' | 'script' | 'filter_rows' | 'analysis' | 'detail_filter' | 'aggregation'
   sourceSheetName?: string
   groupByColumns?: string[]
   valueColumn?: string
   filters?: SpreadsheetPlanFilter[]
+  rateLabel?: string
+  rateFilters?: SpreadsheetPlanFilter[]
   selectColumns?: string[]
   sortBy?: string
   sortDirection?: 'asc' | 'desc'
@@ -160,11 +162,13 @@ export const spreadsheetScriptPlanSchema = z.object({
 })
 
 export const spreadsheetExecutionPlanSchema = z.object({
-  intent: z.enum(['count', 'sum', 'avg', 'chart', 'export', 'script', 'filter_rows', 'analysis', 'detail_filter', 'aggregation']),
+  intent: z.enum(['count', 'rate', 'sum', 'avg', 'chart', 'export', 'script', 'filter_rows', 'analysis', 'detail_filter', 'aggregation']),
   sourceSheetName: z.string().optional(),
   groupByColumns: z.array(z.string().min(1)).optional(),
   valueColumn: z.string().optional(),
   filters: z.array(spreadsheetPlanFilterSchema).optional(),
+  rateLabel: z.string().optional(),
+  rateFilters: z.array(spreadsheetPlanFilterSchema).optional(),
   selectColumns: z.array(z.string().min(1)).optional(),
   sortBy: z.string().optional(),
   sortDirection: z.enum(['asc', 'desc']).optional(),
@@ -216,12 +220,26 @@ export const spreadsheetPlannerToolDefinition = {
           properties: {
             intent: {
               type: 'string',
-              enum: ['analysis', 'detail_filter', 'aggregation', 'chart', 'export', 'script'],
+              enum: ['analysis', 'detail_filter', 'aggregation', 'rate', 'chart', 'export', 'script'],
             },
             sourceSheetName: { type: 'string' },
             targetSheetName: { type: 'string' },
             useLastCreatedSheet: { type: 'boolean' },
             explanation: { type: 'string' },
+            rateLabel: { type: 'string' },
+            rateFilters: {
+              type: 'array',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  column: { type: 'string' },
+                  operator: { type: 'string', enum: ['eq', 'contains', 'gt', 'gte', 'lt', 'lte'] },
+                  value: { type: 'string' },
+                },
+                required: ['column', 'operator', 'value'],
+              },
+            },
             steps: {
               type: 'array',
               items: {

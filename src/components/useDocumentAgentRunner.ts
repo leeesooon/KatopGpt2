@@ -4,6 +4,7 @@ import { useWorkspaceStore } from '../store/workspaceStore'
 import { streamChat, ChatApiError } from '../services/chatApi'
 import { prepareDocumentAgentRequest } from '../services/agentOrchestrator'
 import { runAgenticSearch } from '../services/agenticSearch'
+import { buildAssistantSystemPrompt, searchAssistantKnowledge } from '../services/assistantProfiles'
 import { resolveApiConfig } from '../types'
 import type { DocumentAgentMode, DocumentSelection, Message, WorkspaceDocument } from '../types'
 
@@ -42,6 +43,8 @@ export function useDocumentAgentRunner({
   searchEnabled,
 }: UseDocumentAgentRunnerOptions) {
   const settings = useChatStore((state) => state.settings)
+  const conversations = useChatStore((state) => state.conversations)
+  const activeConversationId = useChatStore((state) => state.activeConversationId)
   const startTask = useWorkspaceStore((state) => state.startTask)
   const completeTask = useWorkspaceStore((state) => state.completeTask)
   const failTask = useWorkspaceStore((state) => state.failTask)
@@ -62,6 +65,8 @@ export function useDocumentAgentRunner({
 
   const apiConfig = resolveApiConfig(settings.providers, settings.activeModel)
   const hasApiConfig = Boolean(apiConfig)
+  const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId)
+  const activeAssistantProfileId = activeConversation?.assistantProfileId ?? settings.activeAssistantProfileId
 
   const clearIdleCompleteTimer = useCallback(() => {
     if (idleCompleteTimerRef.current === null) return
@@ -184,6 +189,8 @@ export function useDocumentAgentRunner({
 
     try {
       let referenceContext: string | undefined
+      const knowledgeResult = searchAssistantKnowledge(settings, `${userPrompt}\n\n${request.prompt}`, activeAssistantProfileId)
+      const assistantSystemPrompt = buildAssistantSystemPrompt(settings, knowledgeResult.context || undefined, activeAssistantProfileId)
       const searchApiKey = settings.searchEngine === 'tavily'
         ? settings.tavilyApiKey
         : settings.serperApiKey
@@ -211,7 +218,7 @@ export function useDocumentAgentRunner({
       for await (const chunk of streamChat(
         currentApiConfig,
         [userMessage],
-        settings.systemPrompt,
+        assistantSystemPrompt,
         settings.temperature,
         settings.maxTokens,
         abortController.signal,
@@ -267,6 +274,7 @@ export function useDocumentAgentRunner({
     }
   }, [
     activeDocument,
+    activeAssistantProfileId,
     beginRun,
     clearLatestSuggestion,
     clearFirstChunkTimer,
@@ -277,7 +285,9 @@ export function useDocumentAgentRunner({
     finishRun,
     searchEnabled,
     selection,
+    settings.activeAssistantProfileId,
     settings.activeModel,
+    settings.assistantProfiles,
     settings.maxTokens,
     settings.providers,
     settings.searchEngine,

@@ -27,6 +27,44 @@ export interface ImageGenerationSettings {
   count: 1
 }
 
+export interface KnowledgeChunk {
+  id: string
+  documentId: string
+  documentName: string
+  content: string
+  index: number
+}
+
+export interface KnowledgeDocument {
+  id: string
+  name: string
+  fileType?: FileAttachment['fileType']
+  size: number
+  content: string
+  chunks: KnowledgeChunk[]
+  enabled: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+export interface AssistantProfile {
+  id: string
+  name: string
+  description: string
+  emoji: string
+  avatarId?: string
+  instructions: string
+  tone: string
+  outputFormat: string
+  domainHints: string
+  isBuiltIn?: boolean
+  isDefault?: boolean
+  isHidden?: boolean
+  knowledgeDocuments: KnowledgeDocument[]
+  createdAt: number
+  updatedAt: number
+}
+
 /** Image attached to a message */
 export interface ImageAttachment {
   id: string
@@ -141,6 +179,7 @@ export interface Conversation {
   id: string
   title: string
   messages: Message[]
+  assistantProfileId?: string
   summary?: ConversationSummary
   createdAt: number
   updatedAt: number
@@ -179,6 +218,8 @@ export interface ModelSelection {
 export interface AppSettings {
   providers: ApiProvider[]
   activeModel: ModelSelection | null
+  assistantProfiles: AssistantProfile[]
+  activeAssistantProfileId: string | null
   systemPrompt: string
   temperature: number
   maxTokens: number
@@ -199,6 +240,8 @@ export interface AppSettings {
 export const DEFAULT_SETTINGS: AppSettings = {
   providers: [],
   activeModel: null,
+  assistantProfiles: [],
+  activeAssistantProfileId: null,
   systemPrompt: 'You are a helpful assistant.',
   temperature: 0.7,
   maxTokens: 0,

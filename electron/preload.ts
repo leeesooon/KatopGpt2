@@ -68,11 +68,13 @@ interface SpreadsheetPlanFilter {
 }
 
 interface SpreadsheetExecutionPlan {
-  intent: 'count' | 'sum' | 'avg' | 'chart' | 'export' | 'script' | 'filter_rows' | 'analysis' | 'detail_filter' | 'aggregation'
+  intent: 'count' | 'rate' | 'sum' | 'avg' | 'chart' | 'export' | 'script' | 'filter_rows' | 'analysis' | 'detail_filter' | 'aggregation'
   sourceSheetName?: string
   groupByColumns?: string[]
   valueColumn?: string
   filters?: SpreadsheetPlanFilter[]
+  rateLabel?: string
+  rateFilters?: SpreadsheetPlanFilter[]
   selectColumns?: string[]
   sortBy?: string
   sortDirection?: 'asc' | 'desc'

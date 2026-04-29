@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import mermaid from 'mermaid'
-import { AlertTriangle, Copy, Check } from 'lucide-react'
+import { AlertTriangle, Copy, Check, Maximize2 } from 'lucide-react'
+import type { WorkspaceImageViewPayload } from './workspaceMarkdown'
 
 let mermaidInitialized = false
 
@@ -52,14 +53,25 @@ function ensureMermaidInitialized() {
 interface MermaidBlockProps {
   chart: string
   variant?: 'dark' | 'paper'
+  onOpenDiagram?: (image: WorkspaceImageViewPayload) => void
 }
 
-export default function MermaidBlock({ chart, variant = 'dark' }: MermaidBlockProps) {
+function buildMermaidImagePayload(svg: string): WorkspaceImageViewPayload {
+  return {
+    src: '',
+    alt: 'Mermaid 图表',
+    title: 'Mermaid 图表',
+    svg,
+  }
+}
+
+export default function MermaidBlock({ chart, variant = 'dark', onOpenDiagram }: MermaidBlockProps) {
   const [svg, setSvg] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
 
   const chartId = useMemo(() => `mermaid-${Math.random().toString(36).slice(2, 10)}`, [])
+  const canOpenDiagram = Boolean(svg && !error && onOpenDiagram)
 
   useEffect(() => {
     let cancelled = false
@@ -67,6 +79,7 @@ export default function MermaidBlock({ chart, variant = 'dark' }: MermaidBlockPr
     async function renderChart() {
       ensureMermaidInitialized()
       setError(null)
+      setSvg('')
 
       try {
         const { svg: renderedSvg } = await mermaid.render(chartId, chart)
@@ -94,14 +107,30 @@ export default function MermaidBlock({ chart, variant = 'dark' }: MermaidBlockPr
     setTimeout(() => setCopied(false), 1800)
   }
 
+  const handleOpenDiagram = () => {
+    if (!svg || error) return
+    onOpenDiagram?.(buildMermaidImagePayload(svg))
+  }
+
   return (
     <div className={`mermaid-shell my-3 overflow-hidden rounded-2xl border ${variant === 'paper' ? 'border-[#c9b792] bg-[#f3ead9]' : 'border-surface-700/60 bg-[#0b1220]/90'}`}>
       <div className={`flex items-center justify-between border-b px-4 py-2 text-xs ${variant === 'paper' ? 'border-[#d8c7a3] text-[#6b5b43]' : 'border-surface-700/60 text-surface-400'}`}>
         <span className="font-mono uppercase tracking-[0.22em]">Mermaid</span>
-        <button onClick={handleCopy} className={`inline-flex items-center gap-1.5 rounded-full px-2 py-1 transition ${variant === 'paper' ? 'hover:bg-[#e7dbc4] text-[#6b5b43]' : 'hover:bg-white/10 text-surface-300'}`}>
-          {copied ? <Check size={12} /> : <Copy size={12} />}
-          {copied ? '已复制' : '复制源码'}
-        </button>
+        <div className="flex items-center gap-1.5">
+          {canOpenDiagram && (
+            <button
+              onClick={handleOpenDiagram}
+              className={`inline-flex h-7 w-7 items-center justify-center rounded-full transition ${variant === 'paper' ? 'hover:bg-[#e7dbc4] text-[#6b5b43]' : 'hover:bg-white/10 text-surface-300'}`}
+              title="打开图表"
+            >
+              <Maximize2 size={13} />
+            </button>
+          )}
+          <button onClick={handleCopy} className={`inline-flex items-center gap-1.5 rounded-full px-2 py-1 transition ${variant === 'paper' ? 'hover:bg-[#e7dbc4] text-[#6b5b43]' : 'hover:bg-white/10 text-surface-300'}`}>
+            {copied ? <Check size={12} /> : <Copy size={12} />}
+            {copied ? '已复制' : '复制源码'}
+          </button>
+        </div>
       </div>
 
       {error ? (
@@ -113,7 +142,10 @@ export default function MermaidBlock({ chart, variant = 'dark' }: MermaidBlockPr
           </div>
         </div>
       ) : (
-        <div className={`mermaid-stage overflow-x-auto px-3 py-4 ${variant === 'paper' ? 'bg-[#f7f0e2]' : 'bg-[radial-gradient(circle_at_top,rgba(56,189,248,0.08),transparent_35%),#0b1220]'}`}>
+        <div
+          className={`mermaid-stage overflow-x-auto px-3 py-4 ${canOpenDiagram ? 'cursor-zoom-in' : ''} ${variant === 'paper' ? 'bg-[#f7f0e2]' : 'bg-[radial-gradient(circle_at_top,rgba(56,189,248,0.08),transparent_35%),#0b1220]'}`}
+          onClick={canOpenDiagram ? handleOpenDiagram : undefined}
+        >
           {svg ? (
             <div className="mermaid-diagram min-w-max" dangerouslySetInnerHTML={{ __html: svg }} />
           ) : (
