@@ -11,9 +11,12 @@ import {
   type ExecuteSpreadsheetInstructionRequest,
   type ExtractDocumentTextRequest,
 } from './documentExtraction.ts'
+import { exportPresentationDeckToFile } from './presentationExport.ts'
+import type { PresentationExportRequest } from './shared/presentation'
 
 let mainWindow: BrowserWindow | null = null
 let workspaceWindow: BrowserWindow | null = null
+let presentationWindow: BrowserWindow | null = null
 const activeApiStreams = new Map<string, AbortController>()
 const activeImageGenerations = new Map<string, AbortController>()
 
@@ -1419,6 +1422,13 @@ function broadcastWorkspaceWindowState() {
   })
 }
 
+function broadcastPresentationWindowState() {
+  const payload = { open: Boolean(presentationWindow && !presentationWindow.isDestroyed()) }
+  BrowserWindow.getAllWindows().forEach((window) => {
+    window.webContents.send('presentation:windowState', payload)
+  })
+}
+
 function createWorkspaceWindow() {
   if (workspaceWindow && !workspaceWindow.isDestroyed()) {
     workspaceWindow.focus()
@@ -1469,6 +1479,56 @@ function createWorkspaceWindow() {
   return workspaceWindow
 }
 
+function createPresentationWindow() {
+  if (presentationWindow && !presentationWindow.isDestroyed()) {
+    presentationWindow.focus()
+    broadcastPresentationWindowState()
+    return presentationWindow
+  }
+
+  presentationWindow = new BrowserWindow({
+    width: 1240,
+    height: 820,
+    minWidth: 960,
+    minHeight: 640,
+    title: 'KatopGPT PPT 助手',
+    icon: APP_ICON_PATH,
+    backgroundColor: '#070b13',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+    show: false,
+  })
+
+  attachCommonWindowHandlers(presentationWindow)
+
+  presentationWindow.once('ready-to-show', () => {
+    presentationWindow?.show()
+    broadcastPresentationWindowState()
+  })
+
+  presentationWindow.on('closed', () => {
+    presentationWindow = null
+    broadcastPresentationWindowState()
+  })
+
+  const searchParams = new URLSearchParams({ presentationWindow: '1' })
+  const devUrl = getRendererUrl(searchParams)
+
+  if (devUrl) {
+    void presentationWindow.loadURL(devUrl)
+  } else {
+    void presentationWindow.loadFile(path.join(__dirname, '../dist-renderer/index.html'), {
+      search: searchParams.toString(),
+    })
+  }
+
+  return presentationWindow
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -1492,6 +1552,7 @@ function createWindow() {
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show()
     broadcastWorkspaceWindowState()
+    broadcastPresentationWindowState()
   })
 
   if (process.env.VITE_DEV_SERVER_URL) {
@@ -1526,6 +1587,18 @@ function registerWindowIpcHandlers() {
   ipcMain.handle('workspaceWindow:getState', () => ({
     open: Boolean(workspaceWindow && !workspaceWindow.isDestroyed()),
   }))
+  ipcMain.handle('presentationWindow:open', () => {
+    createPresentationWindow()
+    return true
+  })
+  ipcMain.handle('presentationWindow:close', () => {
+    if (!presentationWindow || presentationWindow.isDestroyed()) return false
+    presentationWindow.close()
+    return true
+  })
+  ipcMain.handle('presentationWindow:getState', () => ({
+    open: Boolean(presentationWindow && !presentationWindow.isDestroyed()),
+  }))
 }
 
 function registerImageIpcHandlers() {
@@ -1552,6 +1625,9 @@ function registerDocumentIpcHandlers() {
   ipcMain.handle('files:executeSpreadsheetInstruction', (_event, request: ExecuteSpreadsheetInstructionRequest) => executeSpreadsheetInstruction(request))
   ipcMain.handle('files:executeSpreadsheetPlan', (_event, request: ExecuteSpreadsheetPlanRequest) => executeSpreadsheetPlan(request))
   ipcMain.handle('files:exportSpreadsheetSession', (_event, sessionId: string) => exportSpreadsheetSessionToFile(sessionId))
+  ipcMain.handle('presentations:exportDeck', (event, request: PresentationExportRequest) =>
+    exportPresentationDeckToFile(request, BrowserWindow.fromWebContents(event.sender) ?? mainWindow)
+  )
 }
 
 function registerApiIpcHandlers() {

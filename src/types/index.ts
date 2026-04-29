@@ -1,4 +1,13 @@
 import type { SpreadsheetPlanStep, SpreadsheetWorkbookSchema } from '../../electron/shared/spreadsheetPlan'
+import type {
+  PresentationDeckSpec,
+  PresentationExportRequest,
+  PresentationExportResult,
+  PresentationQaIssue,
+  PresentationSlideLayout,
+  PresentationSlideSpec,
+  PresentationThemeId,
+} from '../../electron/shared/presentation'
 
 /** Single model configuration within a provider */
 export interface ModelConfig {
@@ -283,3 +292,12 @@ export function supportsVision(model: ModelConfig | undefined) {
 }
 
 export type { SpreadsheetPlanStep, SpreadsheetWorkbookSchema }
+export type {
+  PresentationDeckSpec,
+  PresentationExportRequest,
+  PresentationExportResult,
+  PresentationQaIssue,
+  PresentationSlideLayout,
+  PresentationSlideSpec,
+  PresentationThemeId,
+}

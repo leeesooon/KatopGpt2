@@ -1,5 +1,7 @@
 /// <reference types="vite/client" />
 
+import type { PresentationExportRequest, PresentationExportResult } from '../electron/shared/presentation'
+
 interface FetchedWebPage {
   finalUrl: string
   contentType: string
@@ -27,6 +29,10 @@ interface WorkspaceHandle {
 }
 
 interface WorkspaceWindowState {
+  open: boolean
+}
+
+interface PresentationWindowState {
   open: boolean
 }
 
@@ -240,6 +246,11 @@ interface ElectronAPI {
   getWorkspaceWindowState: () => Promise<WorkspaceWindowState>
   subscribeWorkspaceWindowState: (listener: (state: WorkspaceWindowState) => void) => number
   unsubscribeWorkspaceWindowState: (listenerId: number) => void
+  openPresentationWindow: () => Promise<boolean>
+  closePresentationWindow: () => Promise<boolean>
+  getPresentationWindowState: () => Promise<PresentationWindowState>
+  subscribePresentationWindowState: (listener: (state: PresentationWindowState) => void) => number
+  unsubscribePresentationWindowState: (listenerId: number) => void
   fetchWebPage: (url: string) => Promise<FetchedWebPage>
   selectWorkspace: () => Promise<WorkspaceHandle | null>
   listWorkspaceDocuments: (rootPath: string) => Promise<string[]>
@@ -253,6 +264,7 @@ interface ElectronAPI {
   executeSpreadsheetInstruction: (request: ExecuteSpreadsheetInstructionRequest) => Promise<ExecuteSpreadsheetInstructionResult>
   executeSpreadsheetPlan: (request: ExecuteSpreadsheetPlanRequest) => Promise<ExecuteSpreadsheetInstructionResult>
   exportSpreadsheetSession: (sessionId: string) => Promise<ExportSpreadsheetSessionResult>
+  exportPresentationDeck: (request: PresentationExportRequest) => Promise<PresentationExportResult>
   testApiConnection: (config: ApiConnectionConfig) => Promise<ApiConnectionTestResult>
   completeChat: (request: CompleteChatRequest) => Promise<string | CompleteChatResponsePayload>
   generateImage: (request: GenerateImageRequest) => Promise<GenerateImageResult>

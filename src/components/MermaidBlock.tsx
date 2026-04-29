@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import mermaid from 'mermaid'
-import { AlertTriangle, Copy, Check, Maximize2 } from 'lucide-react'
+import { AlertTriangle, Copy, Check, Download, Image as ImageIcon, Maximize2 } from 'lucide-react'
 import type { WorkspaceImageViewPayload } from './workspaceMarkdown'
 
 let mermaidInitialized = false
@@ -56,6 +56,10 @@ interface MermaidBlockProps {
   onOpenDiagram?: (image: WorkspaceImageViewPayload) => void
 }
 
+type ImageCopyStatus = 'idle' | 'copied' | 'compatible' | 'error'
+
+const MERMAID_SVG_FILE_NAME = 'mermaid-diagram.svg'
+
 function buildMermaidImagePayload(svg: string): WorkspaceImageViewPayload {
   return {
     src: '',
@@ -65,13 +69,126 @@ function buildMermaidImagePayload(svg: string): WorkspaceImageViewPayload {
   }
 }
 
+function createSvgBlob(svg: string) {
+  return new Blob([svg], { type: 'image/svg+xml' })
+}
+
+function getSvgSize(svg: string) {
+  const doc = new DOMParser().parseFromString(svg, 'image/svg+xml')
+  const svgElement = doc.documentElement
+  const viewBox = svgElement.getAttribute('viewBox')
+
+  if (viewBox) {
+    const [, , width, height] = viewBox.split(/\s+/).map(Number)
+    if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+      return { width, height }
+    }
+  }
+
+  const parseSize = (value: string | null) => {
+    if (!value) return 0
+    const parsed = Number.parseFloat(value)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+
+  const width = parseSize(svgElement.getAttribute('width'))
+  const height = parseSize(svgElement.getAttribute('height'))
+
+  return {
+    width: width > 0 ? width : 1200,
+    height: height > 0 ? height : 800,
+  }
+}
+
+async function svgToPngBlob(svg: string) {
+  const svgBlob = createSvgBlob(svg)
+  const objectUrl = URL.createObjectURL(svgBlob)
+
+  try {
+    const image = new Image()
+    const { width, height } = getSvgSize(svg)
+    const scale = Math.min(3, Math.max(1, window.devicePixelRatio || 1))
+
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve()
+      image.onerror = () => reject(new Error('SVG 图片转换失败'))
+      image.src = objectUrl
+    })
+
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.ceil(width * scale)
+    canvas.height = Math.ceil(height * scale)
+
+    const context = canvas.getContext('2d')
+    if (!context) {
+      throw new Error('当前环境不支持图片转换')
+    }
+
+    context.setTransform(scale, 0, 0, scale, 0, 0)
+    context.drawImage(image, 0, 0, width, height)
+
+    const pngBlob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (blob) {
+          resolve(blob)
+        } else {
+          reject(new Error('PNG 图片生成失败'))
+        }
+      }, 'image/png')
+    })
+
+    return pngBlob
+  } finally {
+    URL.revokeObjectURL(objectUrl)
+  }
+}
+
+async function copyMermaidImage(svg: string) {
+  if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+    throw new Error('当前环境不支持复制图片')
+  }
+
+  try {
+    await navigator.clipboard.write([
+      new ClipboardItem({
+        'image/svg+xml': createSvgBlob(svg),
+      }),
+    ])
+    return 'svg'
+  } catch {
+    const pngBlob = await svgToPngBlob(svg)
+    await navigator.clipboard.write([
+      new ClipboardItem({
+        'image/png': pngBlob,
+      }),
+    ])
+    return 'png'
+  }
+}
+
+function downloadMermaidSvg(svg: string) {
+  const objectUrl = URL.createObjectURL(createSvgBlob(svg))
+  const link = document.createElement('a')
+
+  link.href = objectUrl
+  link.download = MERMAID_SVG_FILE_NAME
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(objectUrl)
+}
+
 export default function MermaidBlock({ chart, variant = 'dark', onOpenDiagram }: MermaidBlockProps) {
   const [svg, setSvg] = useState('')
   const [error, setError] = useState<string | null>(null)
-  const [copied, setCopied] = useState(false)
+  const [sourceCopied, setSourceCopied] = useState(false)
+  const [imageCopyStatus, setImageCopyStatus] = useState<ImageCopyStatus>('idle')
+  const [downloaded, setDownloaded] = useState(false)
+  const feedbackTimerRef = useRef<number | null>(null)
 
   const chartId = useMemo(() => `mermaid-${Math.random().toString(36).slice(2, 10)}`, [])
   const canOpenDiagram = Boolean(svg && !error && onOpenDiagram)
+  const canUseRenderedSvg = Boolean(svg && !error)
 
   useEffect(() => {
     let cancelled = false
@@ -85,6 +202,8 @@ export default function MermaidBlock({ chart, variant = 'dark', onOpenDiagram }:
         const { svg: renderedSvg } = await mermaid.render(chartId, chart)
         if (!cancelled) {
           setSvg(renderedSvg)
+          setImageCopyStatus('idle')
+          setDownloaded(false)
         }
       } catch (renderError) {
         if (!cancelled) {
@@ -101,16 +220,64 @@ export default function MermaidBlock({ chart, variant = 'dark', onOpenDiagram }:
     }
   }, [chart, chartId])
 
+  useEffect(() => {
+    return () => {
+      if (feedbackTimerRef.current !== null) {
+        window.clearTimeout(feedbackTimerRef.current)
+      }
+    }
+  }, [])
+
+  const resetFeedbackLater = () => {
+    if (feedbackTimerRef.current !== null) {
+      window.clearTimeout(feedbackTimerRef.current)
+    }
+
+    feedbackTimerRef.current = window.setTimeout(() => {
+      setSourceCopied(false)
+      setImageCopyStatus('idle')
+      setDownloaded(false)
+      feedbackTimerRef.current = null
+    }, 1800)
+  }
+
   const handleCopy = async () => {
     await navigator.clipboard.writeText(chart)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1800)
+    setSourceCopied(true)
+    resetFeedbackLater()
+  }
+
+  const handleCopyImage = async () => {
+    if (!svg || error) return
+
+    try {
+      const result = await copyMermaidImage(svg)
+      setImageCopyStatus(result === 'svg' ? 'copied' : 'compatible')
+    } catch {
+      setImageCopyStatus('error')
+    }
+    resetFeedbackLater()
+  }
+
+  const handleDownloadSvg = () => {
+    if (!svg || error) return
+    downloadMermaidSvg(svg)
+    setDownloaded(true)
+    resetFeedbackLater()
   }
 
   const handleOpenDiagram = () => {
     if (!svg || error) return
     onOpenDiagram?.(buildMermaidImagePayload(svg))
   }
+
+  const imageCopyLabel = imageCopyStatus === 'copied'
+    ? '已复制图片'
+    : imageCopyStatus === 'compatible'
+      ? '已兼容复制'
+      : imageCopyStatus === 'error'
+        ? '复制失败'
+        : '复制图片'
 
   return (
     <div className={`mermaid-shell my-3 overflow-hidden rounded-2xl border ${variant === 'paper' ? 'border-[#c9b792] bg-[#f3ead9]' : 'border-surface-700/60 bg-[#0b1220]/90'}`}>
@@ -126,9 +293,29 @@ export default function MermaidBlock({ chart, variant = 'dark', onOpenDiagram }:
               <Maximize2 size={13} />
             </button>
           )}
+          {canUseRenderedSvg && (
+            <>
+              <button
+                onClick={handleCopyImage}
+                className={`inline-flex items-center gap-1.5 rounded-full px-2 py-1 transition ${variant === 'paper' ? 'hover:bg-[#e7dbc4] text-[#6b5b43]' : 'hover:bg-white/10 text-surface-300'}`}
+                title={imageCopyStatus === 'compatible' ? '已按 PNG 兼容模式复制' : '复制渲染后的图表'}
+              >
+                {imageCopyStatus === 'copied' || imageCopyStatus === 'compatible' ? <Check size={12} /> : <ImageIcon size={12} />}
+                {imageCopyLabel}
+              </button>
+              <button
+                onClick={handleDownloadSvg}
+                className={`inline-flex items-center gap-1.5 rounded-full px-2 py-1 transition ${variant === 'paper' ? 'hover:bg-[#e7dbc4] text-[#6b5b43]' : 'hover:bg-white/10 text-surface-300'}`}
+                title="下载渲染后的 SVG"
+              >
+                {downloaded ? <Check size={12} /> : <Download size={12} />}
+                {downloaded ? '已下载' : '下载 SVG'}
+              </button>
+            </>
+          )}
           <button onClick={handleCopy} className={`inline-flex items-center gap-1.5 rounded-full px-2 py-1 transition ${variant === 'paper' ? 'hover:bg-[#e7dbc4] text-[#6b5b43]' : 'hover:bg-white/10 text-surface-300'}`}>
-            {copied ? <Check size={12} /> : <Copy size={12} />}
-            {copied ? '已复制' : '复制源码'}
+            {sourceCopied ? <Check size={12} /> : <Copy size={12} />}
+            {sourceCopied ? '已复制' : '复制源码'}
           </button>
         </div>
       </div>

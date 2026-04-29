@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { PresentationExportRequest, PresentationExportResult } from './shared/presentation'
 
 type ApiContentPart =
   | { type: 'text'; text: string }
@@ -21,6 +22,10 @@ interface WorkspaceHandle {
 }
 
 interface WorkspaceWindowState {
+  open: boolean
+}
+
+interface PresentationWindowState {
   open: boolean
 }
 
@@ -224,6 +229,8 @@ const chatStreamListeners = new Map<number, (event: ChatStreamEvent) => void>()
 let nextChatStreamListenerId = 1
 const workspaceWindowStateListeners = new Map<number, (state: WorkspaceWindowState) => void>()
 let nextWorkspaceWindowStateListenerId = 1
+const presentationWindowStateListeners = new Map<number, (state: PresentationWindowState) => void>()
+let nextPresentationWindowStateListenerId = 1
 
 ipcRenderer.on('api:chatStreamEvent', (_event, payload: ChatStreamEvent) => {
   for (const listener of chatStreamListeners.values()) {
@@ -241,6 +248,16 @@ ipcRenderer.on('workspace:windowState', (_event, payload: WorkspaceWindowState) 
       listener(payload)
     } catch (error) {
       console.error('Workspace window listener failed:', error)
+    }
+  }
+})
+
+ipcRenderer.on('presentation:windowState', (_event, payload: PresentationWindowState) => {
+  for (const listener of presentationWindowStateListeners.values()) {
+    try {
+      listener(payload)
+    } catch (error) {
+      console.error('Presentation window listener failed:', error)
     }
   }
 })
@@ -265,6 +282,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   unsubscribeWorkspaceWindowState: (listenerId: number) => {
     workspaceWindowStateListeners.delete(listenerId)
   },
+  openPresentationWindow: () => ipcRenderer.invoke('presentationWindow:open'),
+  closePresentationWindow: () => ipcRenderer.invoke('presentationWindow:close'),
+  getPresentationWindowState: () => ipcRenderer.invoke('presentationWindow:getState'),
+  subscribePresentationWindowState: (listener: (state: PresentationWindowState) => void) => {
+    const id = nextPresentationWindowStateListenerId++
+    presentationWindowStateListeners.set(id, listener)
+    return id
+  },
+  unsubscribePresentationWindowState: (listenerId: number) => {
+    presentationWindowStateListeners.delete(listenerId)
+  },
   fetchWebPage: (url: string) => ipcRenderer.invoke('web:fetchPage', url),
   selectWorkspace: () => ipcRenderer.invoke('workspace:select'),
   listWorkspaceDocuments: (rootPath: string) => ipcRenderer.invoke('workspace:listDocuments', rootPath),
@@ -279,6 +307,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   executeSpreadsheetInstruction: (request: ExecuteSpreadsheetInstructionRequest) => ipcRenderer.invoke('files:executeSpreadsheetInstruction', request),
   executeSpreadsheetPlan: (request: ExecuteSpreadsheetPlanRequest) => ipcRenderer.invoke('files:executeSpreadsheetPlan', request),
   exportSpreadsheetSession: (sessionId: string) => ipcRenderer.invoke('files:exportSpreadsheetSession', sessionId),
+  exportPresentationDeck: (request: PresentationExportRequest) => ipcRenderer.invoke('presentations:exportDeck', request) as Promise<PresentationExportResult>,
   testApiConnection: (config: ApiConnectionConfig) => ipcRenderer.invoke('api:testConnection', config),
   completeChat: (request: CompleteChatRequest) => ipcRenderer.invoke('api:completeChat', request) as Promise<string | CompleteChatResponsePayload>,
   generateImage: (request: GenerateImageRequest) => ipcRenderer.invoke('api:generateImage', request),

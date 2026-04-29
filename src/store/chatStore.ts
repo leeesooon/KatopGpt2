@@ -17,6 +17,7 @@ interface ChatState {
   settings: AppSettings
   isSettingsOpen: boolean
   isAssistantProfilesOpen: boolean
+  isPresentationWorkspaceOpen: boolean
   /** Set of conversation IDs currently streaming */
   streamingConvIds: string[]
   /** Enable web search for current message */
@@ -49,6 +50,7 @@ interface ChatState {
   updateSettings: (settings: Partial<Pick<AppSettings, 'systemPrompt' | 'temperature' | 'maxTokens' | 'contextWindowSize' | 'searchEngine' | 'serperApiKey' | 'tavilyApiKey' | 'enableSearchByDefault' | 'imageGeneration'>>) => void
   setSettingsOpen: (open: boolean) => void
   setAssistantProfilesOpen: (open: boolean) => void
+  setPresentationWorkspaceOpen: (open: boolean) => void
 
   // Assistant profile actions
   createAssistantProfile: (profile: Omit<AssistantProfile, 'id' | 'createdAt' | 'updatedAt' | 'knowledgeDocuments'> & { knowledgeDocuments?: KnowledgeDocument[] }) => string
@@ -81,6 +83,7 @@ export const useChatStore = create<ChatState>()(
       },
       isSettingsOpen: false,
       isAssistantProfilesOpen: false,
+      isPresentationWorkspaceOpen: false,
       streamingConvIds: [],
       searchEnabled: false,
 
@@ -276,6 +279,7 @@ export const useChatStore = create<ChatState>()(
 
       setSettingsOpen: (open) => set({ isSettingsOpen: open }),
       setAssistantProfilesOpen: (open) => set({ isAssistantProfilesOpen: open }),
+      setPresentationWorkspaceOpen: (open) => set({ isPresentationWorkspaceOpen: open }),
 
       createAssistantProfile: (profile) => {
         const id = uuidv4()

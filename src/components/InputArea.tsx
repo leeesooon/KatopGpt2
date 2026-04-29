@@ -2,6 +2,7 @@
 import {
   Send, Square, ImagePlus, Paperclip, X, FileText, Search, Loader2,
   SquareArrowOutUpRight, Download, Sparkles, ChevronUp, Check, SlidersHorizontal,
+  Layers3,
 } from 'lucide-react'
 import ModelSelector from './ModelSelector'
 import RoleAvatar from './RoleAvatar'
@@ -71,6 +72,8 @@ export default function InputArea({
     setSearchEnabled,
     settings,
     setAssistantProfilesOpen,
+    isPresentationWorkspaceOpen,
+    setPresentationWorkspaceOpen,
   } = useChatStore()
   const {
     pendingAction,
@@ -348,6 +351,15 @@ export default function InputArea({
     setPanelVisible(true)
   }
 
+  const handleOpenPresentationWorkspace = () => {
+    if (window.electronAPI?.openPresentationWindow) {
+      void window.electronAPI.openPresentationWindow()
+      return
+    }
+
+    setPresentationWorkspaceOpen(true)
+  }
+
   const pendingAttachmentTasks = attachmentTasks.filter((task) => task.status !== 'ready')
 
   const getTaskStatusText = (status: string) => {
@@ -495,6 +507,16 @@ export default function InputArea({
             >
               <SquareArrowOutUpRight size={14} />
               <span>打开文档助手</span>
+            </button>
+          )}
+          {!isImageMode && !isPresentationWorkspaceOpen && (
+            <button
+              onClick={handleOpenPresentationWorkspace}
+              className="inline-flex h-8 items-center gap-2 rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 text-xs text-cyan-100 transition hover:bg-cyan-300/15 disabled:cursor-not-allowed disabled:opacity-40"
+              title="打开 PPT 助手"
+            >
+              <Layers3 size={14} />
+              <span>打开 PPT 助手</span>
             </button>
           )}
           {!isImageMode && hasSpreadsheetSession && onExportSpreadsheet && (
