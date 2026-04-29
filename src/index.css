@@ -275,6 +275,66 @@
   text-underline-offset: 3px;
 }
 
+.workspace-codemirror .cm-md-image-widget {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background:
+    linear-gradient(180deg, rgba(15, 23, 42, 0.82), rgba(2, 6, 23, 0.88)),
+    radial-gradient(circle at top, rgba(125, 211, 252, 0.1), transparent 52%);
+  box-shadow: 0 12px 30px rgba(2, 6, 23, 0.22);
+  user-select: none;
+}
+
+.workspace-codemirror .cm-md-image-widget-inline {
+  display: inline-flex;
+  max-width: min(18rem, 100%);
+  vertical-align: middle;
+  margin: 0.1rem 0.25rem;
+  border-radius: 14px;
+}
+
+.workspace-codemirror .cm-md-image-widget-block {
+  display: block;
+  width: min(100%, 42rem);
+  margin: 1rem 0 1.15rem;
+  border-radius: 20px;
+}
+
+.workspace-codemirror .cm-line.cm-md-image-line {
+  padding-top: 0.25rem;
+  padding-bottom: 0.35rem;
+}
+
+.workspace-codemirror .cm-md-image-widget.is-broken {
+  border-color: rgba(251, 113, 133, 0.26);
+  background: rgba(52, 12, 22, 0.55);
+}
+
+.workspace-codemirror .cm-md-image-preview {
+  display: block;
+  width: 100%;
+  max-height: 24rem;
+  object-fit: contain;
+  background: rgba(2, 6, 23, 0.34);
+  cursor: zoom-in;
+}
+
+.workspace-codemirror .cm-md-image-widget-inline .cm-md-image-preview {
+  width: auto;
+  max-width: 10rem;
+  height: 2.8rem;
+  max-height: 2.8rem;
+}
+
+.workspace-codemirror .cm-md-image-caption {
+  display: block;
+  padding: 0.45rem 0.75rem 0.55rem;
+  font-size: 0.73rem;
+  line-height: 1.35;
+  color: rgba(226, 232, 240, 0.72);
+}
+
 .workspace-codemirror .cm-md-quote-line {
   border-left: 3px solid rgba(251, 191, 36, 0.45);
   color: rgba(226, 232, 240, 0.78);

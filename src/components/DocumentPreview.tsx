@@ -1,25 +1,54 @@
-import type { MutableRefObject } from 'react'
+import { useEffect, useState, type ImgHTMLAttributes, type MutableRefObject } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import MermaidBlock from './MermaidBlock'
+import { resolveWorkspaceImagePayload } from './workspaceMarkdown'
+import type { WorkspaceImageViewPayload } from './workspaceMarkdown'
 
 interface DocumentPreviewProps {
   content: string
   workspaceRootPath?: string
   onScroll?: (progress: number) => void
   scrollRef?: MutableRefObject<HTMLDivElement | null>
+  onImageOpen?: (image: WorkspaceImageViewPayload) => void
 }
 
-function isExternalOrDataUrl(url: string) {
-  return /^(?:https?:|data:|blob:|katopgpt-)/i.test(url)
+interface PreviewImageProps extends ImgHTMLAttributes<HTMLImageElement> {
+  workspaceRootPath?: string
+  onImageOpen?: (image: WorkspaceImageViewPayload) => void
 }
 
-function buildWorkspaceImageUrl(workspaceRootPath: string | undefined, src: string | undefined) {
-  if (!workspaceRootPath || !src || isExternalOrDataUrl(src) || src.startsWith('#')) return src
-  return `katopgpt-workspace://asset?root=${encodeURIComponent(workspaceRootPath)}&path=${encodeURIComponent(src)}`
+function PreviewImage({
+  src,
+  alt,
+  workspaceRootPath,
+  onImageOpen,
+  ...props
+}: PreviewImageProps) {
+  const [isBroken, setIsBroken] = useState(false)
+  const imagePayload = resolveWorkspaceImagePayload(workspaceRootPath, src, alt)
+
+  useEffect(() => {
+    setIsBroken(false)
+  }, [src])
+
+  return (
+    <img
+      {...props}
+      src={imagePayload?.src}
+      alt={imagePayload?.alt ?? alt ?? '图片'}
+      className={`my-4 max-w-full rounded-xl border border-[#d6c8aa] bg-white/50 p-1 ${onImageOpen && !isBroken ? 'cursor-zoom-in transition hover:shadow-[0_16px_40px_rgba(120,53,15,0.16)]' : ''}`}
+      onError={() => setIsBroken(true)}
+      onClick={() => {
+        if (!isBroken && imagePayload) {
+          onImageOpen?.(imagePayload)
+        }
+      }}
+    />
+  )
 }
 
-export default function DocumentPreview({ content, workspaceRootPath, onScroll, scrollRef }: DocumentPreviewProps) {
+export default function DocumentPreview({ content, workspaceRootPath, onScroll, scrollRef, onImageOpen }: DocumentPreviewProps) {
   const markdownComponents = {
     code({ className, children, ...props }: any) {
       const match = /language-(\w+)/.exec(className || '')
@@ -37,11 +66,12 @@ export default function DocumentPreview({ content, workspaceRootPath, onScroll, 
     },
     img({ src, alt, ...props }: any) {
       return (
-        <img
+        <PreviewImage
           {...props}
-          src={buildWorkspaceImageUrl(workspaceRootPath, src)}
-          alt={alt ?? '图片'}
-          className="my-4 max-w-full rounded-xl border border-[#d6c8aa] bg-white/50 p-1"
+          src={src}
+          alt={alt}
+          workspaceRootPath={workspaceRootPath}
+          onImageOpen={onImageOpen}
         />
       )
     },

@@ -71,8 +71,76 @@ function stripJsonCodeFence(value: string) {
     .trim()
 }
 
+function extractBalancedJsonObject(value: string, startIndex: number) {
+  const expectedClosers: string[] = []
+  let isInString = false
+  let isEscaped = false
+
+  for (let index = startIndex; index < value.length; index += 1) {
+    const char = value[index]
+
+    if (isInString) {
+      if (isEscaped) {
+        isEscaped = false
+      } else if (char === '\\') {
+        isEscaped = true
+      } else if (char === '"') {
+        isInString = false
+      }
+      continue
+    }
+
+    if (char === '"') {
+      isInString = true
+      continue
+    }
+
+    if (char === '{') {
+      expectedClosers.push('}')
+      continue
+    }
+
+    if (char === '[') {
+      expectedClosers.push(']')
+      continue
+    }
+
+    if (char === '}' || char === ']') {
+      const expectedCloser = expectedClosers.pop()
+      if (expectedCloser !== char) {
+        return null
+      }
+
+      if (expectedClosers.length === 0) {
+        return value.slice(startIndex, index + 1)
+      }
+    }
+  }
+
+  return null
+}
+
+function extractImageSeriesPlanJson(rawText: string) {
+  const text = stripJsonCodeFence(rawText)
+  if (text.startsWith('{')) {
+    return text
+  }
+
+  const jsonStart = text.indexOf('{')
+  if (jsonStart < 0) {
+    return text
+  }
+
+  return extractBalancedJsonObject(text, jsonStart) ?? text
+}
+
 function parseImageSeriesPlan(rawText: string, fallbackTopic: string, count: number): ImageSeriesPlan {
-  const parsed = JSON.parse(stripJsonCodeFence(rawText)) as Partial<ImageSeriesPlan>
+  let parsed: Partial<ImageSeriesPlan>
+  try {
+    parsed = JSON.parse(extractImageSeriesPlanJson(rawText)) as Partial<ImageSeriesPlan>
+  } catch {
+    throw new Error('章节拆分结果不是有效 JSON，请重试或换用更稳定的文本模型。')
+  }
   const chapters = Array.isArray(parsed.chapters)
     ? parsed.chapters
         .slice(0, count)

@@ -5,6 +5,7 @@ import {
   Decoration,
   EditorView,
   ViewPlugin,
+  WidgetType,
   highlightActiveLine,
   keymap,
   placeholder,
@@ -22,6 +23,8 @@ import { languages } from '@codemirror/language-data'
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language'
 import { tags } from '@lezer/highlight'
 import type { DocumentSelection } from '../types'
+import { resolveWorkspaceImagePayload } from './workspaceMarkdown'
+import type { WorkspaceImageViewPayload } from './workspaceMarkdown'
 
 export interface DocumentEditorHandle {
   focus: () => void
@@ -32,12 +35,14 @@ export interface DocumentEditorHandle {
 
 interface DocumentEditorProps {
   content: string
+  workspaceRootPath?: string
   onChange: (content: string) => void
   onSelectionChange: (selection: DocumentSelection | null) => void
   onCursorLineChange?: (line: number) => void
   onScroll?: (progress: number) => void
   onSave?: () => void
   onPasteImage?: (image: File) => Promise<string>
+  onImageOpen?: (image: WorkspaceImageViewPayload) => void
 }
 
 interface DecorationEntry {
@@ -45,6 +50,13 @@ interface DecorationEntry {
   to: number
   decoration: Decoration
 }
+
+interface ExcludedRange {
+  from: number
+  to: number
+}
+
+const MARKDOWN_IMAGE_REGEX = /!\[([^\]]*?)\]\(([^)]+?)\)/g
 
 const markdownHighlightStyle = HighlightStyle.define([
   { tag: tags.heading1, class: 'cm-md-heading-token cm-md-heading-token-1' },
@@ -80,7 +92,114 @@ function addMark(entries: DecorationEntry[], from: number, to: number, className
   entries.push({ from, to, decoration: Decoration.mark({ class: className }) })
 }
 
-function addInlineDecorations(entries: DecorationEntry[], lineFrom: number, text: string, shouldHideSyntax: boolean) {
+function overlapsExcludedRange(excludedRanges: ExcludedRange[], from: number, to: number) {
+  return excludedRanges.some((range) => from < range.to && to > range.from)
+}
+
+class MarkdownImageWidget extends WidgetType {
+  constructor(
+    private readonly src: string,
+    private readonly alt: string,
+    private readonly workspaceRootPath?: string,
+    private readonly onImageOpenRef?: React.MutableRefObject<((image: WorkspaceImageViewPayload) => void) | undefined>,
+    private readonly isBlock = false
+  ) {
+    super()
+  }
+
+  eq(other: MarkdownImageWidget) {
+    return other.src === this.src
+      && other.alt === this.alt
+      && other.workspaceRootPath === this.workspaceRootPath
+      && other.isBlock === this.isBlock
+  }
+
+  toDOM() {
+    const container = document.createElement(this.isBlock ? 'div' : 'span')
+    container.className = `cm-md-image-widget ${this.isBlock ? 'cm-md-image-widget-block' : 'cm-md-image-widget-inline'}`
+
+    const image = document.createElement('img')
+    image.className = 'cm-md-image-preview'
+    const imagePayload = resolveWorkspaceImagePayload(this.workspaceRootPath, this.src, this.alt)
+    image.alt = imagePayload?.alt ?? this.alt ?? '图片'
+
+    if (imagePayload?.src) {
+      image.src = imagePayload.src
+      const handleOpen = (event: Event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        this.onImageOpenRef?.current?.(imagePayload)
+      }
+
+      container.addEventListener('click', handleOpen)
+      image.addEventListener('click', handleOpen)
+    }
+
+    const caption = document.createElement('span')
+    caption.className = 'cm-md-image-caption'
+    caption.textContent = imagePayload?.title ?? (this.alt.trim() || '图片')
+
+    image.addEventListener('error', () => {
+      container.classList.add('is-broken')
+      image.remove()
+      caption.textContent = `图片加载失败 · ${caption.textContent}`
+    }, { once: true })
+
+    container.append(image, caption)
+    return container
+  }
+
+  ignoreEvent() {
+    return true
+  }
+}
+
+function addImageDecorations(
+  entries: DecorationEntry[],
+  lineFrom: number,
+  lineTo: number,
+  text: string,
+  shouldHideSyntax: boolean,
+  workspaceRootPath?: string,
+  onImageOpenRef?: React.MutableRefObject<((image: WorkspaceImageViewPayload) => void) | undefined>
+) {
+  const excludedRanges: ExcludedRange[] = []
+  if (!shouldHideSyntax) return excludedRanges
+
+  for (const match of text.matchAll(MARKDOWN_IMAGE_REGEX)) {
+    if (match.index == null) continue
+
+    const start = lineFrom + match.index
+    const end = start + match[0].length
+    const isStandaloneImage = text.trim() === match[0]
+
+    excludedRanges.push({ from: start, to: end })
+    if (isStandaloneImage) {
+      entries.push({
+        from: lineFrom,
+        to: lineFrom,
+        decoration: Decoration.line({ class: 'cm-md-image-line' }),
+      })
+    }
+    entries.push({
+      from: start,
+      to: end,
+      decoration: Decoration.replace({
+        widget: new MarkdownImageWidget(match[2], match[1], workspaceRootPath, onImageOpenRef, isStandaloneImage),
+      }),
+    })
+  }
+
+  return excludedRanges
+}
+
+function addInlineDecorations(
+  entries: DecorationEntry[],
+  lineFrom: number,
+  text: string,
+  shouldHideSyntax: boolean,
+  excludedRanges: ExcludedRange[] = []
+) {
   const patterns: Array<{
     regex: RegExp
     className: string
@@ -98,6 +217,7 @@ function addInlineDecorations(entries: DecorationEntry[], lineFrom: number, text
       const contentStart = start + pattern.markerSize
       const contentEnd = contentStart + match[1].length
       const end = start + match[0].length
+      if (overlapsExcludedRange(excludedRanges, start, end)) continue
       addMark(entries, contentStart, contentEnd, pattern.className)
       if (shouldHideSyntax) {
         addReplace(entries, start, contentStart)
@@ -112,6 +232,7 @@ function addInlineDecorations(entries: DecorationEntry[], lineFrom: number, text
     const contentStart = markerStart + 1
     const contentEnd = contentStart + match[2].length
     const markerEnd = contentEnd + 1
+    if (overlapsExcludedRange(excludedRanges, markerStart, markerEnd)) continue
     addMark(entries, contentStart, contentEnd, 'cm-md-emphasis')
     if (shouldHideSyntax) {
       addReplace(entries, markerStart, contentStart)
@@ -119,14 +240,14 @@ function addInlineDecorations(entries: DecorationEntry[], lineFrom: number, text
     }
   }
 
-  for (const match of text.matchAll(/(!?)\[([^\]]+?)\]\(([^)]+?)\)/g)) {
+  for (const match of text.matchAll(/\[([^\]]+?)\]\(([^)]+?)\)/g)) {
     if (match.index == null) continue
     const start = lineFrom + match.index
-    const startMarkerLength = match[1] ? 2 : 1
-    const contentStart = start + startMarkerLength
-    const contentEnd = contentStart + match[2].length
+    const contentStart = start + 1
+    const contentEnd = contentStart + match[1].length
     const end = start + match[0].length
-    addMark(entries, contentStart, contentEnd, match[1] ? 'cm-md-image-link' : 'cm-md-link')
+    if (overlapsExcludedRange(excludedRanges, start, end)) continue
+    addMark(entries, contentStart, contentEnd, 'cm-md-link')
     if (shouldHideSyntax) {
       addReplace(entries, start, contentStart)
       addReplace(entries, contentEnd, end)
@@ -134,7 +255,11 @@ function addInlineDecorations(entries: DecorationEntry[], lineFrom: number, text
   }
 }
 
-function buildLivePreviewDecorations(view: EditorView) {
+function buildLivePreviewDecorations(
+  view: EditorView,
+  workspaceRootPath?: string,
+  onImageOpenRef?: React.MutableRefObject<((image: WorkspaceImageViewPayload) => void) | undefined>
+) {
   const activeLine = view.state.doc.lineAt(view.state.selection.main.head).number
   const entries: DecorationEntry[] = []
   const lineCount = view.state.doc.lines
@@ -179,7 +304,8 @@ function buildLivePreviewDecorations(view: EditorView) {
     }
 
     if (!isInFence && !fenceMatch) {
-      addInlineDecorations(entries, line.from, text, shouldHideSyntax)
+      const excludedRanges = addImageDecorations(entries, line.from, line.to, text, shouldHideSyntax, workspaceRootPath, onImageOpenRef)
+      addInlineDecorations(entries, line.from, text, shouldHideSyntax, excludedRanges)
     }
 
     if (fenceMatch) {
@@ -195,24 +321,29 @@ function buildLivePreviewDecorations(view: EditorView) {
   return builder.finish()
 }
 
-const livePreviewPlugin = ViewPlugin.fromClass(
-  class {
-    decorations: DecorationSet
+function livePreviewPlugin(
+  workspaceRootPathRef: React.MutableRefObject<string | undefined>,
+  onImageOpenRef: React.MutableRefObject<((image: WorkspaceImageViewPayload) => void) | undefined>
+) {
+  return ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet
 
-    constructor(view: EditorView) {
-      this.decorations = buildLivePreviewDecorations(view)
-    }
-
-    update(update: ViewUpdate) {
-      if (update.docChanged || update.selectionSet || update.viewportChanged) {
-        this.decorations = buildLivePreviewDecorations(update.view)
+      constructor(view: EditorView) {
+        this.decorations = buildLivePreviewDecorations(view, workspaceRootPathRef.current, onImageOpenRef)
       }
+
+      update(update: ViewUpdate) {
+        if (update.docChanged || update.selectionSet || update.viewportChanged) {
+          this.decorations = buildLivePreviewDecorations(update.view, workspaceRootPathRef.current, onImageOpenRef)
+        }
+      }
+    },
+    {
+      decorations: (plugin) => plugin.decorations,
     }
-  },
-  {
-    decorations: (plugin) => plugin.decorations,
-  }
-)
+  )
+}
 
 function scrollProgressExtension(onScrollRef: React.MutableRefObject<((progress: number) => void) | undefined>) {
   return ViewPlugin.fromClass(class {
@@ -313,12 +444,14 @@ function emitEditorSelection(
 
 const DocumentEditor = forwardRef<DocumentEditorHandle, DocumentEditorProps>(function DocumentEditor({
   content,
+  workspaceRootPath,
   onChange,
   onSelectionChange,
   onCursorLineChange,
   onScroll,
   onSave,
   onPasteImage,
+  onImageOpen,
 }, ref) {
   const hostRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
@@ -329,6 +462,8 @@ const DocumentEditor = forwardRef<DocumentEditorHandle, DocumentEditorProps>(fun
   const onScrollRef = useRef(onScroll)
   const onSaveRef = useRef(onSave)
   const onPasteImageRef = useRef(onPasteImage)
+  const onImageOpenRef = useRef(onImageOpen)
+  const workspaceRootPathRef = useRef(workspaceRootPath)
   const [pasteError, setPasteError] = useState<string | null>(null)
 
   const stats = useMemo(() => {
@@ -362,6 +497,14 @@ const DocumentEditor = forwardRef<DocumentEditorHandle, DocumentEditorProps>(fun
   useEffect(() => {
     onPasteImageRef.current = onPasteImage
   }, [onPasteImage])
+
+  useEffect(() => {
+    onImageOpenRef.current = onImageOpen
+  }, [onImageOpen])
+
+  useEffect(() => {
+    workspaceRootPathRef.current = workspaceRootPath
+  }, [workspaceRootPath])
 
   useImperativeHandle(ref, () => ({
     focus: () => {
@@ -402,7 +545,7 @@ const DocumentEditor = forwardRef<DocumentEditorHandle, DocumentEditorProps>(fun
       EditorView.lineWrapping,
       highlightActiveLine(),
       placeholder('在这里写 Markdown，或使用文档助手生成初稿。'),
-      livePreviewPlugin,
+      livePreviewPlugin(workspaceRootPathRef, onImageOpenRef),
       scrollProgressExtension(onScrollRef),
       EditorView.domEventHandlers({
         paste: (event, view) => {

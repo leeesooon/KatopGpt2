@@ -828,6 +828,100 @@ function buildUnparsedResponseError(rawText: string) {
   return `模型已返回响应，但未解析出可显示文本。上游原始响应预览：${formatRawResponsePreview(rawText)}`
 }
 
+function extractBalancedJsonValue(rawText: string, startIndex: number) {
+  let valueStart = startIndex
+  while (valueStart < rawText.length && /\s/.test(rawText[valueStart])) {
+    valueStart += 1
+  }
+
+  const firstChar = rawText[valueStart]
+  if (firstChar !== '{' && firstChar !== '[') {
+    return null
+  }
+
+  const expectedClosers: string[] = []
+  let isInString = false
+  let isEscaped = false
+
+  for (let index = valueStart; index < rawText.length; index += 1) {
+    const char = rawText[index]
+
+    if (isInString) {
+      if (isEscaped) {
+        isEscaped = false
+      } else if (char === '\\') {
+        isEscaped = true
+      } else if (char === '"') {
+        isInString = false
+      }
+      continue
+    }
+
+    if (char === '"') {
+      isInString = true
+      continue
+    }
+
+    if (char === '{') {
+      expectedClosers.push('}')
+      continue
+    }
+
+    if (char === '[') {
+      expectedClosers.push(']')
+      continue
+    }
+
+    if (char === '}' || char === ']') {
+      const expectedCloser = expectedClosers.pop()
+      if (expectedCloser !== char) {
+        return null
+      }
+
+      if (expectedClosers.length === 0) {
+        return rawText.slice(valueStart, index + 1)
+      }
+    }
+  }
+
+  return null
+}
+
+function extractMalformedCompletionContent(rawText: string) {
+  const contentFieldRegex = /"content"\s*:\s*"/g
+  let match: RegExpExecArray | null
+
+  while ((match = contentFieldRegex.exec(rawText)) !== null) {
+    const contentStart = match.index + match[0].length
+    const jsonValue = extractBalancedJsonValue(rawText, contentStart)
+    if (jsonValue) {
+      return jsonValue
+    }
+
+    const nearbyJsonOffset = rawText.slice(contentStart, contentStart + 200).search(/[{\[]/)
+    if (nearbyJsonOffset >= 0) {
+      const nearbyJsonValue = extractBalancedJsonValue(rawText, contentStart + nearbyJsonOffset)
+      if (nearbyJsonValue) {
+        return nearbyJsonValue
+      }
+    }
+  }
+
+  return null
+}
+
+function buildRecoveredCompletionPayload(content: string): CompleteChatResponsePayload {
+  return {
+    choices: [
+      {
+        message: {
+          content,
+        },
+      },
+    ],
+  }
+}
+
 function extractCompletionTextFromRaw(rawText: string): string | null {
   const trimmed = rawText.trim()
   if (!trimmed) return null
@@ -838,6 +932,11 @@ function extractCompletionTextFromRaw(rawText: string): string | null {
     if (text) return text
   } catch {
     // ignore JSON parse error
+  }
+
+  const malformedContent = extractMalformedCompletionContent(trimmed)
+  if (malformedContent) {
+    return malformedContent
   }
 
   let mergedText = ''
@@ -868,7 +967,21 @@ async function relayNonStreamCompletionResponse(sender: WebContents, streamId: s
       return
     } catch (error) {
       if (error instanceof Error && error.message.includes('上游原始响应预览')) {
+        const fallbackText = extractCompletionTextFromRaw(rawText)
+        if (fallbackText) {
+          sendChatStreamEvent(sender, { streamId, type: 'chunk', chunk: fallbackText })
+          sendChatStreamEvent(sender, { streamId, type: 'done' })
+          return
+        }
+
         throw error
+      }
+
+      const fallbackText = extractCompletionTextFromRaw(rawText)
+      if (fallbackText) {
+        sendChatStreamEvent(sender, { streamId, type: 'chunk', chunk: fallbackText })
+        sendChatStreamEvent(sender, { streamId, type: 'done' })
+        return
       }
 
       throw new Error(buildUnparsedResponseError(rawText))
@@ -940,7 +1053,7 @@ async function completeChat(request: CompleteChatRequest) {
   }
 
   if (request.responseMode === 'raw') {
-    throw new Error(buildUnparsedResponseError(rawText))
+    return buildRecoveredCompletionPayload(text)
   }
 
   return text

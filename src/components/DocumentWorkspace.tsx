@@ -21,12 +21,14 @@ import type { DocumentAgentMode, DocumentEditorMode } from '../types'
 import WorkspaceFileTree from './WorkspaceFileTree'
 import DocumentEditor from './DocumentEditor'
 import type { DocumentEditorHandle } from './DocumentEditor'
+import DocumentImageViewer from './DocumentImageViewer'
 import DocumentPreview from './DocumentPreview'
 import DocumentAssistantPanel from './DocumentAssistantPanel'
 import DocumentOutline, { buildMarkdownOutline } from './DocumentOutline'
 import { useWorkspaceAutoSave } from './useWorkspaceAutoSave'
 import { useDocumentAgentRunner } from './useDocumentAgentRunner'
 import type { RunnableDocumentAgentMode } from './useDocumentAgentRunner'
+import type { WorkspaceImageViewPayload } from './workspaceMarkdown'
 
 const MODE_LABELS: Record<DocumentEditorMode, string> = {
   write: '编辑',
@@ -35,6 +37,13 @@ const MODE_LABELS: Record<DocumentEditorMode, string> = {
 }
 
 type SideTab = 'assistant' | 'outline' | 'info'
+
+const IMAGE_SCALE_MIN = 0.5
+const IMAGE_SCALE_MAX = 4
+
+function clampImageScale(scale: number) {
+  return Math.min(IMAGE_SCALE_MAX, Math.max(IMAGE_SCALE_MIN, Math.round(scale * 100) / 100))
+}
 
 function buildComposerDraft(mode: DocumentAgentMode, documentTitle?: string) {
   if (mode === 'create') return '请帮我生成一份 Markdown 初稿，主题是：'
@@ -95,6 +104,9 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
     return state.searchEnabled || state.settings.enableSearchByDefault
   })
   const [activeLine, setActiveLine] = useState<number | null>(null)
+  const [viewerImage, setViewerImage] = useState<WorkspaceImageViewPayload | null>(null)
+  const [viewerScale, setViewerScale] = useState(1)
+  const [viewerOffset, setViewerOffset] = useState({ x: 0, y: 0 })
   const workspaceBodyRef = useRef<HTMLDivElement>(null)
   const editorScrollRef = useRef<DocumentEditorHandle>(null)
   const previewScrollRef = useRef<HTMLDivElement>(null)
@@ -289,7 +301,7 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
     if (!container) return
 
     const containerRect = container.getBoundingClientRect()
-    const maxWidth = Math.max(300, Math.min(520, Math.round(containerRect.width * 0.45)))
+    const maxWidth = Math.max(320, Math.round(containerRect.width * 0.5))
 
     const handlePointerMove = (event: PointerEvent) => {
       const nextWidth = containerRect.right - event.clientX
@@ -328,6 +340,23 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
     setActiveLine(line)
     editorScrollRef.current?.focusLine(line)
   }
+
+  const handleOpenImageViewer = useCallback((image: WorkspaceImageViewPayload) => {
+    setViewerImage(image)
+    setViewerScale(1)
+    setViewerOffset({ x: 0, y: 0 })
+  }, [])
+
+  const handleCloseImageViewer = useCallback(() => {
+    setViewerImage(null)
+    setViewerScale(1)
+    setViewerOffset({ x: 0, y: 0 })
+  }, [])
+
+  const handleImageScaleChange = useCallback((scale: number) => {
+    const nextScale = clampImageScale(scale)
+    setViewerScale(nextScale)
+  }, [])
 
   const handlePasteImage = useCallback(async (image: File) => {
     if (!currentWorkspace || !activeDocumentPath || !window.electronAPI?.saveWorkspaceImage) {
@@ -546,12 +575,14 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
                   key={activeDocumentPath ?? 'empty-editor'}
                   ref={editorScrollRef}
                   content={activeDocument?.content ?? ''}
+                  workspaceRootPath={currentWorkspace.rootPath}
                   onChange={updateActiveDocumentContent}
                   onSelectionChange={setSelection}
                   onCursorLineChange={setActiveLine}
                   onScroll={(progress) => syncScroll('editor', progress)}
                   onSave={() => void saveActiveDocument()}
                   onPasteImage={handlePasteImage}
+                  onImageOpen={handleOpenImageViewer}
                 />
               )}
               {editorMode !== 'write' && (
@@ -561,6 +592,7 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
                   workspaceRootPath={currentWorkspace.rootPath}
                   scrollRef={previewScrollRef}
                   onScroll={(progress) => syncScroll('preview', progress)}
+                  onImageOpen={handleOpenImageViewer}
                 />
               )}
             </div>
@@ -675,6 +707,14 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
           </section>
         </div>
       </div>
+      <DocumentImageViewer
+        image={viewerImage}
+        scale={viewerScale}
+        offset={viewerOffset}
+        onScaleChange={handleImageScaleChange}
+        onOffsetChange={setViewerOffset}
+        onClose={handleCloseImageViewer}
+      />
     </aside>
   )
 }
