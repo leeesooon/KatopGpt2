@@ -1,6 +1,17 @@
 /// <reference types="vite/client" />
 
-import type { PresentationExportRequest, PresentationExportResult } from '../electron/shared/presentation'
+import type {
+  PresentationCodeExportRequest,
+  PresentationCodeExportResult,
+  PresentationCodeRunRequest,
+  PresentationCodeRunResult,
+  PresentationExportRequest,
+  PresentationExportResult,
+  PresentationInstallRenderToolsResult,
+  PresentationPreviewRequest,
+  PresentationPreviewResult,
+  PresentationRenderToolsStatus,
+} from '../electron/shared/presentation'
 
 interface FetchedWebPage {
   finalUrl: string
@@ -264,7 +275,12 @@ interface ElectronAPI {
   executeSpreadsheetInstruction: (request: ExecuteSpreadsheetInstructionRequest) => Promise<ExecuteSpreadsheetInstructionResult>
   executeSpreadsheetPlan: (request: ExecuteSpreadsheetPlanRequest) => Promise<ExecuteSpreadsheetInstructionResult>
   exportSpreadsheetSession: (sessionId: string) => Promise<ExportSpreadsheetSessionResult>
+  checkPresentationRenderTools: () => Promise<PresentationRenderToolsStatus>
+  installPresentationRenderTools: () => Promise<PresentationInstallRenderToolsResult>
+  previewPresentationDeck: (request: PresentationPreviewRequest) => Promise<PresentationPreviewResult>
   exportPresentationDeck: (request: PresentationExportRequest) => Promise<PresentationExportResult>
+  runPresentationCodeDeck: (request: PresentationCodeRunRequest) => Promise<PresentationCodeRunResult>
+  exportPresentationCodeDeck: (request: PresentationCodeExportRequest) => Promise<PresentationCodeExportResult>
   testApiConnection: (config: ApiConnectionConfig) => Promise<ApiConnectionTestResult>
   completeChat: (request: CompleteChatRequest) => Promise<string | CompleteChatResponsePayload>
   generateImage: (request: GenerateImageRequest) => Promise<GenerateImageResult>

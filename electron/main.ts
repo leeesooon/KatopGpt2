@@ -11,8 +11,15 @@ import {
   type ExecuteSpreadsheetInstructionRequest,
   type ExtractDocumentTextRequest,
 } from './documentExtraction.ts'
-import { exportPresentationDeckToFile } from './presentationExport.ts'
-import type { PresentationExportRequest } from './shared/presentation'
+import { exportPresentationCodeSessionToFile, runPresentationCodeDeck } from './presentationCodeRunner.ts'
+import { exportPresentationDeckToFile, previewPresentationDeck } from './presentationExport.ts'
+import { checkPresentationRenderTools, installPresentationRenderTools } from './presentationPreview.ts'
+import type {
+  PresentationCodeExportRequest,
+  PresentationCodeRunRequest,
+  PresentationExportRequest,
+  PresentationPreviewRequest,
+} from './shared/presentation'
 
 let mainWindow: BrowserWindow | null = null
 let workspaceWindow: BrowserWindow | null = null
@@ -1625,8 +1632,17 @@ function registerDocumentIpcHandlers() {
   ipcMain.handle('files:executeSpreadsheetInstruction', (_event, request: ExecuteSpreadsheetInstructionRequest) => executeSpreadsheetInstruction(request))
   ipcMain.handle('files:executeSpreadsheetPlan', (_event, request: ExecuteSpreadsheetPlanRequest) => executeSpreadsheetPlan(request))
   ipcMain.handle('files:exportSpreadsheetSession', (_event, sessionId: string) => exportSpreadsheetSessionToFile(sessionId))
+  ipcMain.handle('presentations:checkRenderTools', () => checkPresentationRenderTools())
+  ipcMain.handle('presentations:installRenderTools', () => installPresentationRenderTools())
+  ipcMain.handle('presentations:previewDeck', (_event, request: PresentationPreviewRequest) => previewPresentationDeck(request))
   ipcMain.handle('presentations:exportDeck', (event, request: PresentationExportRequest) =>
     exportPresentationDeckToFile(request, BrowserWindow.fromWebContents(event.sender) ?? mainWindow)
+  )
+  ipcMain.handle('presentations:runCodeDeck', (_event, request: PresentationCodeRunRequest) =>
+    runPresentationCodeDeck(request)
+  )
+  ipcMain.handle('presentations:exportCodeDeck', (event, request: PresentationCodeExportRequest) =>
+    exportPresentationCodeSessionToFile(request, BrowserWindow.fromWebContents(event.sender) ?? mainWindow)
   )
 }
 

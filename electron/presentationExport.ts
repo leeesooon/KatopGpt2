@@ -1,82 +1,34 @@
 import type { BrowserWindow } from 'electron'
 import { app, dialog } from 'electron'
+import fs from 'fs/promises'
+import os from 'os'
 import path from 'path'
 import pptxgen from 'pptxgenjs'
 import {
+  auditPresentationDeckSpec,
   presentationDeckSpecSchema,
+  type PresentationSvgVisualSpec,
   type PresentationChartData,
   type PresentationDeckSpec,
   type PresentationExportRequest,
   type PresentationExportResult,
+  type PresentationPreviewRequest,
+  type PresentationPreviewResult,
   type PresentationSlideSpec,
-  type PresentationThemeId,
 } from './shared/presentation'
-
-interface ExportTheme {
-  id: PresentationThemeId
-  name: string
-  primary: string
-  secondary: string
-  accent: string
-  dark: string
-  light: string
-  paper: string
-  muted: string
-  titleFont: string
-  bodyFont: string
-}
+import { checkPresentationRenderTools, removePresentationTempDirectory, renderPresentationPreviewImages } from './presentationPreview'
+import { getPresentationTheme, type PresentationExportTheme } from './presentationThemes'
 
 const SLIDE_WIDTH = 10
 const SLIDE_HEIGHT = 5.625
 const SAFE_MARGIN = 0.5
 
-const THEMES: Record<PresentationThemeId, ExportTheme> = {
-  'executive-midnight': {
-    id: 'executive-midnight',
-    name: 'Midnight Executive',
-    primary: '1E2761',
-    secondary: 'CADCFC',
-    accent: 'FFFFFF',
-    dark: '12172F',
-    light: 'F4F7FF',
-    paper: 'F8FAFF',
-    muted: '66739A',
-    titleFont: 'Microsoft YaHei UI',
-    bodyFont: 'DengXian',
-  },
-  'warm-terra': {
-    id: 'warm-terra',
-    name: 'Warm Terracotta',
-    primary: 'B85042',
-    secondary: 'E7E8D1',
-    accent: 'A7BEAE',
-    dark: '3C241E',
-    light: 'FFF7ED',
-    paper: 'FBF4E8',
-    muted: '876B5C',
-    titleFont: 'Georgia',
-    bodyFont: 'Microsoft YaHei UI',
-  },
-  'teal-trust': {
-    id: 'teal-trust',
-    name: 'Teal Trust',
-    primary: '028090',
-    secondary: '00A896',
-    accent: '02C39A',
-    dark: '073B4C',
-    light: 'E6FFFA',
-    paper: 'F0FDFA',
-    muted: '42747A',
-    titleFont: 'Trebuchet MS',
-    bodyFont: 'Microsoft YaHei UI',
-  },
-}
-
 type PptxInstance = InstanceType<typeof pptxgen>
 type PptxSlide = ReturnType<PptxInstance['addSlide']>
+type PptxShapeName = Parameters<PptxSlide['addShape']>[0]
 
-function makeShadow(opacity = 0.14) {
-  return { type: 'outer' as const, color: '000000', blur: 7, offset: 2, angle: 135, opacity }
+function makeShadow(opacity = 0.14, blur = 8) {
+  return { type: 'outer' as const, color: '000000', blur, offset: 2, angle: 135, opacity }
 }
 
 function safeFileName(value: string) {
@@ -84,13 +36,240 @@ function safeFileName(value: string) {
   return sanitized || `KatopGPT-PPT-${Date.now()}`
 }
 
-function clip(value: string | undefined, maxChars: number) {
-  if (!value) return ''
-  return value.length <= maxChars ? value : `${value.slice(0, maxChars - 1).trimEnd()}…`
+function withPptxExtension(filePath: string) {
+  return filePath.toLowerCase().endsWith('.pptx') ? filePath : `${filePath}.pptx`
 }
 
-function getTheme(themeId: PresentationThemeId) {
-  return THEMES[themeId] ?? THEMES['executive-midnight']
+function clip(value: string | undefined, maxChars: number) {
+  if (!value) return ''
+  return value.length <= maxChars ? value : `${value.slice(0, maxChars - 1).trimEnd()}...`
+}
+
+function visualBox(box: { x: number; y: number; w: number; h: number }, x: number, y: number, w: number, h: number) {
+  return {
+    x: box.x + box.w * x,
+    y: box.y + box.h * y,
+    w: box.w * w,
+    h: box.h * h,
+  }
+}
+
+function addVisualShape(
+  slide: PptxSlide,
+  shape: PptxShapeName,
+  box: { x: number; y: number; w: number; h: number },
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  opts: { fill?: string; line?: string; transparency?: number; lineTransparency?: number; lineWidth?: number; radius?: number } = {}
+) {
+  const rawPosition = visualBox(box, x, y, w, h)
+  const isLine = shape === 'line'
+  const position = isLine
+    ? {
+        x: rawPosition.x + Math.min(rawPosition.w, 0),
+        y: rawPosition.y + Math.min(rawPosition.h, 0),
+        w: Math.abs(rawPosition.w),
+        h: Math.abs(rawPosition.h),
+      }
+    : rawPosition
+  slide.addShape(shape, {
+    ...position,
+    ...(isLine && rawPosition.w < 0 ? { flipH: true } : {}),
+    ...(isLine && rawPosition.h < 0 ? { flipV: true } : {}),
+    ...(opts.radius ? { rectRadius: opts.radius } : {}),
+    fill: opts.fill
+      ? { color: opts.fill, transparency: opts.transparency ?? 0 }
+      : { color: 'FFFFFF', transparency: 100 },
+    line: {
+      color: opts.line ?? opts.fill ?? 'FFFFFF',
+      transparency: opts.lineTransparency ?? (opts.line ? 0 : 100),
+      width: opts.lineWidth ?? 1,
+    },
+  })
+}
+
+function addVisualText(
+  slide: PptxSlide,
+  theme: PresentationExportTheme,
+  box: { x: number; y: number; w: number; h: number },
+  text: string | undefined,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  opts: { color?: string; size?: number; dark?: boolean; align?: 'left' | 'center' | 'right' } = {}
+) {
+  if (!text) return
+  slide.addText(clip(text, 18), {
+    ...visualBox(box, x, y, w, h),
+    margin: 0,
+    fontFace: theme.titleFont,
+    fontSize: opts.size ?? 16,
+    bold: true,
+    color: opts.color ?? (opts.dark ? theme.accent : theme.primary),
+    align: opts.align ?? 'center',
+    fit: 'shrink',
+  })
+}
+
+function addSvgVisual(
+  slide: PptxSlide,
+  theme: PresentationExportTheme,
+  spec: PresentationSlideSpec,
+  index: number,
+  box: { x: number; y: number; w: number; h: number },
+  fallbackKind?: PresentationSvgVisualSpec['kind']
+) {
+  const visual = {
+    ...(spec.svgVisual ?? {}),
+    kind: fallbackKind ?? spec.svgVisual?.kind ?? 'mesh',
+    label: spec.svgVisual?.label ?? spec.visual.label,
+    seed: spec.svgVisual?.seed ?? index + 17,
+  }
+  const label = visual.label || spec.visualFocus || spec.visual.label || spec.title
+  const items = (spec.callouts?.length ? spec.callouts : spec.visual.items?.length ? spec.visual.items : spec.bullets).slice(0, 4)
+  const isFullSlide = box.w >= SLIDE_WIDTH - 0.1 && box.h >= SLIDE_HEIGHT - 0.1
+
+  if (visual.kind === 'orbital') {
+    if (isFullSlide) addVisualShape(slide, 'rect', box, 0, 0, 1, 1, { fill: theme.dark, transparency: 0 })
+    addVisualShape(slide, 'ellipse', box, 0.66, 0.14, 0.42, 0.74, { fill: theme.primary, transparency: 12, lineTransparency: 100 })
+    addVisualShape(slide, 'ellipse', box, 0.72, 0.25, 0.3, 0.52, { line: theme.secondary, lineTransparency: 32, lineWidth: 3 })
+    addVisualShape(slide, 'ellipse', box, 0.79, 0.38, 0.16, 0.28, { line: theme.accent, lineTransparency: 44, lineWidth: 1.4 })
+    addVisualShape(slide, 'ellipse', box, 0.62, 0.22, 0.05, 0.09, { fill: theme.secondary, transparency: 0, lineTransparency: 100 })
+    addVisualShape(slide, 'ellipse', box, 0.9, 0.66, 0.035, 0.06, { fill: theme.accent, transparency: 6, lineTransparency: 100 })
+    addVisualShape(slide, 'line', box, 0.52, 0.68, 0.38, -0.12, { line: theme.secondary, lineTransparency: 62, lineWidth: 2 })
+    if (!isFullSlide) {
+      addVisualText(slide, theme, box, label, 0.7, 0.47, 0.32, 0.11, { color: theme.accent, size: 13 })
+    }
+    return
+  }
+
+  if (visual.kind === 'process') {
+    if (isFullSlide) addVisualShape(slide, 'rect', box, 0, 0, 1, 1, { fill: theme.paper, transparency: 0 })
+    addVisualShape(slide, 'line', box, 0.08, 0.5, 0.84, 0, { line: theme.secondary, lineTransparency: 54, lineWidth: 4 })
+    if (isFullSlide) return
+    items.forEach((item, itemIndex) => {
+      const x = 0.12 + itemIndex * 0.2
+      const y = itemIndex % 2 === 0 ? 0.36 : 0.48
+      const isPrimary = itemIndex % 2 === 0
+      addVisualShape(slide, 'roundRect', box, x, y, 0.16, 0.15, {
+        fill: isPrimary ? theme.primary : theme.card,
+        line: theme.secondary,
+        lineTransparency: 34,
+        lineWidth: 1,
+        radius: 0.08,
+      })
+      addVisualShape(slide, 'ellipse', box, x + 0.02, y + 0.04, 0.035, 0.06, {
+        fill: isPrimary ? theme.accent : theme.primary,
+        lineTransparency: 100,
+      })
+      addVisualText(slide, theme, box, item, x + 0.06, y + 0.055, 0.08, 0.04, {
+        color: isPrimary ? theme.accent : theme.dark,
+        size: isFullSlide ? 11 : 7,
+        align: 'left',
+      })
+    })
+    return
+  }
+
+  if (visual.kind === 'network') {
+    addVisualShape(slide, 'ellipse', box, 0.68, -0.08, 0.42, 0.45, { fill: theme.light, transparency: 0, lineTransparency: 100 })
+    const nodes = [
+      [0.2, 0.24, 0.12],
+      [0.44, 0.42, 0.18],
+      [0.72, 0.28, 0.13],
+      [0.78, 0.68, 0.14],
+      [0.31, 0.7, 0.1],
+    ] as const
+    ;[[0, 1], [1, 2], [1, 3], [1, 4], [2, 3], [4, 3]].forEach(([from, to]) => {
+      const a = nodes[from]
+      const b = nodes[to]
+      addVisualShape(slide, 'line', box, a[0] + a[2] / 2, a[1] + a[2] / 2, b[0] - a[0], b[1] - a[1], {
+        line: theme.secondary,
+        lineTransparency: 64,
+        lineWidth: 1.5,
+      })
+    })
+    nodes.forEach(([x, y, size], itemIndex) => {
+      addVisualShape(slide, 'ellipse', box, x, y, size, size * 1.1, {
+        fill: itemIndex === 1 ? theme.primary : theme.card,
+        line: theme.secondary,
+        lineTransparency: 28,
+        lineWidth: 1,
+      })
+    })
+    if (!isFullSlide) {
+      addVisualText(slide, theme, box, label, 0.38, 0.46, 0.24, 0.08, { color: theme.accent, size: 10 })
+    }
+    return
+  }
+
+  if (visual.kind === 'architecture') {
+    addVisualShape(slide, 'rect', box, 0, 0, 0.34, 1, { fill: theme.light, transparency: 0, lineTransparency: 100 })
+    items.forEach((item, itemIndex) => {
+      const x = 0.32 + itemIndex * 0.08
+      const y = 0.24 + itemIndex * 0.13
+      addVisualShape(slide, 'roundRect', box, x, y, 0.34, 0.1, {
+        fill: itemIndex % 2 === 0 ? theme.primary : theme.card,
+        line: theme.secondary,
+        lineTransparency: 35,
+        lineWidth: 1,
+        radius: 0.08,
+      })
+      addVisualText(slide, theme, box, item, x + 0.03, y + 0.032, 0.27, 0.04, {
+        color: itemIndex % 2 === 0 ? theme.accent : theme.dark,
+        size: isFullSlide ? 11 : 7,
+        align: 'left',
+      })
+    })
+    addVisualShape(slide, 'rect', box, 0.18, 0.25, 0.12, 0.44, { line: theme.secondary, lineTransparency: 68, lineWidth: 2 })
+    addVisualShape(slide, 'ellipse', box, 0.76, 0.25, 0.18, 0.36, { line: theme.primary, lineTransparency: 76, lineWidth: 2 })
+    return
+  }
+
+  if (visual.kind === 'radar') {
+    if (isFullSlide) addVisualShape(slide, 'rect', box, 0, 0, 1, 1, { fill: theme.dark, transparency: 0 })
+    ;[0.62, 0.42, 0.22].forEach((size, sizeIndex) => {
+      addVisualShape(slide, 'ellipse', box, 0.5 - size / 2, 0.5 - size / 2, size, size, {
+        line: theme.secondary,
+        lineTransparency: 70 - sizeIndex * 8,
+        lineWidth: 1.2,
+      })
+    })
+    ;[[0, -0.34], [0.3, -0.18], [0.3, 0.18], [0, 0.34], [-0.3, 0.18], [-0.3, -0.18]].forEach(([dx, dy]) => {
+      addVisualShape(slide, 'line', box, 0.5, 0.5, dx, dy, { line: theme.secondary, lineTransparency: 72, lineWidth: 1 })
+    })
+    addVisualShape(slide, 'ellipse', box, 0.36, 0.27, 0.3, 0.36, { fill: theme.primary, transparency: 32, line: theme.accent, lineTransparency: 18, lineWidth: 2 })
+    addVisualShape(slide, 'ellipse', box, 0.485, 0.485, 0.03, 0.03, { fill: theme.accent, lineTransparency: 100 })
+    return
+  }
+
+  if (visual.kind === 'burst') {
+    if (isFullSlide) addVisualShape(slide, 'rect', box, 0, 0, 1, 1, { fill: theme.primary, transparency: 0 })
+    addVisualShape(slide, 'ellipse', box, 0.62, 0.02, 0.55, 0.92, { fill: theme.secondary, transparency: 82, lineTransparency: 100 })
+    addVisualShape(slide, 'ellipse', box, 0.72, 0.24, 0.32, 0.54, { fill: theme.dark, transparency: 72, lineTransparency: 100 })
+    addVisualShape(slide, 'ellipse', box, 0.76, 0.34, 0.22, 0.34, { fill: theme.accent, transparency: 78, lineTransparency: 100 })
+    addVisualText(slide, theme, box, spec.heroMetric?.value, 0.73, 0.44, 0.28, 0.13, { color: theme.accent, size: isFullSlide ? 42 : 18 })
+    return
+  }
+
+  if (visual.kind === 'texture') {
+    if (isFullSlide) addVisualShape(slide, 'rect', box, 0, 0, 1, 1, { fill: theme.paper, transparency: 0 })
+    addVisualShape(slide, 'ellipse', box, -0.08, 0.72, 1.2, 0.42, { fill: theme.light, transparency: 0, lineTransparency: 100 })
+    addVisualShape(slide, 'line', box, -0.05, 0.18, 1.1, -0.09, { line: theme.secondary, lineTransparency: 78, lineWidth: 7 })
+    addVisualShape(slide, 'line', box, -0.08, 0.32, 1.08, -0.1, { line: theme.primary, lineTransparency: 82, lineWidth: 4 })
+    return
+  }
+
+  if (isFullSlide) addVisualShape(slide, 'rect', box, 0, 0, 1, 1, { fill: theme.paper, transparency: 0 })
+  addVisualShape(slide, 'ellipse', box, 0.73, -0.05, 0.48, 0.52, { fill: theme.light, transparency: 0, lineTransparency: 100 })
+  addVisualShape(slide, 'ellipse', box, 0.08, 0.18, 0.22, 0.3, { fill: theme.primary, transparency: 82, lineTransparency: 100 })
+  addVisualShape(slide, 'ellipse', box, 0.48, 0.12, 0.2, 0.25, { fill: theme.secondary, transparency: 86, lineTransparency: 100 })
+  addVisualShape(slide, 'ellipse', box, 0.72, 0.55, 0.26, 0.32, { fill: theme.accent, transparency: 88, lineTransparency: 100 })
+  addVisualShape(slide, 'line', box, 0.12, 0.2, 0.74, 0.18, { line: theme.primary, lineTransparency: 76, lineWidth: 1.8 })
+  addVisualShape(slide, 'line', box, 0.18, 0.78, 0.7, -0.22, { line: theme.secondary, lineTransparency: 68, lineWidth: 2.2 })
 }
 
 function addSlideNotes(slide: PptxSlide, spec: PresentationSlideSpec) {
@@ -98,11 +277,11 @@ function addSlideNotes(slide: PptxSlide, spec: PresentationSlideSpec) {
   slide.addNotes(spec.speakerNotes.trim())
 }
 
-function addPageNumber(slide: PptxSlide, theme: ExportTheme, index: number, total: number, isDark = false) {
+function addPageNumber(slide: PptxSlide, theme: PresentationExportTheme, index: number, total: number, isDark = false) {
   slide.addText(`${index + 1}/${total}`, {
-    x: 8.9,
+    x: 8.88,
     y: 5.08,
-    w: 0.62,
+    w: 0.64,
     h: 0.18,
     margin: 0,
     fontFace: theme.bodyFont,
@@ -112,31 +291,36 @@ function addPageNumber(slide: PptxSlide, theme: ExportTheme, index: number, tota
   })
 }
 
-function addEyebrow(slide: PptxSlide, theme: ExportTheme, text: string | undefined, isDark = false) {
+function addEyebrow(slide: PptxSlide, theme: PresentationExportTheme, text: string | undefined, isDark = false) {
   if (!text) return
-  slide.addText(clip(text, 24).toUpperCase(), {
+  slide.addText(clip(text, 26).toUpperCase(), {
     x: SAFE_MARGIN,
     y: 0.36,
-    w: 3.8,
+    w: 4.8,
     h: 0.22,
     margin: 0,
     fontFace: theme.bodyFont,
     fontSize: 8,
     bold: true,
-    charSpacing: 1.5,
+    charSpacing: 1.6,
     color: isDark ? theme.secondary : theme.primary,
   })
 }
 
-function addTitle(slide: PptxSlide, theme: ExportTheme, title: string, opts: { x?: number; y?: number; w?: number; h?: number; dark?: boolean } = {}) {
-  slide.addText(clip(title, 42), {
+function addTitle(
+  slide: PptxSlide,
+  theme: PresentationExportTheme,
+  title: string,
+  opts: { x?: number; y?: number; w?: number; h?: number; dark?: boolean; size?: number } = {}
+) {
+  slide.addText(clip(title, 46), {
     x: opts.x ?? SAFE_MARGIN,
-    y: opts.y ?? 0.78,
-    w: opts.w ?? 5.8,
-    h: opts.h ?? 0.62,
+    y: opts.y ?? 0.76,
+    w: opts.w ?? 6.2,
+    h: opts.h ?? 0.72,
     margin: 0,
     fontFace: theme.titleFont,
-    fontSize: 30,
+    fontSize: opts.size ?? 36,
     bold: true,
     color: opts.dark ? theme.accent : theme.dark,
     fit: 'shrink',
@@ -144,25 +328,40 @@ function addTitle(slide: PptxSlide, theme: ExportTheme, title: string, opts: { x
   })
 }
 
-function addSubtitle(slide: PptxSlide, theme: ExportTheme, subtitle: string | undefined, opts: { x?: number; y?: number; w?: number; dark?: boolean } = {}) {
+function addSubtitle(
+  slide: PptxSlide,
+  theme: PresentationExportTheme,
+  subtitle: string | undefined,
+  opts: { x?: number; y?: number; w?: number; h?: number; dark?: boolean; size?: number } = {}
+) {
   if (!subtitle) return
-  slide.addText(clip(subtitle, 82), {
+  slide.addText(clip(subtitle, 88), {
     x: opts.x ?? SAFE_MARGIN,
-    y: opts.y ?? 1.58,
-    w: opts.w ?? 5.5,
-    h: 0.55,
+    y: opts.y ?? 1.62,
+    w: opts.w ?? 5.8,
+    h: opts.h ?? 0.56,
     margin: 0,
     fontFace: theme.bodyFont,
-    fontSize: 13,
+    fontSize: opts.size ?? 14,
     color: opts.dark ? theme.secondary : theme.muted,
     fit: 'shrink',
     breakLine: false,
   })
 }
 
-function addBulletList(slide: PptxSlide, theme: ExportTheme, bullets: string[], x: number, y: number, w: number, h: number, isDark = false) {
+function addBulletList(
+  slide: PptxSlide,
+  theme: PresentationExportTheme,
+  bullets: string[],
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  isDark = false,
+  fontSize = 13
+) {
   const textRuns = bullets.slice(0, 5).map((bullet, index) => ({
-    text: clip(bullet, 50),
+    text: clip(bullet, 52),
     options: {
       bullet: true,
       breakLine: index < Math.min(bullets.length, 5) - 1,
@@ -178,7 +377,7 @@ function addBulletList(slide: PptxSlide, theme: ExportTheme, bullets: string[], 
     w,
     h,
     fontFace: theme.bodyFont,
-    fontSize: 13,
+    fontSize,
     color: isDark ? theme.light : theme.dark,
     margin: [2, 6, 2, 8],
     fit: 'shrink',
@@ -186,126 +385,302 @@ function addBulletList(slide: PptxSlide, theme: ExportTheme, bullets: string[], 
   })
 }
 
-function addMotif(slide: PptxSlide, pptx: PptxInstance, theme: ExportTheme, isDark = false) {
-  slide.addShape(pptx.ShapeType.arc, {
-    x: 7.08,
-    y: -0.58,
-    w: 3.15,
-    h: 3.15,
-    rotate: 18,
-    line: { color: isDark ? theme.secondary : theme.accent, transparency: 18, width: 2 },
+function addCornerLabel(slide: PptxSlide, theme: PresentationExportTheme, label: string, isDark = false) {
+  slide.addShape('roundRect', {
+    x: 0.54,
+    y: 4.82,
+    w: 2.25,
+    h: 0.3,
+    rectRadius: 0.08,
+    fill: { color: isDark ? theme.primary : theme.light, transparency: isDark ? 4 : 0 },
+    line: { color: isDark ? theme.secondary : theme.secondary, transparency: 58, width: 0.8 },
   })
-  slide.addShape(pptx.ShapeType.ellipse, {
-    x: 8.3,
-    y: 0.48,
-    w: 0.62,
-    h: 0.62,
-    fill: { color: isDark ? theme.secondary : theme.accent, transparency: 14 },
-    line: { color: isDark ? theme.secondary : theme.accent, transparency: 100 },
+  slide.addText(clip(label, 24), {
+    x: 0.72,
+    y: 4.9,
+    w: 1.88,
+    h: 0.11,
+    margin: 0,
+    fontFace: theme.bodyFont,
+    fontSize: 7,
+    bold: true,
+    charSpacing: 1.4,
+    color: isDark ? theme.secondary : theme.primary,
+    align: 'center',
   })
 }
 
-function renderCover(slide: PptxSlide, pptx: PptxInstance, theme: ExportTheme, deck: PresentationDeckSpec, spec: PresentationSlideSpec) {
+function addHeroMetric(slide: PptxSlide, theme: PresentationExportTheme, spec: PresentationSlideSpec, box: { x: number; y: number; w: number; dark?: boolean }) {
+  const metric = spec.heroMetric ?? spec.visual.stats?.[0]
+  if (!metric) return
+  slide.addText(clip(metric.value, 14), {
+    x: box.x,
+    y: box.y,
+    w: box.w,
+    h: 0.7,
+    margin: 0,
+    fontFace: 'Georgia',
+    fontSize: 58,
+    bold: true,
+    color: box.dark ? theme.accent : theme.primary,
+    fit: 'shrink',
+  })
+  slide.addText(clip(metric.label, 38), {
+    x: box.x + 0.04,
+    y: box.y + 0.86,
+    w: box.w - 0.08,
+    h: 0.24,
+    margin: 0,
+    fontFace: theme.bodyFont,
+    fontSize: 10,
+    bold: true,
+    color: box.dark ? theme.secondary : theme.muted,
+    fit: 'shrink',
+  })
+}
+
+interface SlidePointParts {
+  heading: string
+  detail: string
+}
+
+function uniquePresentationTexts(items: string[]) {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const item of items.map((value) => value.trim()).filter(Boolean)) {
+    const key = item.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(item)
+  }
+  return result
+}
+
+function splitSlidePoint(value: string): SlidePointParts {
+  const text = value.trim()
+  const separatorIndices: number[] = []
+  for (let index = 0; index < text.length; index += 1) {
+    if (/[：:，；。]/.test(text[index])) separatorIndices.push(index)
+  }
+  const firstUsableSeparator = separatorIndices.find((index) => index >= 4 && index <= 22)
+  const secondClauseSeparator = separatorIndices.find((index) => index >= 8 && index <= 22)
+  const separatorIndex = firstUsableSeparator ?? secondClauseSeparator ?? -1
+  if (separatorIndex >= 0) {
+    return {
+      heading: clip(text.slice(0, separatorIndex), 18),
+      detail: clip(text.slice(separatorIndex + 1), 76),
+    }
+  }
+
+  const headingLength = Math.min(16, Math.max(8, Math.ceil(text.length * 0.36)))
+  return {
+    heading: clip(text.slice(0, headingLength), 18),
+    detail: clip(text.length > headingLength ? text.slice(headingLength) : text, 76),
+  }
+}
+
+function getSlidePoints(spec: PresentationSlideSpec, maxItems: number) {
+  const items = uniquePresentationTexts([
+    ...spec.bullets,
+    ...(spec.visual.items ?? []),
+    ...(spec.callouts ?? []),
+  ])
+  const source = items.length > 0 ? items : [spec.visual.label || spec.visualFocus || spec.title]
+  return source.slice(0, maxItems).map(splitSlidePoint)
+}
+
+function addPointCard(
+  slide: PptxSlide,
+  theme: PresentationExportTheme,
+  point: SlidePointParts,
+  itemIndex: number,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  opts: { accent?: boolean; compact?: boolean } = {}
+) {
+  const isAccent = Boolean(opts.accent)
+  slide.addShape('roundRect', {
+    x,
+    y,
+    w,
+    h,
+    rectRadius: 0.12,
+    fill: { color: isAccent ? theme.primary : theme.card, transparency: 0 },
+    line: { color: isAccent ? theme.primary : theme.secondary, transparency: 36, width: 0.8 },
+    shadow: makeShadow(0.1, 8),
+  })
+  slide.addShape('ellipse', {
+    x: x + 0.22,
+    y: y + 0.22,
+    w: 0.38,
+    h: 0.38,
+    fill: { color: isAccent ? theme.secondary : theme.primary },
+    line: { color: theme.secondary, transparency: 100 },
+  })
+  slide.addText(String(itemIndex + 1), {
+    x: x + 0.22,
+    y: y + 0.31,
+    w: 0.38,
+    h: 0.12,
+    margin: 0,
+    fontFace: theme.bodyFont,
+    fontSize: 8,
+    bold: true,
+    align: 'center',
+    color: isAccent ? theme.dark : theme.accent,
+  })
+  slide.addText(point.heading, {
+    x: x + 0.78,
+    y: y + 0.2,
+    w: w - 1.02,
+    h: 0.24,
+    margin: 0,
+    fontFace: theme.bodyFont,
+    fontSize: opts.compact ? 10.5 : 12,
+    bold: true,
+    color: isAccent ? theme.accent : theme.dark,
+    fit: 'shrink',
+  })
+  slide.addText(point.detail, {
+    x: x + 0.78,
+    y: y + 0.52,
+    w: w - 1.04,
+    h: h - 0.68,
+    margin: 0,
+    fontFace: theme.bodyFont,
+    fontSize: opts.compact ? 7.8 : 8.6,
+    color: isAccent ? theme.secondary : theme.muted,
+    breakLine: false,
+    fit: 'shrink',
+    valign: 'top',
+  })
+}
+
+function addInsightRows(
+  slide: PptxSlide,
+  theme: PresentationExportTheme,
+  points: SlidePointParts[],
+  x: number,
+  y: number,
+  w: number,
+  isDark = false
+) {
+  points.forEach((point, itemIndex) => {
+    const rowY = y + itemIndex * 0.58
+    slide.addShape('ellipse', {
+      x,
+      y: rowY + 0.04,
+      w: 0.18,
+      h: 0.18,
+      fill: { color: isDark ? theme.secondary : theme.primary },
+      line: { color: theme.secondary, transparency: 100 },
+    })
+    slide.addText(point.heading, {
+      x: x + 0.3,
+      y: rowY,
+      w,
+      h: 0.15,
+      margin: 0,
+      fontFace: theme.bodyFont,
+      fontSize: 8.4,
+      bold: true,
+      color: isDark ? theme.light : theme.dark,
+      fit: 'shrink',
+      breakLine: false,
+    })
+    slide.addText(point.detail, {
+      x: x + 0.3,
+      y: rowY + 0.2,
+      w,
+      h: 0.25,
+      margin: 0,
+      fontFace: theme.bodyFont,
+      fontSize: 7.1,
+      color: isDark ? theme.secondary : theme.muted,
+      fit: 'shrink',
+      breakLine: false,
+    })
+  })
+}
+
+function renderCover(slide: PptxSlide, theme: PresentationExportTheme, deck: PresentationDeckSpec, spec: PresentationSlideSpec, index: number) {
   slide.background = { color: theme.dark }
-  addMotif(slide, pptx, theme, true)
-  slide.addShape(pptx.ShapeType.rect, {
+  addSvgVisual(slide, theme, spec, index, { x: 0, y: 0, w: SLIDE_WIDTH, h: SLIDE_HEIGHT }, 'orbital')
+  slide.addShape('rect', {
     x: 0,
     y: 0,
-    w: 0.18,
+    w: 6.55,
     h: SLIDE_HEIGHT,
-    fill: { color: theme.secondary, transparency: 4 },
-    line: { color: theme.secondary, transparency: 100 },
+    fill: { color: theme.dark, transparency: 8 },
+    line: { color: theme.dark, transparency: 100 },
   })
   slide.addText(theme.name, {
     x: SAFE_MARGIN,
     y: 0.58,
-    w: 3.2,
+    w: 4.1,
     h: 0.22,
     margin: 0,
     fontFace: theme.bodyFont,
     fontSize: 8,
     bold: true,
-    charSpacing: 2.2,
+    charSpacing: 2.4,
     color: theme.secondary,
   })
-  addTitle(slide, theme, spec.title || deck.title, { y: 1.48, w: 6.1, h: 1.2, dark: true })
-  addSubtitle(slide, theme, spec.subtitle || deck.subtitle || deck.goal, { y: 2.84, w: 5.8, dark: true })
-  slide.addShape(pptx.ShapeType.roundRect, {
-    x: 6.75,
-    y: 1.42,
-    w: 2.35,
-    h: 2.55,
-    rectRadius: 0.09,
-    fill: { color: theme.primary, transparency: 6 },
-    line: { color: theme.secondary, transparency: 62, width: 1 },
-    shadow: makeShadow(0.22),
-  })
-  slide.addText(clip(spec.visual.label || 'STRUCTURE', 22), {
-    x: 7.06,
-    y: 2.02,
-    w: 1.72,
-    h: 0.4,
-    margin: 0,
-    fontFace: theme.titleFont,
-    fontSize: 18,
-    bold: true,
-    color: theme.accent,
-    align: 'center',
-  })
-  slide.addText(`${deck.slides.length} 页`, {
-    x: 7.3,
-    y: 2.64,
-    w: 1.22,
-    h: 0.36,
+  addTitle(slide, theme, spec.title || deck.title, { y: 1.26, w: 6.0, h: 1.38, dark: true, size: 42 })
+  addSubtitle(slide, theme, spec.subtitle || deck.subtitle || deck.goal, { y: 2.84, w: 5.62, h: 0.64, dark: true, size: 15 })
+  addHeroMetric(slide, theme, spec, { x: 0.58, y: 3.72, w: 2.8, dark: true })
+  slide.addText(`${deck.slides.length} SLIDES`, {
+    x: 4.78,
+    y: 4.92,
+    w: 1.2,
+    h: 0.16,
     margin: 0,
     fontFace: theme.bodyFont,
-    fontSize: 13,
+    fontSize: 8,
+    bold: true,
+    charSpacing: 1.6,
     color: theme.secondary,
-    align: 'center',
+    align: 'right',
   })
 }
 
-function renderAgenda(slide: PptxSlide, pptx: PptxInstance, theme: ExportTheme, spec: PresentationSlideSpec, deck: PresentationDeckSpec) {
+function renderAgenda(slide: PptxSlide, theme: PresentationExportTheme, spec: PresentationSlideSpec, deck: PresentationDeckSpec, index: number) {
   slide.background = { color: theme.paper }
+  addSvgVisual(slide, theme, spec, index, { x: 0, y: 0, w: SLIDE_WIDTH, h: SLIDE_HEIGHT }, 'texture')
   addEyebrow(slide, theme, spec.eyebrow || 'AGENDA')
-  addTitle(slide, theme, spec.title, { y: 0.72, w: 4.8 })
-  const agendaItems = (spec.visual.items?.length ? spec.visual.items : deck.slides.slice(1, 6).map((item) => item.title)).slice(0, 5)
-  agendaItems.forEach((item, index) => {
-    const y = 1.58 + index * 0.66
-    slide.addShape(pptx.ShapeType.roundRect, {
-      x: 0.56,
+  addTitle(slide, theme, spec.title, { y: 0.68, w: 5.4, size: 36 })
+  const agendaItems = (spec.visual.items?.length ? spec.visual.items : deck.slides.slice(1, 7).map((item) => item.title)).slice(0, 6)
+  agendaItems.forEach((item, itemIndex) => {
+    const y = 1.48 + itemIndex * 0.56
+    slide.addShape('roundRect', {
+      x: 0.62 + (itemIndex % 2) * 0.16,
       y,
-      w: 8.65,
-      h: 0.46,
-      rectRadius: 0.05,
-      fill: { color: index % 2 === 0 ? theme.light : 'FFFFFF', transparency: 0 },
-      line: { color: theme.secondary, transparency: 50, width: 0.7 },
+      w: 8.28,
+      h: 0.42,
+      rectRadius: 0.08,
+      fill: { color: itemIndex % 2 === 0 ? theme.card : theme.light, transparency: 0 },
+      line: { color: theme.secondary, transparency: 42, width: 0.8 },
+      shadow: makeShadow(0.06, 5),
     })
-    slide.addShape(pptx.ShapeType.ellipse, {
-      x: 0.76,
-      y: y + 0.1,
-      w: 0.26,
-      h: 0.26,
-      fill: { color: theme.primary },
-      line: { color: theme.primary, transparency: 100 },
-    })
-    slide.addText(String(index + 1).padStart(2, '0'), {
-      x: 0.72,
-      y: y + 0.13,
-      w: 0.35,
-      h: 0.12,
+    slide.addText(String(itemIndex + 1).padStart(2, '0'), {
+      x: 0.86 + (itemIndex % 2) * 0.16,
+      y: y + 0.12,
+      w: 0.44,
+      h: 0.13,
       margin: 0,
-      fontFace: theme.bodyFont,
-      fontSize: 6.5,
+      fontFace: 'Georgia',
+      fontSize: 10,
       bold: true,
-      color: theme.accent,
+      color: theme.primary,
       align: 'center',
     })
     slide.addText(clip(item, 42), {
-      x: 1.18,
+      x: 1.46 + (itemIndex % 2) * 0.16,
       y: y + 0.1,
-      w: 7.55,
-      h: 0.22,
+      w: 6.9,
+      h: 0.19,
       margin: 0,
       fontFace: theme.bodyFont,
       fontSize: 12,
@@ -316,246 +691,395 @@ function renderAgenda(slide: PptxSlide, pptx: PptxInstance, theme: ExportTheme, 
   })
 }
 
-function renderSection(slide: PptxSlide, pptx: PptxInstance, theme: ExportTheme, spec: PresentationSlideSpec, index: number) {
+function renderSection(slide: PptxSlide, theme: PresentationExportTheme, spec: PresentationSlideSpec, index: number) {
   slide.background = { color: theme.primary }
-  addMotif(slide, pptx, theme, true)
+  addSvgVisual(slide, theme, spec, index, { x: 0, y: 0, w: SLIDE_WIDTH, h: SLIDE_HEIGHT }, 'burst')
+  slide.addShape('rect', {
+    x: 0,
+    y: 0,
+    w: 6.48,
+    h: SLIDE_HEIGHT,
+    fill: { color: theme.primary, transparency: 8 },
+    line: { color: theme.primary, transparency: 100 },
+  })
   slide.addText(String(index + 1).padStart(2, '0'), {
-    x: 0.52,
-    y: 0.68,
-    w: 1.1,
-    h: 0.78,
+    x: 0.56,
+    y: 0.62,
+    w: 1.2,
+    h: 0.74,
     margin: 0,
     fontFace: 'Georgia',
-    fontSize: 40,
+    fontSize: 44,
     bold: true,
     color: theme.secondary,
   })
-  addTitle(slide, theme, spec.title, { x: 0.56, y: 1.76, w: 6.3, h: 0.9, dark: true })
-  addSubtitle(slide, theme, spec.subtitle || spec.visual.label, { x: 0.58, y: 2.78, w: 5.8, dark: true })
-  addBulletList(slide, theme, spec.bullets.slice(0, 3), 6.55, 1.52, 2.5, 2.1, true)
+  addTitle(slide, theme, spec.title, { x: 0.58, y: 1.72, w: 6.0, h: 0.98, dark: true, size: 40 })
+  addSubtitle(slide, theme, spec.subtitle || spec.visualFocus || spec.visual.label, { x: 0.62, y: 2.86, w: 5.55, h: 0.58, dark: true, size: 14 })
+  addBulletList(slide, theme, spec.bullets.slice(0, 3), 6.72, 1.52, 2.4, 2.08, true, 12)
 }
 
-function renderCards(slide: PptxSlide, pptx: PptxInstance, theme: ExportTheme, spec: PresentationSlideSpec) {
+function renderCards(slide: PptxSlide, theme: PresentationExportTheme, spec: PresentationSlideSpec, index: number) {
   slide.background = { color: theme.paper }
+  addSvgVisual(slide, theme, spec, index, { x: 0, y: 0, w: SLIDE_WIDTH, h: SLIDE_HEIGHT }, 'mesh')
   addEyebrow(slide, theme, spec.eyebrow || spec.visual.label)
-  addTitle(slide, theme, spec.title, { y: 0.68, w: 6.2 })
-  const items = (spec.visual.items?.length ? spec.visual.items : spec.bullets).slice(0, 4)
-  items.forEach((item, index) => {
-    const x = 0.58 + (index % 2) * 4.45
-    const y = 1.58 + Math.floor(index / 2) * 1.45
-    slide.addShape(pptx.ShapeType.rect, {
-      x,
-      y,
-      w: 3.95,
-      h: 1.03,
-      fill: { color: index % 2 === 0 ? 'FFFFFF' : theme.light },
-      line: { color: theme.secondary, transparency: 46, width: 0.75 },
-      shadow: makeShadow(0.08),
+  addTitle(slide, theme, spec.title, { y: 0.68, w: 6.4, size: 34 })
+  const points = getSlidePoints(spec, 4)
+
+  if (spec.slideVariant === 'metric_wall') {
+    const [firstPoint, ...restPoints] = points
+    addPointCard(slide, theme, firstPoint, 0, 0.62, 1.56, 4.24, 2.9, { accent: true })
+    restPoints.slice(0, 3).forEach((point, itemIndex) => {
+      addPointCard(slide, theme, point, itemIndex + 1, 5.16, 1.56 + itemIndex * 0.98, 3.88, 0.78, { compact: true })
     })
-    slide.addShape(pptx.ShapeType.ellipse, {
-      x: x + 0.24,
-      y: y + 0.24,
-      w: 0.42,
-      h: 0.42,
-      fill: { color: theme.primary },
-      line: { color: theme.primary, transparency: 100 },
+    return
+  }
+
+  points.forEach((point, itemIndex) => {
+    const x = 0.62 + (itemIndex % 2) * 4.42
+    const y = 1.46 + Math.floor(itemIndex / 2) * 1.48
+    const isAccentCard = itemIndex === 0 || itemIndex === 3
+    addPointCard(slide, theme, point, itemIndex, x, y, 3.94, 1.2, { accent: isAccentCard })
+  })
+}
+
+function renderTwoColumn(slide: PptxSlide, theme: PresentationExportTheme, spec: PresentationSlideSpec, index: number) {
+  slide.background = { color: theme.paper }
+  const isSplitHero = spec.slideVariant === 'split_hero'
+  if (isSplitHero) {
+    slide.addShape('rect', {
+      x: 0,
+      y: 0,
+      w: 4.52,
+      h: SLIDE_HEIGHT,
+      fill: { color: theme.light, transparency: 0 },
+      line: { color: theme.light, transparency: 100 },
     })
-    slide.addText(String(index + 1), {
-      x: x + 0.24,
-      y: y + 0.34,
-      w: 0.42,
-      h: 0.12,
+    slide.addShape('roundRect', {
+      x: 0.58,
+      y: 0.78,
+      w: 3.48,
+      h: 4.0,
+      rectRadius: 0.16,
+      fill: { color: theme.card, transparency: 0 },
+      line: { color: theme.secondary, transparency: 46, width: 1 },
+      shadow: makeShadow(0.13, 10),
+    })
+    addSvgVisual(slide, theme, spec, index, { x: 0.72, y: 0.94, w: 3.2, h: 3.68 }, 'network')
+    slide.addText(clip(spec.eyebrow || spec.visual.label, 26).toUpperCase(), {
+      x: 4.88,
+      y: 0.42,
+      w: 3.9,
+      h: 0.22,
       margin: 0,
       fontFace: theme.bodyFont,
       fontSize: 8,
       bold: true,
-      align: 'center',
-      color: theme.accent,
+      charSpacing: 1.6,
+      color: theme.primary,
     })
-    slide.addText(clip(item, 48), {
-      x: x + 0.86,
-      y: y + 0.26,
-      w: 2.75,
-      h: 0.42,
-      margin: 0,
-      fontFace: theme.bodyFont,
-      fontSize: 12,
-      bold: true,
-      color: theme.dark,
-      fit: 'shrink',
-    })
+    addTitle(slide, theme, spec.title, { x: 4.88, y: 0.76, w: 4.32, size: 34 })
+    addSubtitle(slide, theme, spec.subtitle, { x: 4.9, y: 1.52, w: 3.88, size: 12 })
+    addBulletList(slide, theme, spec.bullets, 4.88, 2.14, 4.24, 2.32)
+    return
+  }
+
+  addEyebrow(slide, theme, spec.eyebrow || spec.visual.label)
+  addTitle(slide, theme, spec.title, { y: 0.66, w: 5.64, size: 34 })
+  addSubtitle(slide, theme, spec.subtitle, { y: 1.42, w: 4.72, size: 12 })
+  addBulletList(slide, theme, spec.bullets, 0.58, 2.08, 4.28, 2.38)
+  slide.addShape('rect', {
+    x: 5.24,
+    y: 0,
+    w: 4.76,
+    h: SLIDE_HEIGHT,
+    fill: { color: theme.light, transparency: 0 },
+    line: { color: theme.light, transparency: 100 },
   })
+  slide.addShape('roundRect', {
+    x: 5.68,
+    y: 0.78,
+    w: 3.72,
+    h: 3.92,
+    rectRadius: 0.16,
+    fill: { color: theme.card, transparency: 0 },
+    line: { color: theme.secondary, transparency: 46, width: 1 },
+    shadow: makeShadow(0.13, 10),
+  })
+  addSvgVisual(slide, theme, spec, index, { x: 5.8, y: 0.9, w: 3.48, h: 3.68 }, spec.layout === 'two_column' ? 'network' : 'architecture')
 }
 
-function renderTwoColumn(slide: PptxSlide, pptx: PptxInstance, theme: ExportTheme, spec: PresentationSlideSpec) {
+function renderTimeline(slide: PptxSlide, theme: PresentationExportTheme, spec: PresentationSlideSpec, index: number) {
   slide.background = { color: theme.paper }
-  addEyebrow(slide, theme, spec.eyebrow)
-  addTitle(slide, theme, spec.title, { y: 0.66, w: 5.8 })
-  addBulletList(slide, theme, spec.bullets, 0.58, 1.62, 4.22, 3.0)
-  slide.addShape(pptx.ShapeType.roundRect, {
-    x: 5.55,
-    y: 1.12,
-    w: 3.85,
-    h: 3.45,
-    rectRadius: 0.1,
-    fill: { color: theme.primary },
-    line: { color: theme.primary, transparency: 100 },
-    shadow: makeShadow(0.14),
+  addSvgVisual(slide, theme, spec, index, { x: 0, y: 0, w: SLIDE_WIDTH, h: SLIDE_HEIGHT }, 'process')
+  slide.addShape('rect', {
+    x: 0,
+    y: 0,
+    w: SLIDE_WIDTH,
+    h: 1.36,
+    fill: { color: theme.paper, transparency: 8 },
+    line: { color: theme.paper, transparency: 100 },
   })
-  slide.addText(clip(spec.visual.label || '核心结构', 34), {
-    x: 5.98,
-    y: 1.64,
-    w: 3.0,
-    h: 0.56,
-    margin: 0,
-    fontFace: theme.titleFont,
-    fontSize: 20,
-    bold: true,
-    color: theme.accent,
-    fit: 'shrink',
-  })
-  ;(spec.visual.items ?? spec.bullets).slice(0, 3).forEach((item, index) => {
-    slide.addText(clip(item, 30), {
-      x: 6.02,
-      y: 2.38 + index * 0.47,
-      w: 2.82,
-      h: 0.2,
-      margin: 0,
-      fontFace: theme.bodyFont,
-      fontSize: 10,
-      color: theme.light,
-      fit: 'shrink',
-    })
-  })
-}
-
-function renderTimeline(slide: PptxSlide, pptx: PptxInstance, theme: ExportTheme, spec: PresentationSlideSpec) {
-  slide.background = { color: theme.paper }
   addEyebrow(slide, theme, spec.eyebrow || 'ROADMAP')
-  addTitle(slide, theme, spec.title, { y: 0.68, w: 6.2 })
-  const items = (spec.visual.items?.length ? spec.visual.items : spec.bullets).slice(0, 5)
-  slide.addShape(pptx.ShapeType.line, {
-    x: 0.92,
-    y: 3,
-    w: 8.15,
-    h: 0,
-    line: { color: theme.secondary, width: 2 },
-  })
-  items.forEach((item, index) => {
-    const x = 0.82 + index * (8.05 / Math.max(items.length - 1, 1))
-    slide.addShape(pptx.ShapeType.ellipse, {
-      x: x - 0.13,
-      y: 2.86,
-      w: 0.32,
-      h: 0.32,
-      fill: { color: theme.primary },
-      line: { color: theme.primary, transparency: 100 },
+  addTitle(slide, theme, spec.title, { y: 0.58, w: 6.5, size: 34 })
+  const points = getSlidePoints(spec, 5)
+
+  const shouldUseStackedTimeline = spec.slideVariant !== 'process_ribbon'
+    || points.length >= 4
+    || points.some((point) => point.heading.length + point.detail.length > 34)
+  if (shouldUseStackedTimeline) {
+    points.slice(0, 4).forEach((point, itemIndex) => {
+      const y = 1.52 + itemIndex * 0.82
+      slide.addShape('roundRect', {
+        x: 0.7,
+        y,
+        w: 8.42,
+        h: 0.62,
+        rectRadius: 0.08,
+        fill: { color: itemIndex % 2 === 0 ? theme.card : theme.light },
+        line: { color: theme.secondary, transparency: 46, width: 0.8 },
+        shadow: makeShadow(0.06, 5),
+      })
+      slide.addText(String(itemIndex + 1).padStart(2, '0'), {
+        x: 0.98,
+        y: y + 0.18,
+        w: 0.44,
+        h: 0.13,
+        margin: 0,
+        fontFace: 'Georgia',
+        fontSize: 11,
+        bold: true,
+        color: theme.primary,
+        align: 'center',
+      })
+      slide.addText(point.heading, {
+        x: 1.62,
+        y: y + 0.12,
+        w: 1.7,
+        h: 0.2,
+        margin: 0,
+        fontFace: theme.bodyFont,
+        fontSize: 11,
+        bold: true,
+        color: theme.dark,
+        fit: 'shrink',
+      })
+      slide.addText(point.detail, {
+        x: 3.42,
+        y: y + 0.13,
+        w: 5.2,
+        h: 0.3,
+        margin: 0,
+        fontFace: theme.bodyFont,
+        fontSize: 9,
+        color: theme.muted,
+        fit: 'shrink',
+      })
     })
-    slide.addText(`0${index + 1}`, {
-      x: x - 0.32,
-      y: 2.2,
-      w: 0.72,
+    return
+  }
+
+  slide.addShape('line', {
+    x: 0.82,
+    y: 3.18,
+    w: 8.36,
+    h: 0,
+    line: { color: theme.primary, width: 3, transparency: 16 },
+  })
+  points.forEach((point, itemIndex) => {
+    const x = 0.86 + itemIndex * (8.22 / Math.max(points.length - 1, 1))
+    const y = itemIndex % 2 === 0 ? 2.26 : 3.62
+    slide.addShape('ellipse', {
+      x: x - 0.2,
+      y: 2.98,
+      w: 0.4,
+      h: 0.4,
+      fill: { color: theme.primary },
+      line: { color: theme.accent, transparency: 18, width: 1 },
+    })
+    slide.addShape('roundRect', {
+      x: x - 0.76,
+      y,
+      w: 1.52,
+      h: 0.76,
+      rectRadius: 0.08,
+      fill: { color: itemIndex % 2 === 0 ? theme.card : theme.primary, transparency: 0 },
+      line: { color: theme.secondary, transparency: 38, width: 0.8 },
+      shadow: makeShadow(0.08, 6),
+    })
+    slide.addText(point.heading, {
+      x: x - 0.62,
+      y: y + 0.12,
+      w: 1.24,
+      h: 0.16,
+      margin: 0,
+      fontFace: theme.bodyFont,
+      fontSize: 8.2,
+      bold: true,
+      color: itemIndex % 2 === 0 ? theme.dark : theme.accent,
+      align: 'center',
+      fit: 'shrink',
+    })
+    slide.addText(point.detail, {
+      x: x - 0.62,
+      y: y + 0.36,
+      w: 1.24,
       h: 0.22,
       margin: 0,
-      fontFace: theme.titleFont,
-      fontSize: 13,
-      bold: true,
-      color: theme.primary,
-      align: 'center',
-    })
-    slide.addText(clip(item, 24), {
-      x: x - 0.62,
-      y: 3.34,
-      w: 1.35,
-      h: 0.58,
-      margin: 0,
       fontFace: theme.bodyFont,
-      fontSize: 9,
-      color: theme.dark,
+      fontSize: 6.6,
+      color: itemIndex % 2 === 0 ? theme.muted : theme.secondary,
       align: 'center',
       fit: 'shrink',
     })
   })
 }
 
-function renderComparison(slide: PptxSlide, pptx: PptxInstance, theme: ExportTheme, spec: PresentationSlideSpec) {
+function renderComparison(slide: PptxSlide, theme: PresentationExportTheme, spec: PresentationSlideSpec, index: number) {
   slide.background = { color: theme.paper }
+  addSvgVisual(slide, theme, spec, index, { x: 0, y: 0, w: SLIDE_WIDTH, h: SLIDE_HEIGHT }, 'texture')
   addEyebrow(slide, theme, spec.eyebrow || 'COMPARISON')
-  addTitle(slide, theme, spec.title, { y: 0.68, w: 6.2 })
-  const items = (spec.visual.items?.length ? spec.visual.items : spec.bullets).slice(0, 4)
+  addTitle(slide, theme, spec.title, { y: 0.64, w: 6.35, size: 34 })
+  const points = getSlidePoints(spec, 4)
   const columns = [
-    { x: 0.64, title: '现状 / 挑战', color: theme.secondary },
-    { x: 5.12, title: '方案 / 机会', color: theme.accent },
+    { x: 0.62, title: '现状 / 挑战', color: theme.secondary, fill: theme.card },
+    { x: 5.12, title: '机会 / 方案', color: theme.primary, fill: theme.light },
   ]
   columns.forEach((column, columnIndex) => {
-    slide.addShape(pptx.ShapeType.rect, {
+    slide.addShape('roundRect', {
       x: column.x,
-      y: 1.54,
+      y: 1.5,
       w: 4.0,
-      h: 3.05,
-      fill: { color: columnIndex === 0 ? 'FFFFFF' : theme.light },
-      line: { color: column.color, transparency: 28, width: 1 },
-      shadow: makeShadow(0.08),
+      h: 3.12,
+      rectRadius: 0.14,
+      fill: { color: column.fill },
+      line: { color: column.color, transparency: 24, width: 1.1 },
+      shadow: makeShadow(0.1, 8),
+    })
+    slide.addShape('rect', {
+      x: column.x,
+      y: 1.5,
+      w: 0.18,
+      h: 3.12,
+      fill: { color: column.color },
+      line: { color: column.color, transparency: 100 },
     })
     slide.addText(column.title, {
-      x: column.x + 0.3,
-      y: 1.86,
-      w: 3.25,
-      h: 0.25,
+      x: column.x + 0.34,
+      y: 1.84,
+      w: 3.2,
+      h: 0.26,
       margin: 0,
       fontFace: theme.bodyFont,
-      fontSize: 14,
+      fontSize: 15,
       bold: true,
       color: theme.primary,
     })
-    addBulletList(slide, theme, items.slice(columnIndex * 2, columnIndex * 2 + 2), column.x + 0.28, 2.4, 3.28, 1.36)
+    points.slice(columnIndex * 2, columnIndex * 2 + 2).forEach((point, itemIndex) => {
+      const y = 2.34 + itemIndex * 0.9
+      slide.addShape('ellipse', {
+        x: column.x + 0.36,
+        y,
+        w: 0.22,
+        h: 0.22,
+        fill: { color: column.color },
+        line: { color: column.color, transparency: 100 },
+      })
+      slide.addText(point.heading, {
+        x: column.x + 0.72,
+        y: y - 0.02,
+        w: 2.82,
+        h: 0.22,
+        margin: 0,
+        fontFace: theme.bodyFont,
+        fontSize: 11,
+        bold: true,
+        color: theme.dark,
+        fit: 'shrink',
+      })
+      slide.addText(point.detail, {
+        x: column.x + 0.72,
+        y: y + 0.28,
+        w: 2.86,
+        h: 0.34,
+        margin: 0,
+        fontFace: theme.bodyFont,
+        fontSize: 8.5,
+        color: theme.muted,
+        fit: 'shrink',
+      })
+    })
   })
+
+  if (spec.slideVariant === 'comparison_matrix') {
+    slide.addShape('line', {
+      x: 4.84,
+      y: 2.1,
+      w: 0,
+      h: 1.9,
+      line: { color: theme.primary, transparency: 38, width: 1.2, beginArrowType: 'none', endArrowType: 'triangle' },
+    })
+  }
 }
 
-function renderDataHighlight(slide: PptxSlide, pptx: PptxInstance, theme: ExportTheme, spec: PresentationSlideSpec) {
+function renderDataHighlight(slide: PptxSlide, theme: PresentationExportTheme, spec: PresentationSlideSpec, index: number) {
   slide.background = { color: theme.primary }
+  addSvgVisual(slide, theme, spec, index, { x: 0, y: 0, w: SLIDE_WIDTH, h: SLIDE_HEIGHT }, 'burst')
+  slide.addShape('rect', {
+    x: 0,
+    y: 0,
+    w: SLIDE_WIDTH,
+    h: SLIDE_HEIGHT,
+    fill: { color: theme.primary, transparency: 16 },
+    line: { color: theme.primary, transparency: 100 },
+  })
   addEyebrow(slide, theme, spec.eyebrow || 'KEY METRICS', true)
-  addTitle(slide, theme, spec.title, { y: 0.72, w: 5.8, dark: true })
-  const stats = spec.visual.stats?.length
-    ? spec.visual.stats.slice(0, 3)
+  addTitle(slide, theme, spec.title, { y: 0.7, w: 5.8, dark: true, size: 36 })
+  const stats = [
+    ...(spec.heroMetric ? [spec.heroMetric] : []),
+    ...(spec.visual.stats ?? []),
+  ].slice(0, 3)
+  const safeStats = stats.length
+    ? stats
     : [
         { value: `${spec.bullets.length || 3}`, label: '关键抓手' },
         { value: '2x', label: '价值放大' },
         { value: '90d', label: '推进窗口' },
       ]
-  stats.forEach((stat, index) => {
-    const x = 0.7 + index * 3.05
-    slide.addShape(pptx.ShapeType.roundRect, {
+  safeStats.forEach((stat, itemIndex) => {
+    const x = 0.62 + itemIndex * 3.05
+    slide.addShape('roundRect', {
       x,
-      y: 2.18,
-      w: 2.44,
-      h: 1.52,
-      rectRadius: 0.08,
-      fill: { color: 'FFFFFF', transparency: 8 },
-      line: { color: theme.secondary, transparency: 68, width: 1 },
+      y: 2.04,
+      w: 2.52,
+      h: 1.82,
+      rectRadius: 0.12,
+      fill: { color: 'FFFFFF', transparency: 10 },
+      line: { color: theme.secondary, transparency: 62, width: 1 },
+      shadow: makeShadow(0.18, 12),
     })
-    slide.addText(clip(stat.value, 12), {
-      x: x + 0.22,
-      y: 2.48,
-      w: 1.98,
-      h: 0.42,
+    slide.addText(clip(stat.value, 13), {
+      x: x + 0.18,
+      y: 2.26,
+      w: 2.16,
+      h: 0.76,
       margin: 0,
       fontFace: 'Georgia',
-      fontSize: 28,
+      fontSize: 56,
       bold: true,
-      color: theme.accent,
+      color: theme.primary,
       align: 'center',
       fit: 'shrink',
     })
-    slide.addText(clip(stat.label, 32), {
-      x: x + 0.28,
-      y: 3.16,
-      w: 1.88,
-      h: 0.24,
+    slide.addText(clip(stat.label, 34), {
+      x: x + 0.26,
+      y: 3.26,
+      w: 2.0,
+      h: 0.3,
       margin: 0,
       fontFace: theme.bodyFont,
-      fontSize: 10,
-      color: theme.light,
+      fontSize: 11,
+      bold: true,
+      color: theme.dark,
       align: 'center',
       fit: 'shrink',
     })
@@ -568,31 +1092,43 @@ function chartTypeFor(pptx: PptxInstance, chart: PresentationChartData) {
   return pptx.ChartType.bar
 }
 
-function renderChart(slide: PptxSlide, pptx: PptxInstance, theme: ExportTheme, spec: PresentationSlideSpec) {
+function renderChart(slide: PptxSlide, pptx: PptxInstance, theme: PresentationExportTheme, spec: PresentationSlideSpec, index: number) {
   slide.background = { color: theme.paper }
+  addSvgVisual(slide, theme, spec, index, { x: 0, y: 0, w: SLIDE_WIDTH, h: SLIDE_HEIGHT }, 'mesh')
   addEyebrow(slide, theme, spec.eyebrow || 'DATA VIEW')
-  addTitle(slide, theme, spec.title, { y: 0.62, w: 5.8 })
+  addTitle(slide, theme, spec.title, { y: 0.62, w: 5.8, size: 34 })
   const fallbackLabels = spec.bullets.slice(0, 4).map((item) => item.slice(0, 8)).filter(Boolean)
-  const safeFallbackLabels = fallbackLabels.length >= 2 ? fallbackLabels : ['维度 A', '维度 B', '维度 C']
+  const safeFallbackLabels = fallbackLabels.length >= 2 ? fallbackLabels : ['影响程度', '可控性', '落地难度']
   const fallbackChart: PresentationChartData = {
     type: 'bar',
-    title: spec.visual.label || '关键维度对比',
+    title: spec.visual.label || '优先级示意，待补充真实数据',
     labels: safeFallbackLabels,
-    values: safeFallbackLabels.map((_, index) => 70 - index * 10),
+    values: safeFallbackLabels.map((_, itemIndex) => Math.max(2, 4 - itemIndex)),
   }
   const chart = spec.visual.chart && spec.visual.chart.labels.length === spec.visual.chart.values.length
     ? spec.visual.chart
     : fallbackChart
+  const points = getSlidePoints(spec, 3)
 
+  slide.addShape('roundRect', {
+    x: 0.62,
+    y: 1.36,
+    w: 5.85,
+    h: 3.54,
+    rectRadius: 0.14,
+    fill: { color: theme.card, transparency: 0 },
+    line: { color: theme.secondary, transparency: 48, width: 0.8 },
+    shadow: makeShadow(0.1, 8),
+  })
   slide.addChart(chartTypeFor(pptx, chart), [{
     name: chart.title || '数据',
     labels: chart.labels,
     values: chart.values,
   }], {
-    x: 0.72,
-    y: 1.45,
-    w: 5.7,
-    h: 3.36,
+    x: 0.86,
+    y: 1.68,
+    w: 5.36,
+    h: 2.96,
     showTitle: Boolean(chart.title),
     title: chart.title,
     showLegend: false,
@@ -602,39 +1138,85 @@ function renderChart(slide: PptxSlide, pptx: PptxInstance, theme: ExportTheme, s
     catAxisLabelColor: theme.muted,
     valAxisLabelColor: theme.muted,
   })
-  addBulletList(slide, theme, spec.bullets.slice(0, 3), 6.85, 1.62, 2.34, 2.55)
+  slide.addShape('roundRect', {
+    x: 6.9,
+    y: 1.52,
+    w: 2.32,
+    h: 3.08,
+    rectRadius: 0.12,
+    fill: { color: theme.primary },
+    line: { color: theme.primary, transparency: 100 },
+    shadow: makeShadow(0.12, 9),
+  })
+  slide.addText('解读重点', {
+    x: 7.12,
+    y: 1.78,
+    w: 1.86,
+    h: 0.2,
+    margin: 0,
+    fontFace: theme.bodyFont,
+    fontSize: 11,
+    bold: true,
+    color: theme.accent,
+  })
+  addInsightRows(slide, theme, points, 7.12, 2.18, 1.62, true)
+  addHeroMetric(slide, theme, spec, { x: 7.12, y: 3.78, w: 1.8, dark: true })
 }
 
-function renderClosing(slide: PptxSlide, pptx: PptxInstance, theme: ExportTheme, spec: PresentationSlideSpec) {
+function renderClosing(slide: PptxSlide, theme: PresentationExportTheme, spec: PresentationSlideSpec, index: number) {
   slide.background = { color: theme.dark }
-  addMotif(slide, pptx, theme, true)
-  addTitle(slide, theme, spec.title || '谢谢', { x: 0.72, y: 1.42, w: 5.8, h: 0.9, dark: true })
-  addSubtitle(slide, theme, spec.subtitle || spec.visual.label || spec.bullets[0], { x: 0.76, y: 2.44, w: 5.2, dark: true })
-  slide.addShape(pptx.ShapeType.roundRect, {
-    x: 6.78,
-    y: 1.62,
-    w: 2.3,
-    h: 1.78,
-    rectRadius: 0.08,
-    fill: { color: theme.primary, transparency: 10 },
-    line: { color: theme.secondary, transparency: 62, width: 1 },
+  addSvgVisual(slide, theme, spec, index, { x: 0, y: 0, w: SLIDE_WIDTH, h: SLIDE_HEIGHT }, 'orbital')
+  slide.addShape('rect', {
+    x: 0,
+    y: 0,
+    w: 6.68,
+    h: SLIDE_HEIGHT,
+    fill: { color: theme.dark, transparency: 4 },
+    line: { color: theme.dark, transparency: 100 },
+  })
+  addTitle(slide, theme, spec.title || '谢谢', { x: 0.72, y: 1.28, w: 5.7, h: 0.98, dark: true, size: 42 })
+  addSubtitle(slide, theme, spec.subtitle || spec.visual.label || spec.bullets[0], { x: 0.76, y: 2.46, w: 5.1, dark: true, size: 14 })
+  const callouts = (spec.callouts?.length ? spec.callouts : spec.bullets).slice(0, 3)
+  callouts.forEach((item, itemIndex) => {
+    slide.addText(clip(item, 28), {
+      x: 0.82,
+      y: 3.46 + itemIndex * 0.34,
+      w: 4.52,
+      h: 0.18,
+      margin: 0,
+      fontFace: theme.bodyFont,
+      fontSize: 10,
+      bold: true,
+      color: itemIndex === 0 ? theme.accent : theme.secondary,
+      fit: 'shrink',
+    })
+  })
+  slide.addShape('roundRect', {
+    x: 6.88,
+    y: 1.72,
+    w: 2.22,
+    h: 1.82,
+    rectRadius: 0.12,
+    fill: { color: theme.primary, transparency: 6 },
+    line: { color: theme.secondary, transparency: 52, width: 1 },
+    shadow: makeShadow(0.18, 12),
   })
   slide.addText('NEXT', {
-    x: 7.22,
-    y: 2.05,
-    w: 1.38,
+    x: 7.24,
+    y: 2.14,
+    w: 1.48,
     h: 0.34,
     margin: 0,
     fontFace: theme.titleFont,
-    fontSize: 21,
+    fontSize: 24,
     bold: true,
     color: theme.accent,
     align: 'center',
   })
   slide.addText('行动建议', {
-    x: 7.22,
-    y: 2.58,
-    w: 1.38,
+    x: 7.24,
+    y: 2.72,
+    w: 1.48,
     h: 0.2,
     margin: 0,
     fontFace: theme.bodyFont,
@@ -646,63 +1228,144 @@ function renderClosing(slide: PptxSlide, pptx: PptxInstance, theme: ExportTheme,
 
 function renderSlide(pptx: PptxInstance, deck: PresentationDeckSpec, spec: PresentationSlideSpec, index: number) {
   const slide = pptx.addSlide()
-  const theme = getTheme(deck.themeId)
+  const theme = getPresentationTheme(deck.themeId)
 
   if (spec.layout === 'cover') {
-    renderCover(slide, pptx, theme, deck, spec)
+    renderCover(slide, theme, deck, spec, index)
   } else if (spec.layout === 'agenda') {
-    renderAgenda(slide, pptx, theme, spec, deck)
+    renderAgenda(slide, theme, spec, deck, index)
   } else if (spec.layout === 'section') {
-    renderSection(slide, pptx, theme, spec, index)
+    renderSection(slide, theme, spec, index)
   } else if (spec.layout === 'cards') {
-    renderCards(slide, pptx, theme, spec)
+    renderCards(slide, theme, spec, index)
   } else if (spec.layout === 'two_column') {
-    renderTwoColumn(slide, pptx, theme, spec)
+    renderTwoColumn(slide, theme, spec, index)
   } else if (spec.layout === 'timeline') {
-    renderTimeline(slide, pptx, theme, spec)
+    renderTimeline(slide, theme, spec, index)
   } else if (spec.layout === 'comparison') {
-    renderComparison(slide, pptx, theme, spec)
+    renderComparison(slide, theme, spec, index)
   } else if (spec.layout === 'data_highlight') {
-    renderDataHighlight(slide, pptx, theme, spec)
+    renderDataHighlight(slide, theme, spec, index)
   } else if (spec.layout === 'chart') {
-    renderChart(slide, pptx, theme, spec)
+    renderChart(slide, pptx, theme, spec, index)
   } else {
-    renderClosing(slide, pptx, theme, spec)
+    renderClosing(slide, theme, spec, index)
   }
 
   if (spec.layout !== 'cover') {
-    addPageNumber(slide, theme, index, deck.slides.length, spec.layout === 'section' || spec.layout === 'data_highlight' || spec.layout === 'closing')
+    const isDark = spec.layout === 'section' || spec.layout === 'data_highlight' || spec.layout === 'closing'
+    addPageNumber(slide, theme, index, deck.slides.length, isDark)
+    addCornerLabel(slide, theme, deck.motif || deck.deckStyle?.motif || theme.motif, isDark)
   }
   addSlideNotes(slide, spec)
+}
+
+function buildPresentationPptx(deck: PresentationDeckSpec) {
+  const pptx = new pptxgen()
+  const theme = getPresentationTheme(deck.themeId)
+  pptx.layout = 'LAYOUT_16x9'
+  pptx.author = 'KatopGPT'
+  pptx.company = 'KatopGPT'
+  pptx.subject = deck.goal ?? deck.title
+  pptx.title = deck.title
+  pptx.theme = {
+    headFontFace: theme.titleFont,
+    bodyFontFace: theme.bodyFont,
+  }
+
+  deck.slides.forEach((slide, index) => renderSlide(pptx, deck, slide, index))
+  return pptx
+}
+
+async function writePresentationDeckToFile(deck: PresentationDeckSpec, filePath: string) {
+  const pptx = buildPresentationPptx(deck)
+  await pptx.writeFile({ fileName: filePath })
+}
+
+async function createTemporaryDeckFile(deck: PresentationDeckSpec) {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'katopgpt-pptx-'))
+  const filePath = path.join(tempDir, `${safeFileName(deck.title)}.pptx`)
+  await writePresentationDeckToFile(deck, filePath)
+  return { tempDir, filePath }
+}
+
+function parsePresentationDeck(deck: PresentationDeckSpec) {
+  const parsed = presentationDeckSpecSchema.safeParse(deck)
+  if (!parsed.success) {
+    throw new Error(`PPT 结构无效：${parsed.error.issues[0]?.message ?? '未知错误'}`)
+  }
+  return parsed.data
+}
+
+export async function previewPresentationDeck(request: PresentationPreviewRequest): Promise<PresentationPreviewResult> {
+  let tempDeck: Awaited<ReturnType<typeof createTemporaryDeckFile>> | null = null
+  try {
+    const deck = parsePresentationDeck(request.deck)
+    const issues = auditPresentationDeckSpec(deck)
+    const blockingIssues = issues.filter((issue) => issue.severity === 'error')
+    if (blockingIssues.length > 0) {
+      return {
+        ok: false,
+        message: `PPT 结构还有 ${blockingIssues.length} 个阻塞问题，请先修复后再生成真实预览。`,
+        issues,
+      }
+    }
+
+    const tools = await checkPresentationRenderTools()
+    if (!tools.ok) {
+      return {
+        ok: false,
+        message: tools.message,
+        issues,
+      }
+    }
+
+    tempDeck = await createTemporaryDeckFile(deck)
+    const slides = await renderPresentationPreviewImages(tempDeck.filePath)
+    return {
+      ok: true,
+      message: `已生成 ${slides.length} 张真实预览图。`,
+      slides,
+      issues,
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : '生成真实预览失败。',
+    }
+  } finally {
+    if (tempDeck) {
+      await removePresentationTempDirectory(tempDeck.tempDir)
+    }
+  }
 }
 
 export async function exportPresentationDeckToFile(
   request: PresentationExportRequest,
   ownerWindow?: BrowserWindow | null
 ): Promise<PresentationExportResult> {
+  let tempDeck: Awaited<ReturnType<typeof createTemporaryDeckFile>> | null = null
   try {
-    const parsed = presentationDeckSpecSchema.safeParse(request.deck)
-    if (!parsed.success) {
+    const deck = parsePresentationDeck(request.deck)
+    const issues = auditPresentationDeckSpec(deck)
+    const blockingIssues = issues.filter((issue) => issue.severity === 'error')
+    if (blockingIssues.length > 0) {
       return {
         ok: false,
-        message: `PPT 结构无效：${parsed.error.issues[0]?.message ?? '未知错误'}`,
+        message: `PPT 结构还有 ${blockingIssues.length} 个阻塞问题，请先修复后再导出。`,
       }
     }
 
-    const deck = parsed.data
-    const pptx = new pptxgen()
-    const theme = getTheme(deck.themeId)
-    pptx.layout = 'LAYOUT_16x9'
-    pptx.author = 'KatopGPT'
-    pptx.company = 'KatopGPT'
-    pptx.subject = deck.goal ?? deck.title
-    pptx.title = deck.title
-    pptx.theme = {
-      headFontFace: theme.titleFont,
-      bodyFontFace: theme.bodyFont,
+    const tools = await checkPresentationRenderTools()
+    if (!tools.ok) {
+      return {
+        ok: false,
+        message: tools.message,
+      }
     }
 
-    deck.slides.forEach((slide, index) => renderSlide(pptx, deck, slide, index))
+    tempDeck = await createTemporaryDeckFile(deck)
+    await renderPresentationPreviewImages(tempDeck.filePath)
 
     const defaultPath = path.join(app.getPath('documents'), `${safeFileName(deck.title)}.pptx`)
     const dialogOptions = {
@@ -723,17 +1386,22 @@ export async function exportPresentationDeckToFile(
       }
     }
 
-    await pptx.writeFile({ fileName: result.filePath })
+    const finalPath = withPptxExtension(result.filePath)
+    await fs.copyFile(tempDeck.filePath, finalPath)
 
     return {
       ok: true,
-      message: `已导出 PPTX：${result.filePath}`,
-      filePath: result.filePath,
+      message: `已导出 PPTX：${finalPath}`,
+      filePath: finalPath,
     }
   } catch (error) {
     return {
       ok: false,
-      message: error instanceof Error ? error.message : '导出 PPTX 失败',
+      message: error instanceof Error ? error.message : '导出 PPTX 失败。',
+    }
+  } finally {
+    if (tempDeck) {
+      await removePresentationTempDirectory(tempDeck.tempDir)
     }
   }
 }

@@ -1,6 +1,7 @@
-import { useMemo, useRef, useState, type ChangeEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import {
   AlertTriangle,
+  Code2,
   Cpu,
   Download,
   FileText,
@@ -9,21 +10,24 @@ import {
   Loader2,
   Paperclip,
   RefreshCcw,
+  ShieldAlert,
   Sparkles,
   Square,
-  Trash2,
   Wand2,
   X,
 } from 'lucide-react'
 import { useChatStore } from '../store/chatStore'
-import { auditPresentationDeck, clampSlideCount, generatePresentationDeck } from '../services/presentationPlanner'
+import {
+  clampSlideCount,
+  generatePresentationCodeDeck,
+} from '../services/presentationPlanner'
 import { resolveApiConfig } from '../types'
 import type {
-  FileAttachment,
-  PresentationDeckSpec,
-  PresentationQaIssue,
-  PresentationSlideLayout,
-  PresentationSlideSpec,
+  PresentationCodeArtifact,
+  PresentationCodeDiagnostic,
+  PresentationCodeRequest,
+  PresentationPreviewSlide,
+  PresentationRenderToolsStatus,
   PresentationThemeId,
 } from '../types'
 import { FILE_INPUT_ACCEPT } from './inputAreaAttachments'
@@ -33,86 +37,58 @@ const THEME_OPTIONS: Array<{ id: PresentationThemeId; label: string; hint: strin
   { id: 'executive-midnight', label: '午夜商务', hint: '深色封面、冷静高对比', swatches: ['#1E2761', '#CADCFC', '#FFFFFF'] },
   { id: 'warm-terra', label: '陶土叙事', hint: '温暖、咨询报告感', swatches: ['#B85042', '#E7E8D1', '#A7BEAE'] },
   { id: 'teal-trust', label: '青绿信任', hint: '科技、增长、产品发布', swatches: ['#028090', '#00A896', '#02C39A'] },
+  { id: 'forest-moss', label: '森林苔原', hint: '稳健、长期主义、组织能力', swatches: ['#2C5F2D', '#97BC62', '#F5F5F5'] },
+  { id: 'coral-energy', label: '珊瑚动能', hint: '增长、发布会、强行动号召', swatches: ['#F96167', '#F9E795', '#2F3C7E'] },
+  { id: 'charcoal-minimal', label: '炭黑极简', hint: '克制、咨询、黑白编辑感', swatches: ['#36454F', '#F2F2F2', '#212121'] },
+  { id: 'berry-cream', label: '莓果奶油', hint: '品牌、内容、温和高级感', swatches: ['#6D2E46', '#A26769', '#ECE2D0'] },
 ]
 
-const LAYOUT_OPTIONS: Array<{ value: PresentationSlideLayout; label: string }> = [
-  { value: 'cover', label: '封面' },
-  { value: 'agenda', label: '目录' },
-  { value: 'section', label: '章节' },
-  { value: 'cards', label: '卡片' },
-  { value: 'two_column', label: '双栏' },
-  { value: 'timeline', label: '时间线' },
-  { value: 'comparison', label: '对比' },
-  { value: 'data_highlight', label: '数据强调' },
-  { value: 'chart', label: '图表' },
-  { value: 'closing', label: '结尾' },
-]
+const PPT_CODE_TRUST_KEY = 'katopgpt:pptCodeTrusted'
 
-const VISUAL_TYPE_LABELS = {
-  shape: '形状视觉',
-  icon_grid: '图标卡片',
-  stat: '数字强调',
-  chart: '图表',
-  timeline: '时间线',
-  comparison: '对比结构',
+function getDiagnosticTone(level: PresentationCodeDiagnostic['level']) {
+  if (level === 'error') return 'border-rose-300/25 bg-rose-400/10 text-rose-100'
+  if (level === 'warning') return 'border-amber-300/25 bg-amber-300/10 text-amber-100'
+  return 'border-cyan-300/20 bg-cyan-300/10 text-cyan-100'
 }
 
-function getIssueTone(severity: PresentationQaIssue['severity']) {
-  return severity === 'error'
-    ? 'border-rose-300/25 bg-rose-400/10 text-rose-100'
-    : 'border-amber-300/25 bg-amber-300/10 text-amber-100'
-}
-
-function slideDensity(slide: PresentationSlideSpec) {
-  const chars = slide.title.length + slide.bullets.reduce((total, bullet) => total + bullet.length, 0)
-  if (chars > 220) return '偏密'
-  if (chars > 140) return '适中'
-  return '轻量'
-}
-
-function buildEmptyDeck(topic: string, themeId: PresentationThemeId, slideCount: number): PresentationDeckSpec {
-  const count = clampSlideCount(slideCount)
-  const slides: PresentationSlideSpec[] = Array.from({ length: count }, (_, index) => {
-    const layout = index === 0
-      ? 'cover'
-      : index === count - 1
-        ? 'closing'
-        : (['agenda', 'section', 'cards', 'two_column', 'timeline', 'comparison', 'data_highlight', 'chart'][index % 8] as PresentationSlideLayout)
-
-    return {
-      id: `slide-${index + 1}`,
-      layout,
-      title: index === 0 ? topic || '未命名 PPT' : `第 ${index + 1} 页`,
-      bullets: ['请在这里补充核心观点'],
-      speakerNotes: '',
-      visual: {
-        type: layout === 'chart' ? 'chart' : layout === 'data_highlight' ? 'stat' : layout === 'timeline' ? 'timeline' : 'shape',
-        label: '结构化视觉',
-        items: ['视觉元素'],
-        stats: layout === 'data_highlight' ? [{ value: '3', label: '关键抓手' }] : undefined,
-        chart: layout === 'chart'
-          ? { type: 'bar', title: '关键维度对比', labels: ['维度 A', '维度 B', '维度 C'], values: [70, 58, 46] }
-          : undefined,
-      },
-    }
-  })
-
-  return {
-    title: topic || '未命名 PPT',
-    themeId,
-    slides,
+function readTrustedCodeExecutionFlag() {
+  try {
+    return localStorage.getItem(PPT_CODE_TRUST_KEY) === 'true'
+  } catch {
+    return false
   }
 }
 
-function updateSlide(deck: PresentationDeckSpec, index: number, updater: (slide: PresentationSlideSpec) => PresentationSlideSpec) {
-  return {
-    ...deck,
-    slides: deck.slides.map((slide, slideIndex) => slideIndex === index ? updater(slide) : slide),
+function writeTrustedCodeExecutionFlag() {
+  try {
+    localStorage.setItem(PPT_CODE_TRUST_KEY, 'true')
+  } catch {
+    // Local storage can be unavailable in restricted environments.
   }
 }
 
-function getSlideIssues(issues: PresentationQaIssue[], slideIndex: number) {
-  return issues.filter((issue) => issue.slideIndex === slideIndex)
+function getCodeSummary(code: string) {
+  const lines = code.split(/\r?\n/)
+  return {
+    lineCount: lines.length,
+    preview: lines.slice(0, 90).join('\n'),
+    isTruncated: lines.length > 90,
+  }
+}
+
+function formatRunFailureForRepair(result: {
+  errorMessage?: string
+  message?: string
+  diagnostics?: PresentationCodeDiagnostic[]
+} | null) {
+  const diagnostics = result?.diagnostics
+    ?.map((diagnostic, index) => `${index + 1}. [${diagnostic.level}] ${diagnostic.message}`)
+    .join('\n')
+
+  return [
+    result?.errorMessage || result?.message || '代码执行失败',
+    diagnostics ? `diagnostics:\n${diagnostics}` : '',
+  ].filter(Boolean).join('\n\n')
 }
 
 interface PresentationWorkspaceProps {
@@ -132,13 +108,23 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
   const [goal, setGoal] = useState('讲清现状、问题、策略和下一步行动')
   const [slideCount, setSlideCount] = useState(8)
   const [themeId, setThemeId] = useState<PresentationThemeId>('executive-midnight')
-  const [deck, setDeck] = useState<PresentationDeckSpec | null>(null)
-  const [selectedSlideIndex, setSelectedSlideIndex] = useState(0)
+  const [artifact, setArtifact] = useState<PresentationCodeArtifact | null>(null)
+  const [codeInput, setCodeInput] = useState<PresentationCodeRequest | null>(null)
+  const [codeSessionId, setCodeSessionId] = useState<string | null>(null)
+  const [diagnostics, setDiagnostics] = useState<PresentationCodeDiagnostic[]>([])
+  const [isArtifactStale, setIsArtifactStale] = useState(false)
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [lastRunOutput, setLastRunOutput] = useState<{ stdout?: string; stderr?: string } | null>(null)
   const [isGenerating, setIsGenerating] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
+  const [isPreviewing, setIsPreviewing] = useState(false)
+  const [isInstallingRenderTools, setIsInstallingRenderTools] = useState(false)
+  const [renderToolsStatus, setRenderToolsStatus] = useState<PresentationRenderToolsStatus | null>(null)
+  const [previewSlides, setPreviewSlides] = useState<PresentationPreviewSlide[]>([])
+  const [hasTrustedNodeExecution, setHasTrustedNodeExecution] = useState(readTrustedCodeExecutionFlag)
   const abortControllerRef = useRef<AbortController | null>(null)
+  const lastFileSignatureRef = useRef<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const {
     files,
@@ -172,11 +158,61 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
     )?.value ?? ''
   }, [modelOptions, settings.activeModel])
 
-  const issues = useMemo(() => deck ? auditPresentationDeck(deck) : [], [deck])
-  const selectedSlide = deck?.slides[selectedSlideIndex] ?? null
-  const selectedSlideIssues = selectedSlide ? getSlideIssues(issues, selectedSlideIndex) : []
-  const blockingIssueCount = issues.filter((issue) => issue.severity === 'error').length
   const pendingAttachmentTasks = attachmentTasks.filter((task) => task.status !== 'ready')
+  const themeOption = THEME_OPTIONS.find((item) => item.id === themeId) ?? THEME_OPTIONS[0]
+  const codeSummary = artifact ? getCodeSummary(artifact.code) : null
+  const isBusy = isGenerating || isPreviewing || isExporting
+  const fileSignature = useMemo(() =>
+    files.map((file) => `${file.id}:${file.name}:${file.content.length}`).join('|'),
+  [files])
+
+  useEffect(() => {
+    let isCancelled = false
+
+    const checkRenderTools = async () => {
+      if (!window.electronAPI?.checkPresentationRenderTools) {
+        setRenderToolsStatus({
+          ok: false,
+          missing: ['soffice', 'pdftoppm'],
+          message: '当前环境不是桌面版应用，无法检测 LibreOffice/Poppler，也不能生成真实预览。',
+        })
+        return
+      }
+
+      try {
+        const result = await window.electronAPI.checkPresentationRenderTools()
+        if (!isCancelled) {
+          setRenderToolsStatus(result)
+        }
+      } catch (error) {
+        if (!isCancelled) {
+          setRenderToolsStatus({
+            ok: false,
+            missing: ['soffice', 'pdftoppm'],
+            message: error instanceof Error ? error.message : '检测 PPT 渲染依赖失败。',
+          })
+        }
+      }
+    }
+
+    void checkRenderTools()
+
+    return () => {
+      isCancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    if (lastFileSignatureRef.current === null) {
+      lastFileSignatureRef.current = fileSignature
+      return
+    }
+    if (lastFileSignatureRef.current === fileSignature) return
+    lastFileSignatureRef.current = fileSignature
+    if (!artifact) return
+    setIsArtifactStale(true)
+    setCodeSessionId(null)
+  }, [artifact, fileSignature])
 
   const handleResizeStart = () => {
     const handlePointerMove = (event: PointerEvent) => {
@@ -208,6 +244,15 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
     setActiveModel({ providerId: option.providerId, model: option.model })
   }
 
+  const handleThemeChange = (nextThemeId: PresentationThemeId) => {
+    setThemeId(nextThemeId)
+    if (!artifact) return
+    setIsArtifactStale(true)
+    setCodeSessionId(null)
+    setPreviewSlides([])
+    setStatusMessage('视觉主题已变更，请重新生成以应用新的代码版式。')
+  }
+
   const handleFileSelect = (event: ChangeEvent<HTMLInputElement>) => {
     const fileList = event.target.files
     if (!fileList) return
@@ -215,7 +260,88 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
     event.target.value = ''
   }
 
-  const runDeckGeneration = async (mode: 'deck' | 'slide') => {
+  const handleInstallRenderTools = async () => {
+    if (!window.electronAPI?.installPresentationRenderTools) {
+      setErrorMessage('当前环境暂不支持自动安装，请手动安装 LibreOffice 和 Poppler。')
+      return
+    }
+
+    setIsInstallingRenderTools(true)
+    setErrorMessage(null)
+    setStatusMessage('正在打开安装窗口，请按窗口提示授权并等待安装完成...')
+
+    try {
+      const result = await window.electronAPI.installPresentationRenderTools()
+      if (result.status) {
+        setRenderToolsStatus(result.status)
+      } else if (window.electronAPI?.checkPresentationRenderTools) {
+        setRenderToolsStatus(await window.electronAPI.checkPresentationRenderTools())
+      }
+      if (result.ok || result.started) {
+        setStatusMessage(result.message)
+      } else {
+        setErrorMessage(result.message)
+      }
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : '自动安装 PPT 依赖失败。')
+    } finally {
+      setIsInstallingRenderTools(false)
+    }
+  }
+
+  const confirmTrustedExecution = () => {
+    if (hasTrustedNodeExecution) return true
+
+    const accepted = window.confirm(
+      'PPT Agent 将执行模型生成的本地 Node.js 代码来创建 PPTX。\n\n' +
+      '这不是浏览器沙箱，代码理论上具备本机 Node 能力。请仅在你信任当前模型、主题和资料时继续。\n\n' +
+      '是否启用本地信任模式？'
+    )
+    if (!accepted) return false
+
+    writeTrustedCodeExecutionFlag()
+    setHasTrustedNodeExecution(true)
+    return true
+  }
+
+  const runCodeArtifact = async (
+    nextArtifact: PresentationCodeArtifact,
+    nextInput: PresentationCodeRequest,
+    showError = true
+  ) => {
+    if (!window.electronAPI?.runPresentationCodeDeck) {
+      if (showError) setErrorMessage('当前环境暂不支持运行 PPT Agent 代码，请使用桌面版应用。')
+      return null
+    }
+
+    const result = await window.electronAPI.runPresentationCodeDeck({
+      artifact: {
+        ...nextArtifact,
+        trustedNodeExecution: true,
+      },
+      input: nextInput,
+    })
+
+    setLastRunOutput({ stdout: result.stdout, stderr: result.stderr })
+    setDiagnostics(result.diagnostics ?? [])
+
+    if (result.ok) {
+      setPreviewSlides(result.slides ?? [])
+      setCodeSessionId(result.sessionId ?? null)
+      setStatusMessage(result.message)
+      setErrorMessage(null)
+    } else {
+      setPreviewSlides([])
+      setCodeSessionId(null)
+      if (showError) {
+        setErrorMessage(result.errorMessage || result.message)
+      }
+    }
+
+    return result
+  }
+
+  const handleGenerate = async () => {
     const apiConfig = resolveApiConfig(settings.providers, settings.activeModel)
     if (!apiConfig) {
       setErrorMessage('请先在设置中配置可用的聊天模型。')
@@ -228,21 +354,35 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
       return
     }
 
+    if (!window.electronAPI?.runPresentationCodeDeck) {
+      setErrorMessage('当前环境暂不支持运行 PPT Agent 代码，请使用桌面版应用。')
+      return
+    }
+
+    if (renderToolsStatus?.ok === false) {
+      setErrorMessage(renderToolsStatus.message)
+      return
+    }
+
+    if (!confirmTrustedExecution()) {
+      setErrorMessage('已取消本地代码执行，未生成 PPT。')
+      return
+    }
+
     abortControllerRef.current?.abort()
     const abortController = new AbortController()
     abortControllerRef.current = abortController
     setIsGenerating(true)
     setErrorMessage(null)
-    setStatusMessage(mode === 'slide' ? '正在重新生成当前页...' : '正在生成 PPT 大纲...')
+    setStatusMessage('正在让 PPT Agent 编写生成代码...')
+    setDiagnostics([])
+    setLastRunOutput(null)
+    setCodeSessionId(null)
 
     try {
-      const currentSlide = deck?.slides[selectedSlideIndex]
-      const prompt = mode === 'slide' && currentSlide
-        ? `${cleanTopic}\n\n请重点重写第 ${selectedSlideIndex + 1} 页《${currentSlide.title}》，保持整套 PPT 结构一致。`
-        : cleanTopic
-      const result = await generatePresentationDeck({
+      const first = await generatePresentationCodeDeck({
         config: apiConfig,
-        topic: prompt,
+        topic: cleanTopic,
         audience,
         goal,
         slideCount,
@@ -251,20 +391,44 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
         signal: abortController.signal,
       })
 
-      if (mode === 'slide' && deck && result.deck.slides[selectedSlideIndex]) {
-        setDeck(updateSlide(deck, selectedSlideIndex, () => result.deck.slides[selectedSlideIndex]))
-      } else {
-        setDeck(result.deck)
-        setSelectedSlideIndex(0)
+      setArtifact(first.artifact)
+      setCodeInput(first.input)
+      setIsArtifactStale(false)
+      setStatusMessage('代码已生成，正在执行并渲染真实预览...')
+
+      const firstRun = await runCodeArtifact(first.artifact, first.input, false)
+      if (firstRun?.ok) return
+
+      setStatusMessage('首次执行失败，正在让模型自动修复一次...')
+      const repaired = await generatePresentationCodeDeck({
+        config: apiConfig,
+        topic: cleanTopic,
+        audience,
+        goal,
+        slideCount,
+        themeId,
+        files,
+        previousCode: first.artifact.code,
+        failureMessage: formatRunFailureForRepair(firstRun),
+        stdout: firstRun?.stdout,
+        stderr: firstRun?.stderr,
+        signal: abortController.signal,
+      })
+
+      setArtifact(repaired.artifact)
+      setCodeInput(repaired.input)
+      setIsArtifactStale(false)
+      setStatusMessage('修复代码已生成，正在重新执行真实预览...')
+
+      const secondRun = await runCodeArtifact(repaired.artifact, repaired.input, true)
+      if (!secondRun?.ok) {
+        setErrorMessage(`自动修复后仍失败：${secondRun?.errorMessage || secondRun?.message || '未知错误'}`)
       }
-      setStatusMessage(result.issues.length > 0
-        ? `已生成，发现 ${result.issues.length} 个轻量 QA 提醒。`
-        : '已生成可导出的 PPT 结构。')
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
         setStatusMessage('已停止生成。')
       } else {
-        setErrorMessage(error instanceof Error ? error.message : 'PPT 生成失败。')
+        setErrorMessage(error instanceof Error ? error.message : 'PPT Agent 生成失败。')
       }
     } finally {
       if (abortControllerRef.current === abortController) {
@@ -274,42 +438,74 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
     }
   }
 
-  const handleStop = () => {
-    abortControllerRef.current?.abort()
-    abortControllerRef.current = null
-    setIsGenerating(false)
-  }
+  const handlePreview = async () => {
+    if (!artifact || !codeInput) {
+      setErrorMessage('请先生成 PPT Agent 代码。')
+      return
+    }
+    if (isArtifactStale) {
+      setErrorMessage('当前输入已变更，请重新生成后再预览。')
+      return
+    }
+    if (!confirmTrustedExecution()) {
+      setErrorMessage('已取消本地代码执行。')
+      return
+    }
 
-  const handleCreateBlank = () => {
-    const nextDeck = buildEmptyDeck(topic.trim(), themeId, slideCount)
-    setDeck(nextDeck)
-    setSelectedSlideIndex(0)
+    setIsPreviewing(true)
     setErrorMessage(null)
-    setStatusMessage('已创建空白 PPT 结构，可手动编辑后导出。')
+    setStatusMessage('正在重新执行代码并生成真实预览...')
+
+    try {
+      await runCodeArtifact(artifact, codeInput, true)
+    } catch (error) {
+      setPreviewSlides([])
+      setCodeSessionId(null)
+      setErrorMessage(error instanceof Error ? error.message : '生成真实预览失败。')
+    } finally {
+      setIsPreviewing(false)
+    }
   }
 
   const handleExport = async () => {
-    if (!deck) {
-      setErrorMessage('请先生成或创建 PPT 结构。')
+    if (!artifact || !codeInput) {
+      setErrorMessage('请先生成 PPT。')
       return
     }
-    const latestIssues = auditPresentationDeck(deck)
-    const latestBlockingIssues = latestIssues.filter((issue) => issue.severity === 'error')
-    if (latestBlockingIssues.length > 0) {
-      setErrorMessage(`还有 ${latestBlockingIssues.length} 个阻塞问题，请先修复后再导出。`)
+    if (isArtifactStale) {
+      setErrorMessage('当前输入已变更，请重新生成后再导出。')
       return
     }
-    if (!window.electronAPI?.exportPresentationDeck) {
+    if (!window.electronAPI?.exportPresentationCodeDeck) {
       setErrorMessage('当前环境暂不支持导出 PPTX，请使用桌面版应用。')
       return
     }
 
     setIsExporting(true)
     setErrorMessage(null)
-    setStatusMessage('正在导出 PPTX...')
 
     try {
-      const result = await window.electronAPI.exportPresentationDeck({ deck })
+      let sessionId = codeSessionId
+      if (!sessionId) {
+        if (!confirmTrustedExecution()) {
+          setErrorMessage('已取消本地代码执行。')
+          return
+        }
+        setStatusMessage('没有可导出的预览会话，正在先生成真实预览...')
+        const runResult = await runCodeArtifact(artifact, codeInput, true)
+        sessionId = runResult?.sessionId ?? null
+      }
+
+      if (!sessionId) {
+        setErrorMessage('没有可导出的预览会话，请重新生成或真实预览。')
+        return
+      }
+
+      setStatusMessage('正在导出与当前预览一致的 PPTX...')
+      const result = await window.electronAPI.exportPresentationCodeDeck({
+        sessionId,
+        title: artifact.title || topic,
+      })
       if (!result.ok) {
         setErrorMessage(result.message)
         return
@@ -322,45 +518,22 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
     }
   }
 
-  const patchDeck = (patch: Partial<PresentationDeckSpec>) => {
-    setDeck((currentDeck) => currentDeck ? { ...currentDeck, ...patch } : currentDeck)
+  const handleStop = () => {
+    abortControllerRef.current?.abort()
+    abortControllerRef.current = null
+    setIsGenerating(false)
   }
 
-  const patchSelectedSlide = (patch: Partial<PresentationSlideSpec>) => {
-    if (!deck || !selectedSlide) return
-    setDeck(updateSlide(deck, selectedSlideIndex, (slide) => ({ ...slide, ...patch })))
-  }
-
-  const patchSelectedVisualLabel = (label: string) => {
-    if (!deck || !selectedSlide) return
-    setDeck(updateSlide(deck, selectedSlideIndex, (slide) => ({
-      ...slide,
-      visual: { ...slide.visual, label },
-    })))
-  }
-
-  const updateSelectedBullet = (bulletIndex: number, value: string) => {
-    if (!deck || !selectedSlide) return
-    setDeck(updateSlide(deck, selectedSlideIndex, (slide) => ({
-      ...slide,
-      bullets: slide.bullets.map((bullet, index) => index === bulletIndex ? value : bullet),
-    })))
-  }
-
-  const addSelectedBullet = () => {
-    if (!deck || !selectedSlide) return
-    setDeck(updateSlide(deck, selectedSlideIndex, (slide) => ({
-      ...slide,
-      bullets: [...slide.bullets, '新增要点'].slice(0, 6),
-    })))
-  }
-
-  const removeSelectedBullet = (bulletIndex: number) => {
-    if (!deck || !selectedSlide) return
-    setDeck(updateSlide(deck, selectedSlideIndex, (slide) => ({
-      ...slide,
-      bullets: slide.bullets.filter((_, index) => index !== bulletIndex),
-    })))
+  const handleClearResult = () => {
+    setArtifact(null)
+    setCodeInput(null)
+    setCodeSessionId(null)
+    setDiagnostics([])
+    setPreviewSlides([])
+    setLastRunOutput(null)
+    setIsArtifactStale(false)
+    setErrorMessage(null)
+    setStatusMessage('已清空当前 PPT Agent 结果。')
   }
 
   if (!standalone && !isPresentationWorkspaceOpen) {
@@ -387,33 +560,48 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
         <header className="flex shrink-0 items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.28em] text-cyan-200/70">
-              <Layers3 size={13} /> Presentation Studio
+              <Layers3 size={13} /> PPT Agent
             </div>
             <h2 className="mt-1 truncate text-lg font-semibold text-surface-50">
-              {deck?.title || 'PPT 助手'}
+              {artifact?.title || 'PPT 助手'}
             </h2>
           </div>
           <div className="flex items-center gap-2">
-            {issues.length > 0 && (
-              <span className={`hidden rounded-full border px-3 py-1.5 text-xs xl:inline-flex ${blockingIssueCount > 0 ? 'border-rose-300/25 bg-rose-400/10 text-rose-100' : 'border-amber-300/25 bg-amber-300/10 text-amber-100'}`}>
-                QA {issues.length}
-              </span>
-            )}
+            <span className={`hidden rounded-full border px-3 py-1.5 text-xs xl:inline-flex ${
+              isArtifactStale
+                ? 'border-amber-300/25 bg-amber-300/10 text-amber-100'
+                : hasTrustedNodeExecution
+                ? 'border-emerald-300/25 bg-emerald-400/10 text-emerald-100'
+                : 'border-amber-300/25 bg-amber-300/10 text-amber-100'
+            }`}>
+              {isArtifactStale
+                ? '输入已变更'
+                : hasTrustedNodeExecution ? '本地信任模式已启用' : '需确认信任模式'}
+            </span>
             <button
-              onClick={() => void runDeckGeneration('deck')}
-              disabled={isGenerating || isProcessingFiles}
+              onClick={() => void handleGenerate()}
+              disabled={isBusy || isProcessingFiles}
               className="btn-primary inline-flex h-10 items-center gap-2 rounded-2xl bg-cyan-600 px-3 text-xs hover:bg-cyan-500 disabled:opacity-50"
             >
               {isGenerating ? <Loader2 size={15} className="animate-spin" /> : <Wand2 size={15} />}
-              生成大纲
+              生成 PPT
             </button>
             <button
-              onClick={() => void runDeckGeneration('slide')}
-              disabled={!deck || isGenerating || isProcessingFiles}
+              onClick={() => void handleGenerate()}
+              disabled={!artifact || isBusy || isProcessingFiles}
               className="btn-ghost inline-flex h-10 items-center gap-2 rounded-2xl border border-white/10 px-3 text-xs disabled:opacity-40"
             >
               <RefreshCcw size={14} />
-              重写当前页
+              重新生成
+            </button>
+            <button
+              onClick={() => void handlePreview()}
+              disabled={!artifact || isArtifactStale || isBusy}
+              className="btn-ghost inline-flex h-10 items-center gap-2 rounded-2xl border border-white/10 px-3 text-xs disabled:opacity-40"
+              title={renderToolsStatus?.message ?? '重新执行代码并生成真实缩略图'}
+            >
+              {isPreviewing ? <Loader2 size={14} className="animate-spin" /> : <Cpu size={14} />}
+              真实预览
             </button>
             {isGenerating ? (
               <button
@@ -426,8 +614,13 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
             ) : (
               <button
                 onClick={() => void handleExport()}
-                disabled={!deck || isExporting}
-                className="flex h-10 items-center gap-2 rounded-2xl border border-emerald-300/25 bg-emerald-400/10 px-3 text-xs text-emerald-100 transition hover:bg-emerald-400/15 disabled:cursor-not-allowed disabled:opacity-40"
+                disabled={!artifact || isArtifactStale || isExporting || isPreviewing}
+                className={`flex h-10 items-center gap-2 rounded-2xl border px-3 text-xs transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                  codeSessionId
+                    ? 'border-emerald-300/25 bg-emerald-400/10 text-emerald-100 hover:bg-emerald-400/15'
+                    : 'border-amber-300/25 bg-amber-400/10 text-amber-100 hover:bg-amber-400/15'
+                }`}
+                title={codeSessionId ? '导出当前预览 session 的 PPTX' : '导出前会先生成真实预览 session'}
               >
                 {isExporting ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
                 导出 PPTX
@@ -443,7 +636,7 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
           </div>
         </header>
 
-        <div className="grid min-h-0 flex-1 grid-cols-[260px_minmax(0,1fr)_300px] gap-3 p-3">
+        <div className="grid min-h-0 flex-1 grid-cols-[270px_minmax(0,1fr)_320px] gap-3 p-3">
           <section className="flex min-h-0 flex-col overflow-hidden rounded-[26px] border border-white/10 bg-[#09111d]/86">
             <div className="border-b border-white/10 px-3 py-3">
               <div className="flex items-center gap-2 text-sm font-medium text-surface-100">
@@ -451,11 +644,37 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
               </div>
             </div>
             <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+              <div className={`rounded-2xl border px-3 py-2 text-xs leading-5 ${
+                renderToolsStatus?.ok
+                  ? 'border-emerald-300/20 bg-emerald-400/10 text-emerald-100'
+                  : 'border-amber-300/20 bg-amber-400/10 text-amber-100'
+              }`}>
+                <div>
+                  {renderToolsStatus
+                    ? renderToolsStatus.message
+                    : '正在检测 LibreOffice 和 Poppler 渲染依赖...'}
+                </div>
+                {renderToolsStatus?.ok === false && window.electronAPI?.installPresentationRenderTools && (
+                  <button
+                    onClick={() => void handleInstallRenderTools()}
+                    disabled={isInstallingRenderTools}
+                    className="mt-2 inline-flex items-center gap-1.5 rounded-xl border border-amber-200/25 bg-amber-200/10 px-2.5 py-1.5 text-[11px] font-medium text-amber-50 transition hover:bg-amber-200/15 disabled:opacity-50"
+                  >
+                    {isInstallingRenderTools ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
+                    一键安装依赖
+                  </button>
+                )}
+              </div>
+
               <label className="block text-xs text-surface-400">
                 PPT 主题
                 <textarea
                   value={topic}
-                  onChange={(event) => setTopic(event.target.value)}
+                  onChange={(event) => {
+                    setTopic(event.target.value)
+                    if (artifact) setIsArtifactStale(true)
+                    setCodeSessionId(null)
+                  }}
                   className="mt-1 min-h-[76px] w-full resize-none rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-sm leading-5 text-surface-100 outline-none transition focus:border-cyan-300/35"
                   placeholder="例如：年度经营复盘与增长策略"
                 />
@@ -465,7 +684,11 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
                 受众
                 <input
                   value={audience}
-                  onChange={(event) => setAudience(event.target.value)}
+                  onChange={(event) => {
+                    setAudience(event.target.value)
+                    if (artifact) setIsArtifactStale(true)
+                    setCodeSessionId(null)
+                  }}
                   className="mt-1 w-full rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-surface-100 outline-none transition focus:border-cyan-300/35"
                 />
               </label>
@@ -474,7 +697,11 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
                 沟通目标
                 <textarea
                   value={goal}
-                  onChange={(event) => setGoal(event.target.value)}
+                  onChange={(event) => {
+                    setGoal(event.target.value)
+                    if (artifact) setIsArtifactStale(true)
+                    setCodeSessionId(null)
+                  }}
                   className="mt-1 min-h-[62px] w-full resize-none rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-sm leading-5 text-surface-100 outline-none transition focus:border-cyan-300/35"
                 />
               </label>
@@ -487,7 +714,11 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
                     min={3}
                     max={20}
                     value={slideCount}
-                    onChange={(event) => setSlideCount(clampSlideCount(Number(event.target.value)))}
+                    onChange={(event) => {
+                      setSlideCount(clampSlideCount(Number(event.target.value)))
+                      if (artifact) setIsArtifactStale(true)
+                      setCodeSessionId(null)
+                    }}
                     className="mt-1 w-full rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-surface-100 outline-none transition focus:border-cyan-300/35"
                   />
                 </label>
@@ -513,10 +744,7 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
                 {THEME_OPTIONS.map((theme) => (
                   <button
                     key={theme.id}
-                    onClick={() => {
-                      setThemeId(theme.id)
-                      if (deck) patchDeck({ themeId: theme.id })
-                    }}
+                    onClick={() => handleThemeChange(theme.id)}
                     className={`w-full rounded-2xl border px-3 py-2 text-left transition ${
                       themeId === theme.id
                         ? 'border-cyan-300/35 bg-cyan-300/10 text-cyan-50'
@@ -595,10 +823,11 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
               </div>
 
               <button
-                onClick={handleCreateBlank}
-                className="w-full rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs text-surface-200 transition hover:bg-white/[0.08]"
+                onClick={handleClearResult}
+                disabled={!artifact && previewSlides.length === 0}
+                className="w-full rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs text-surface-200 transition hover:bg-white/[0.08] disabled:opacity-40"
               >
-                创建空白结构
+                清空当前结果
               </button>
             </div>
           </section>
@@ -606,9 +835,11 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
           <main className="flex min-h-0 flex-col overflow-hidden rounded-[26px] border border-white/10 bg-[#0b101a]/80">
             <div className="flex shrink-0 items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
               <div>
-                <div className="text-sm font-medium text-surface-100">逐页结构预览</div>
+                <div className="text-sm font-medium text-surface-100">真实预览</div>
                 <div className="mt-0.5 text-xs text-surface-500">
-                  {deck ? `${deck.slides.length} 页 · ${THEME_OPTIONS.find((item) => item.id === deck.themeId)?.label}` : '尚未生成'}
+                  {artifact
+                    ? `${codeInput?.slideCount ?? slideCount} 页 · ${themeOption.label} · ${isArtifactStale ? '输入已变更' : previewSlides.length > 0 ? `${previewSlides.length} 张预览` : '等待渲染'}`
+                    : '尚未生成'}
                 </div>
               </div>
               <div className="flex items-center gap-2 text-xs text-surface-400">
@@ -617,74 +848,69 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
               </div>
             </div>
 
-            {!deck ? (
+            {!artifact ? (
               <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-8 text-center">
                 <div className="mb-5 flex h-20 w-20 items-center justify-center rounded-[28px] border border-cyan-300/20 bg-cyan-300/10 shadow-[0_20px_70px_rgba(20,184,166,0.18)]">
-                  <Layers3 size={34} className="text-cyan-100" />
+                  <Code2 size={34} className="text-cyan-100" />
                 </div>
-                <h3 className="text-xl font-semibold text-surface-50">从资料生成一套可导出的 PPTX</h3>
+                <h3 className="text-xl font-semibold text-surface-50">用 PPT Agent 生成可执行代码</h3>
                 <p className="mt-3 max-w-md text-sm leading-6 text-surface-400">
-                  V1 使用内置主题和 PPT 原生形状，不自动生图、不套用外部模板。生成后可逐页微调标题、要点和备注。
+                  模型会编写本地 Node.js 代码生成 PPTX，Electron 执行后用真实渲染链路预览；首次运行需要确认信任模式。
                 </p>
                 <button
-                  onClick={() => void runDeckGeneration('deck')}
-                  disabled={isGenerating || isProcessingFiles}
-                  className="btn-primary mt-6 inline-flex items-center gap-2 rounded-2xl bg-cyan-600 px-5 py-3 hover:bg-cyan-500"
+                  onClick={() => void handleGenerate()}
+                  disabled={isBusy || isProcessingFiles}
+                  className="btn-primary mt-6 inline-flex items-center gap-2 rounded-2xl bg-cyan-600 px-5 py-3 hover:bg-cyan-500 disabled:opacity-50"
                 >
                   {isGenerating ? <Loader2 size={16} className="animate-spin" /> : <Wand2 size={16} />}
-                  生成 PPT 大纲
+                  生成 PPT
                 </button>
               </div>
             ) : (
               <div className="min-h-0 flex-1 overflow-y-auto p-4">
-                <div className="grid grid-cols-2 gap-3 xl:grid-cols-3">
-                  {deck.slides.map((slide, index) => {
-                    const slideIssues = getSlideIssues(issues, index)
-                    const isSelected = selectedSlideIndex === index
-                    return (
-                      <button
-                        key={slide.id}
-                        onClick={() => setSelectedSlideIndex(index)}
-                        className={`group relative overflow-hidden rounded-[22px] border p-3 text-left transition ${
-                          isSelected
-                            ? 'border-cyan-300/45 bg-cyan-300/10 shadow-[0_18px_55px_rgba(20,184,166,0.12)]'
-                            : 'border-white/10 bg-white/[0.035] hover:border-white/20 hover:bg-white/[0.06]'
-                        }`}
+                {previewSlides.length === 0 ? (
+                  <div className="flex min-h-[420px] flex-col items-center justify-center rounded-[26px] border border-dashed border-white/12 bg-white/[0.025] px-8 text-center">
+                    {isGenerating || isPreviewing ? (
+                      <Loader2 size={34} className="mb-4 animate-spin text-cyan-100" />
+                    ) : (
+                      <Cpu size={34} className="mb-4 text-cyan-100" />
+                    )}
+                    <div className="text-base font-medium text-surface-100">
+                      {isGenerating || isPreviewing ? '正在生成真实预览' : '还没有真实预览'}
+                    </div>
+                    <p className="mt-2 max-w-md text-sm leading-6 text-surface-500">
+                      预览和导出会使用同一个运行 session。代码或渲染失败时，系统会自动让模型修复一次。
+                    </p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-3 xl:grid-cols-3">
+                    {previewSlides.map((slide) => (
+                      <div
+                        key={slide.index}
+                        className="group relative overflow-hidden rounded-[22px] border border-white/10 bg-white/[0.035] p-3 text-left transition hover:border-white/20 hover:bg-white/[0.06]"
                       >
                         <div
                           className="absolute inset-x-0 top-0 h-1"
-                          style={{ background: `linear-gradient(90deg, ${THEME_OPTIONS.find((item) => item.id === deck.themeId)?.swatches.join(', ')})` }}
+                          style={{ background: `linear-gradient(90deg, ${themeOption.swatches.join(', ')})` }}
                         />
-                        <div className="flex items-start justify-between gap-2">
+                        <div className="mb-3 flex items-center justify-between gap-2">
                           <span className="rounded-full border border-white/10 bg-black/20 px-2 py-0.5 text-[10px] text-surface-400">
-                            {String(index + 1).padStart(2, '0')} · {LAYOUT_OPTIONS.find((item) => item.value === slide.layout)?.label}
+                            {String(slide.index + 1).padStart(2, '0')}
                           </span>
-                          {slideIssues.length > 0 && (
-                            <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${slideIssues.some((issue) => issue.severity === 'error') ? 'bg-rose-400/15 text-rose-100' : 'bg-amber-300/15 text-amber-100'}`}>
-                              {slideIssues.length}
-                            </span>
-                          )}
+                          <span className="text-[10px] text-surface-500">真实渲染</span>
                         </div>
-                        <h4 className="mt-3 line-clamp-2 min-h-[40px] text-sm font-semibold leading-5 text-surface-100">
-                          {slide.title}
-                        </h4>
-                        <div className="mt-3 rounded-2xl border border-white/8 bg-black/16 p-2">
-                          <div className="mb-2 flex items-center justify-between text-[10px] text-surface-500">
-                            <span>{VISUAL_TYPE_LABELS[slide.visual.type]}</span>
-                            <span>{slideDensity(slide)}</span>
-                          </div>
-                          <div className="space-y-1">
-                            {slide.bullets.slice(0, 3).map((bullet, bulletIndex) => (
-                              <div key={`${slide.id}-${bulletIndex}`} className="truncate text-[11px] leading-5 text-surface-400">
-                                {bullet}
-                              </div>
-                            ))}
-                          </div>
+                        <div className="aspect-video overflow-hidden rounded-2xl border border-white/10 bg-black/24">
+                          <img
+                            src={slide.dataUrl}
+                            alt={`第 ${slide.index + 1} 页真实预览`}
+                            className="h-full w-full object-cover"
+                            loading="lazy"
+                          />
                         </div>
-                      </button>
-                    )
-                  })}
-                </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </main>
@@ -692,117 +918,93 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
           <section className="flex min-h-0 flex-col overflow-hidden rounded-[26px] border border-white/10 bg-[#09111d]/86">
             <div className="border-b border-white/10 px-3 py-3">
               <div className="flex items-center justify-between gap-2">
-                <div className="text-sm font-medium text-surface-100">当前页编辑</div>
-                {selectedSlide && (
-                  <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-surface-400">
-                    {selectedSlideIndex + 1}/{deck?.slides.length}
+                <div className="text-sm font-medium text-surface-100">运行状态</div>
+                {codeSessionId && (
+                  <span className="rounded-full border border-emerald-300/20 bg-emerald-400/10 px-2 py-1 text-[10px] text-emerald-100">
+                    可导出
                   </span>
                 )}
               </div>
             </div>
 
-            {!selectedSlide ? (
-              <div className="flex flex-1 items-center justify-center px-4 text-center text-sm leading-6 text-surface-500">
-                生成 PPT 后，可在这里编辑当前页。
+            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+              <div className={`rounded-2xl border px-3 py-2 text-xs leading-5 ${
+                hasTrustedNodeExecution
+                  ? 'border-emerald-300/20 bg-emerald-400/10 text-emerald-100'
+                  : 'border-amber-300/20 bg-amber-400/10 text-amber-100'
+              }`}>
+                <div className="flex items-start gap-2">
+                  <ShieldAlert size={14} className="mt-0.5 shrink-0" />
+                  <span>
+                    {hasTrustedNodeExecution
+                      ? '本地信任模式已确认。模型代码会在临时目录执行，预览成功后才能导出。'
+                      : '首次运行前会弹窗确认本地 Node 信任模式。'}
+                  </span>
+                </div>
               </div>
-            ) : (
-              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
-                <label className="block text-xs text-surface-400">
-                  整套标题
-                  <input
-                    value={deck?.title ?? ''}
-                    onChange={(event) => patchDeck({ title: event.target.value })}
-                    className="mt-1 w-full rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-surface-100 outline-none transition focus:border-cyan-300/35"
-                  />
-                </label>
-                <label className="block text-xs text-surface-400">
-                  页面布局
-                  <select
-                    value={selectedSlide.layout}
-                    onChange={(event) => patchSelectedSlide({ layout: event.target.value as PresentationSlideLayout })}
-                    className="mt-1 w-full rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-surface-100 outline-none transition focus:border-cyan-300/35"
-                  >
-                    {LAYOUT_OPTIONS.map((layout) => (
-                      <option key={layout.value} value={layout.value} className="bg-surface-900">
-                        {layout.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="block text-xs text-surface-400">
-                  页面标题
-                  <textarea
-                    value={selectedSlide.title}
-                    onChange={(event) => patchSelectedSlide({ title: event.target.value })}
-                    className="mt-1 min-h-[64px] w-full resize-none rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-sm leading-5 text-surface-100 outline-none transition focus:border-cyan-300/35"
-                  />
-                </label>
-                <label className="block text-xs text-surface-400">
-                  副标题
-                  <input
-                    value={selectedSlide.subtitle ?? ''}
-                    onChange={(event) => patchSelectedSlide({ subtitle: event.target.value })}
-                    className="mt-1 w-full rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-surface-100 outline-none transition focus:border-cyan-300/35"
-                  />
-                </label>
-                <label className="block text-xs text-surface-400">
-                  视觉说明
-                  <input
-                    value={selectedSlide.visual.label ?? ''}
-                    onChange={(event) => patchSelectedVisualLabel(event.target.value)}
-                    className="mt-1 w-full rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-surface-100 outline-none transition focus:border-cyan-300/35"
-                  />
-                </label>
 
-                <div className="space-y-2 rounded-2xl border border-white/10 bg-white/[0.03] p-3">
+              {artifact && codeSummary && (
+                <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3">
                   <div className="flex items-center justify-between gap-2">
-                    <div className="text-xs font-medium text-surface-200">页面要点</div>
-                    <button
-                      onClick={addSelectedBullet}
-                      disabled={selectedSlide.bullets.length >= 6}
-                      className="text-[11px] text-cyan-100 transition hover:text-cyan-50 disabled:text-surface-600"
-                    >
-                      添加
-                    </button>
+                    <div className="flex items-center gap-2 text-xs font-medium text-surface-200">
+                      <Code2 size={13} className="text-cyan-200" /> 代码产物
+                    </div>
+                    <span className="rounded-full border border-white/10 bg-black/20 px-2 py-0.5 text-[10px] text-surface-500">
+                      {codeSummary.lineCount} 行
+                    </span>
                   </div>
-                  {selectedSlide.bullets.map((bullet, bulletIndex) => (
-                    <div key={`${selectedSlide.id}-edit-${bulletIndex}`} className="flex gap-2">
-                      <textarea
-                        value={bullet}
-                        onChange={(event) => updateSelectedBullet(bulletIndex, event.target.value)}
-                        className="min-h-[42px] flex-1 resize-none rounded-xl border border-white/10 bg-black/20 px-2 py-1.5 text-xs leading-5 text-surface-100 outline-none transition focus:border-cyan-300/35"
-                      />
-                      <button
-                        onClick={() => removeSelectedBullet(bulletIndex)}
-                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-white/10 text-surface-500 transition hover:bg-rose-400/10 hover:text-rose-100"
-                        title="删除要点"
-                      >
-                        <Trash2 size={12} />
-                      </button>
+                  {artifact.notes && (
+                    <p className="mt-2 text-xs leading-5 text-surface-400">{artifact.notes}</p>
+                  )}
+                  <pre className="mt-3 max-h-64 overflow-auto rounded-2xl border border-white/8 bg-black/30 p-3 text-[10px] leading-4 text-surface-300">
+                    {codeSummary.preview}
+                    {codeSummary.isTruncated ? '\n\n...代码较长，已折叠后续内容。' : ''}
+                  </pre>
+                </div>
+              )}
+
+              {codeInput && (
+                <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3 text-xs leading-5 text-surface-400">
+                  <div className="mb-2 font-medium text-surface-200">输入摘要</div>
+                  {isArtifactStale && (
+                    <div className="mb-2 rounded-xl border border-amber-300/20 bg-amber-400/10 px-2 py-1.5 text-amber-100">
+                      当前设置或资料已变更，需要重新生成后才能预览或导出。
+                    </div>
+                  )}
+                  <div>主题：{codeInput.topic}</div>
+                  <div>页数：{codeInput.slideCount}</div>
+                  <div>主题风格：{THEME_OPTIONS.find((item) => item.id === codeInput.themeId)?.label ?? codeInput.themeId}</div>
+                  <div>参考资料：{codeInput.files.length} 个</div>
+                </div>
+              )}
+
+              {diagnostics.length > 0 && (
+                <div className="space-y-1.5">
+                  <div className="text-xs font-medium text-surface-200">诊断</div>
+                  {diagnostics.map((diagnostic, index) => (
+                    <div key={`${diagnostic.message}-${index}`} className={`rounded-xl border px-2 py-1.5 text-xs leading-5 ${getDiagnosticTone(diagnostic.level)}`}>
+                      {diagnostic.message}
                     </div>
                   ))}
                 </div>
+              )}
 
-                <label className="block text-xs text-surface-400">
-                  演讲备注
-                  <textarea
-                    value={selectedSlide.speakerNotes ?? ''}
-                    onChange={(event) => patchSelectedSlide({ speakerNotes: event.target.value })}
-                    className="mt-1 min-h-[116px] w-full resize-none rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-sm leading-5 text-surface-100 outline-none transition focus:border-cyan-300/35"
-                  />
-                </label>
-
-                {selectedSlideIssues.length > 0 && (
-                  <div className="space-y-1.5">
-                    {selectedSlideIssues.map((issue, index) => (
-                      <div key={`${issue.message}-${index}`} className={`rounded-xl border px-2 py-1.5 text-xs leading-5 ${getIssueTone(issue.severity)}`}>
-                        {issue.message}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
+              {(lastRunOutput?.stderr || lastRunOutput?.stdout) && (
+                <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3">
+                  <div className="mb-2 text-xs font-medium text-surface-200">运行输出</div>
+                  {lastRunOutput.stderr && (
+                    <pre className="mb-2 max-h-36 overflow-auto rounded-xl border border-rose-300/15 bg-rose-400/10 p-2 text-[10px] leading-4 text-rose-100">
+                      {lastRunOutput.stderr}
+                    </pre>
+                  )}
+                  {lastRunOutput.stdout && (
+                    <pre className="max-h-36 overflow-auto rounded-xl border border-white/8 bg-black/24 p-2 text-[10px] leading-4 text-surface-300">
+                      {lastRunOutput.stdout}
+                    </pre>
+                  )}
+                </div>
+              )}
+            </div>
 
             {(statusMessage || errorMessage) && (
               <div className="border-t border-white/10 p-3">

@@ -1,11 +1,26 @@
 import type { SpreadsheetPlanStep, SpreadsheetWorkbookSchema } from '../../electron/shared/spreadsheetPlan'
 import type {
+  PresentationCodeArtifact,
+  PresentationCodeAsset,
+  PresentationCodeDiagnostic,
+  PresentationCodeExportRequest,
+  PresentationCodeExportResult,
+  PresentationCodeRequest,
+  PresentationCodeRunRequest,
+  PresentationCodeRunResult,
   PresentationDeckSpec,
   PresentationExportRequest,
   PresentationExportResult,
+  PresentationInstallRenderToolsResult,
+  PresentationPreviewRequest,
+  PresentationPreviewResult,
+  PresentationPreviewSlide,
   PresentationQaIssue,
+  PresentationRenderToolsStatus,
   PresentationSlideLayout,
   PresentationSlideSpec,
+  PresentationSlideVariant,
+  PresentationSvgVisualType,
   PresentationThemeId,
 } from '../../electron/shared/presentation'
 
@@ -293,11 +308,26 @@ export function supportsVision(model: ModelConfig | undefined) {
 
 export type { SpreadsheetPlanStep, SpreadsheetWorkbookSchema }
 export type {
+  PresentationCodeArtifact,
+  PresentationCodeAsset,
+  PresentationCodeDiagnostic,
+  PresentationCodeExportRequest,
+  PresentationCodeExportResult,
+  PresentationCodeRequest,
+  PresentationCodeRunRequest,
+  PresentationCodeRunResult,
   PresentationDeckSpec,
   PresentationExportRequest,
   PresentationExportResult,
+  PresentationInstallRenderToolsResult,
+  PresentationPreviewRequest,
+  PresentationPreviewResult,
+  PresentationPreviewSlide,
   PresentationQaIssue,
+  PresentationRenderToolsStatus,
   PresentationSlideLayout,
   PresentationSlideSpec,
+  PresentationSlideVariant,
+  PresentationSvgVisualType,
   PresentationThemeId,
 }

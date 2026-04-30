@@ -1,5 +1,16 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { PresentationExportRequest, PresentationExportResult } from './shared/presentation'
+import type {
+  PresentationCodeExportRequest,
+  PresentationCodeExportResult,
+  PresentationCodeRunRequest,
+  PresentationCodeRunResult,
+  PresentationExportRequest,
+  PresentationExportResult,
+  PresentationInstallRenderToolsResult,
+  PresentationPreviewRequest,
+  PresentationPreviewResult,
+  PresentationRenderToolsStatus,
+} from './shared/presentation'
 
 type ApiContentPart =
   | { type: 'text'; text: string }
@@ -307,7 +318,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   executeSpreadsheetInstruction: (request: ExecuteSpreadsheetInstructionRequest) => ipcRenderer.invoke('files:executeSpreadsheetInstruction', request),
   executeSpreadsheetPlan: (request: ExecuteSpreadsheetPlanRequest) => ipcRenderer.invoke('files:executeSpreadsheetPlan', request),
   exportSpreadsheetSession: (sessionId: string) => ipcRenderer.invoke('files:exportSpreadsheetSession', sessionId),
+  checkPresentationRenderTools: () => ipcRenderer.invoke('presentations:checkRenderTools') as Promise<PresentationRenderToolsStatus>,
+  installPresentationRenderTools: () => ipcRenderer.invoke('presentations:installRenderTools') as Promise<PresentationInstallRenderToolsResult>,
+  previewPresentationDeck: (request: PresentationPreviewRequest) => ipcRenderer.invoke('presentations:previewDeck', request) as Promise<PresentationPreviewResult>,
   exportPresentationDeck: (request: PresentationExportRequest) => ipcRenderer.invoke('presentations:exportDeck', request) as Promise<PresentationExportResult>,
+  runPresentationCodeDeck: (request: PresentationCodeRunRequest) => ipcRenderer.invoke('presentations:runCodeDeck', request) as Promise<PresentationCodeRunResult>,
+  exportPresentationCodeDeck: (request: PresentationCodeExportRequest) => ipcRenderer.invoke('presentations:exportCodeDeck', request) as Promise<PresentationCodeExportResult>,
   testApiConnection: (config: ApiConnectionConfig) => ipcRenderer.invoke('api:testConnection', config),
   completeChat: (request: CompleteChatRequest) => ipcRenderer.invoke('api:completeChat', request) as Promise<string | CompleteChatResponsePayload>,
   generateImage: (request: GenerateImageRequest) => ipcRenderer.invoke('api:generateImage', request),

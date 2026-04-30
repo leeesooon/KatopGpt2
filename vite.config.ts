@@ -36,6 +36,14 @@ export default defineConfig({
             }
           }
         }
+      },
+      {
+        entry: 'electron/presentationCodeChild.ts',
+        vite: {
+          build: {
+            outDir: 'dist-electron',
+          }
+        }
       }
     ]),
     renderer()

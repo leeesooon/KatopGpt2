@@ -1,11 +1,17 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   X, Eye, EyeOff, CheckCircle, AlertCircle, Loader2,
-  Plus, Trash2, ChevronDown, ChevronUp, Server, ImageIcon, Sparkles,
+  Plus, Trash2, ChevronDown, ChevronUp, Server, ImageIcon, Sparkles, Download,
 } from 'lucide-react'
 import { useChatStore } from '../store/chatStore'
 import { testApiConnection } from '../services/chatApi'
-import type { ApiProvider, ImageGenerationQuality, ImageGenerationSize, ModelConfig } from '../types'
+import type {
+  ApiProvider,
+  ImageGenerationQuality,
+  ImageGenerationSize,
+  ModelConfig,
+  PresentationRenderToolsStatus,
+} from '../types'
 import { openExternalUrl } from '../utils/externalLinks'
 
 interface ProviderFormData {
@@ -89,6 +95,15 @@ export default function SettingsModal() {
   const [imagePlannerModel, setImagePlannerModel] = useState(settings.imageGeneration.plannerModel ?? '')
   const [imageSize, setImageSize] = useState<ImageGenerationSize>(settings.imageGeneration.size)
   const [imageQuality, setImageQuality] = useState<ImageGenerationQuality>(settings.imageGeneration.quality)
+  const [presentationToolsStatus, setPresentationToolsStatus] = useState<PresentationRenderToolsStatus | null>(null)
+  const [isCheckingPresentationTools, setIsCheckingPresentationTools] = useState(false)
+  const [isInstallingPresentationTools, setIsInstallingPresentationTools] = useState(false)
+  const [presentationToolsMessage, setPresentationToolsMessage] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!isSettingsOpen) return
+    void handleCheckPresentationTools()
+  }, [isSettingsOpen])
 
   if (!isSettingsOpen) return null
 
@@ -242,6 +257,51 @@ export default function SettingsModal() {
   const handleExternalLinkClick = (e: React.MouseEvent<HTMLAnchorElement>, url: string) => {
     e.preventDefault()
     openExternalUrl(url)
+  }
+
+  async function handleCheckPresentationTools() {
+    if (!window.electronAPI?.checkPresentationRenderTools) {
+      setPresentationToolsStatus({
+        ok: false,
+        missing: ['soffice', 'pdftoppm'],
+        message: '当前环境不是桌面版应用，无法检测或安装 PPT 渲染依赖。',
+      })
+      return
+    }
+
+    setIsCheckingPresentationTools(true)
+    setPresentationToolsMessage(null)
+    try {
+      const result = await window.electronAPI.checkPresentationRenderTools()
+      setPresentationToolsStatus(result)
+    } catch (error) {
+      setPresentationToolsMessage(error instanceof Error ? error.message : '检测 PPT 渲染依赖失败。')
+    } finally {
+      setIsCheckingPresentationTools(false)
+    }
+  }
+
+  async function handleInstallPresentationTools() {
+    if (!window.electronAPI?.installPresentationRenderTools) {
+      setPresentationToolsMessage('当前环境暂不支持自动安装，请手动安装 LibreOffice 和 Poppler。')
+      return
+    }
+
+    setIsInstallingPresentationTools(true)
+    setPresentationToolsMessage('正在打开安装窗口，请按窗口提示授权并等待安装完成...')
+    try {
+      const result = await window.electronAPI.installPresentationRenderTools()
+      if (result.status) {
+        setPresentationToolsStatus(result.status)
+      } else {
+        await handleCheckPresentationTools()
+      }
+      setPresentationToolsMessage(result.started ? `${result.message}\n安装完成后请点击“重新检测”。` : result.message)
+    } catch (error) {
+      setPresentationToolsMessage(error instanceof Error ? error.message : '自动安装 PPT 渲染依赖失败。')
+    } finally {
+      setIsInstallingPresentationTools(false)
+    }
   }
 
   const renderModelTags = (form: ProviderFormData, setFn: (f: ProviderFormData) => void) => (
@@ -626,6 +686,76 @@ export default function SettingsModal() {
                   }`}
                 />
               </button>
+            </div>
+          </section>
+
+          <section className="space-y-4">
+            <h3 className="text-sm font-semibold text-surface-300 uppercase tracking-wider">
+              PPT 助手依赖
+            </h3>
+            <div className={`rounded-2xl border p-4 ${
+              presentationToolsStatus?.ok
+                ? 'border-emerald-300/20 bg-emerald-400/10'
+                : 'border-amber-300/20 bg-amber-400/10'
+            }`}>
+              <div className="flex items-start gap-3">
+                <div className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border ${
+                  presentationToolsStatus?.ok
+                    ? 'border-emerald-300/25 bg-emerald-300/10 text-emerald-100'
+                    : 'border-amber-300/25 bg-amber-300/10 text-amber-100'
+                }`}>
+                  {isCheckingPresentationTools || isInstallingPresentationTools
+                    ? <Loader2 size={16} className="animate-spin" />
+                    : presentationToolsStatus?.ok
+                      ? <CheckCircle size={16} />
+                      : <AlertCircle size={16} />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium text-surface-100">
+                    真实预览与高质量导出
+                  </div>
+                  <p className="mt-1 text-xs leading-5 text-surface-400">
+                    {presentationToolsStatus
+                      ? presentationToolsStatus.message
+                      : '正在检测 LibreOffice soffice 和 Poppler pdftoppm...'}
+                  </p>
+                  {presentationToolsStatus && (presentationToolsStatus.sofficePath || presentationToolsStatus.pdftoppmPath) && (
+                    <div className="mt-2 space-y-1 text-[11px] text-surface-500">
+                      {presentationToolsStatus.sofficePath && (
+                        <div className="truncate">soffice：{presentationToolsStatus.sofficePath}</div>
+                      )}
+                      {presentationToolsStatus.pdftoppmPath && (
+                        <div className="truncate">pdftoppm：{presentationToolsStatus.pdftoppmPath}</div>
+                      )}
+                    </div>
+                  )}
+                  {presentationToolsMessage && (
+                    <div className="mt-2 rounded-xl border border-white/10 bg-black/20 px-2 py-1.5 text-xs leading-5 text-surface-300">
+                      {presentationToolsMessage}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  onClick={() => void handleCheckPresentationTools()}
+                  disabled={isCheckingPresentationTools || isInstallingPresentationTools}
+                  className="btn-ghost border border-surface-600/50 text-xs disabled:opacity-40"
+                >
+                  重新检测
+                </button>
+                <button
+                  onClick={() => void handleInstallPresentationTools()}
+                  disabled={isInstallingPresentationTools || presentationToolsStatus?.ok === true}
+                  className="btn-primary inline-flex items-center gap-2 text-xs disabled:opacity-40"
+                >
+                  {isInstallingPresentationTools ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+                  一键安装依赖
+                </button>
+              </div>
+              <p className="mt-2 text-[10px] leading-4 text-surface-500">
+                Windows 下会打开 PowerShell，并使用 winget 安装固定包：TheDocumentFoundation.LibreOffice 和 oschwartz10612.Poppler；安装器可能按系统策略请求管理员授权。
+              </p>
             </div>
           </section>
 
