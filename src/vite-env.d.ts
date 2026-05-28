@@ -262,7 +262,8 @@ interface ElectronAPI {
   getPresentationWindowState: () => Promise<PresentationWindowState>
   subscribePresentationWindowState: (listener: (state: PresentationWindowState) => void) => number
   unsubscribePresentationWindowState: (listenerId: number) => void
-  fetchWebPage: (url: string) => Promise<FetchedWebPage>
+  fetchWebPage: (url: string, requestId?: string) => Promise<FetchedWebPage>
+  cancelFetchWebPage: (requestId: string) => Promise<boolean>
   selectWorkspace: () => Promise<WorkspaceHandle | null>
   listWorkspaceDocuments: (rootPath: string) => Promise<string[]>
   readWorkspaceDocument: (rootPath: string, relativePath: string) => Promise<string>

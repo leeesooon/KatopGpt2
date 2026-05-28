@@ -1,4 +1,4 @@
-import { Feather, FilePlus2, PenLine, Rows3, ScanText } from 'lucide-react'
+import { Feather, FilePlus2, PenLine, Rows3 } from 'lucide-react'
 import type { DocumentAgentMode } from '../types'
 
 interface AgentActionBarProps {
@@ -16,7 +16,6 @@ const ACTIONS: Array<{
   { mode: 'create', label: '生成初稿', hint: '从一句话起草 Markdown', icon: FilePlus2 },
   { mode: 'rewrite', label: '改写选区', hint: '润色当前选中的内容', icon: PenLine },
   { mode: 'expand', label: '扩写文档', hint: '补全结构和细节', icon: Rows3 },
-  { mode: 'summarize', label: '总结文档', hint: '整理摘要和要点', icon: ScanText },
 ]
 
 function getDisabledReason(mode: DocumentAgentMode, hasActiveDocument: boolean, hasSelection: boolean) {

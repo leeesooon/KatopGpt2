@@ -40,7 +40,7 @@ export default function ModelSelector() {
   const hasModels = allModels.length > 0
 
   return (
-    <div className="relative">
+    <div className="relative z-[70]">
       <button
         ref={btnRef}
         onClick={() => hasModels && setOpen(!open)}
@@ -66,14 +66,14 @@ export default function ModelSelector() {
         <div
           ref={panelRef}
           className="absolute bottom-full left-0 mb-2 w-72 max-h-80 overflow-y-auto
-                     glass-panel rounded-xl shadow-2xl animate-slide-up z-50"
+                     glass-panel rounded-xl shadow-2xl animate-slide-up z-[80]"
         >
           {providers.map((provider) => {
             if (provider.models.length === 0) return null
             return (
               <div key={provider.id}>
                 {/* Provider header */}
-                <div className="px-3 pt-2.5 pb-1 flex items-center gap-1.5 sticky top-0 bg-surface-900/95 backdrop-blur-sm">
+                <div className="sticky top-0 z-10 px-3 pt-2.5 pb-1 flex items-center gap-1.5 bg-surface-900/95 backdrop-blur-sm">
                   <Server size={11} className="text-surface-500" />
                   <span className="text-[11px] font-semibold text-surface-400 uppercase tracking-wider">
                     {provider.name}

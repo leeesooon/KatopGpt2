@@ -304,7 +304,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   unsubscribePresentationWindowState: (listenerId: number) => {
     presentationWindowStateListeners.delete(listenerId)
   },
-  fetchWebPage: (url: string) => ipcRenderer.invoke('web:fetchPage', url),
+  fetchWebPage: (url: string, requestId?: string) => ipcRenderer.invoke('web:fetchPage', url, requestId),
+  cancelFetchWebPage: (requestId: string) => ipcRenderer.invoke('web:cancelFetchPage', requestId) as Promise<boolean>,
   selectWorkspace: () => ipcRenderer.invoke('workspace:select'),
   listWorkspaceDocuments: (rootPath: string) => ipcRenderer.invoke('workspace:listDocuments', rootPath),
   readWorkspaceDocument: (rootPath: string, relativePath: string) => ipcRenderer.invoke('workspace:readDocument', rootPath, relativePath),

@@ -103,9 +103,9 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
     setActiveModel,
   } = useChatStore()
   const [panelWidth, setPanelWidth] = useState(900)
-  const [topic, setTopic] = useState('年度经营复盘与增长策略')
-  const [audience, setAudience] = useState('管理层、业务负责人')
-  const [goal, setGoal] = useState('讲清现状、问题、策略和下一步行动')
+  const [topic, setTopic] = useState('AI 工具高效使用培训')
+  const [audience, setAudience] = useState('学习者、团队成员')
+  const [goal, setGoal] = useState('讲清概念、步骤、案例和练习总结')
   const [slideCount, setSlideCount] = useState(8)
   const [themeId, setThemeId] = useState<PresentationThemeId>('executive-midnight')
   const [artifact, setArtifact] = useState<PresentationCodeArtifact | null>(null)
@@ -676,7 +676,7 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
                     setCodeSessionId(null)
                   }}
                   className="mt-1 min-h-[76px] w-full resize-none rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-sm leading-5 text-surface-100 outline-none transition focus:border-cyan-300/35"
-                  placeholder="例如：年度经营复盘与增长策略"
+                  placeholder="例如：AI 工具高效使用培训"
                 />
               </label>
 

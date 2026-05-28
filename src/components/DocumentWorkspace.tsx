@@ -49,7 +49,7 @@ function buildComposerDraft(mode: DocumentAgentMode, documentTitle?: string) {
   if (mode === 'create') return '请帮我生成一份 Markdown 初稿，主题是：'
   if (mode === 'rewrite') return '请改写我当前选中的内容，风格要求：'
   if (mode === 'expand') return `请为当前文档《${documentTitle ?? '当前文档'}》增量补充一段内容，重点补充：`
-  return `请总结当前文档《${documentTitle ?? '当前文档'}》，输出方向：`
+  return `请为当前文档《${documentTitle ?? '当前文档'}》增量补充一段内容，重点补充：`
 }
 
 function getDocumentStats(content: string) {
@@ -122,6 +122,7 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
     editorMode,
     selection,
     latestSuggestion,
+    streamingSuggestion,
     taskState,
     isWorkspaceLoading,
     isSaving,
@@ -196,6 +197,7 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
     return 'text-surface-300 border-white/10 bg-white/5'
   }, [taskState.status])
   const isAssistantGenerating = documentAgentRunner.hasActiveRun && taskState.status === 'running'
+  const assistantStreamingContent = documentAgentRunner.streamingContent || streamingSuggestion?.content || ''
 
   const handleAssistantModeChange = (mode: RunnableDocumentAgentMode) => {
     setSideTab('assistant')
@@ -431,7 +433,7 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
             </div>
             <h2 className="text-3xl font-semibold tracking-tight text-surface-50">让文档和对话一起工作</h2>
             <p className="mt-3 text-sm leading-6 text-surface-400">
-              打开一个文件夹后，可以在这里编辑 Markdown、预览排版，并使用文档助手生成、改写和总结内容。
+              打开一个文件夹后，可以在这里编辑 Markdown、预览排版，并使用文档助手生成、改写和扩写内容。
             </p>
             <button onClick={() => void openWorkspace()} className="btn-primary mt-7 inline-flex items-center gap-2 rounded-2xl px-5 py-3">
               <FolderOpen size={17} /> 打开工作区
@@ -643,8 +645,9 @@ export default function DocumentWorkspace({ standalone = false }: DocumentWorksp
                   latestSuggestion={latestSuggestion}
                   selectedMode={assistantMode}
                   instruction={assistantInstruction}
-                  streamingContent={documentAgentRunner.streamingContent}
-                  hasActiveRun={isAssistantGenerating}
+                  streamingContent={assistantStreamingContent}
+                  hasActiveRun={isAssistantGenerating || (taskState.status === 'running' && Boolean(streamingSuggestion))}
+                  canStop={documentAgentRunner.hasActiveRun}
                   hasApiConfig={documentAgentRunner.hasApiConfig}
                   canRetry={documentAgentRunner.canRetry}
                   modelOptions={assistantModelOptions}

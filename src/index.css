@@ -480,9 +480,190 @@
   padding: 0;
 }
 
+.assistant-bubble {
+  background:
+    linear-gradient(180deg, rgba(30, 41, 59, 0.64), rgba(15, 23, 42, 0.52)),
+    rgba(15, 23, 42, 0.36);
+}
+
+.assistant-bubble::before {
+  content: '';
+  position: absolute;
+  top: 1rem;
+  bottom: 1rem;
+  left: 0;
+  width: 2px;
+  border-radius: 9999px;
+  background: linear-gradient(180deg, rgba(125, 211, 252, 0.88), rgba(16, 185, 129, 0.55));
+  opacity: 0.68;
+}
+
+.assistant-bubble.is-streaming {
+  animation: assistantBubbleBreath 2.2s ease-in-out infinite;
+}
+
+.assistant-bubble.is-streaming::before {
+  animation: assistantStatusLine 1.6s ease-in-out infinite;
+}
+
+.assistant-bubble.is-streaming::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(110deg, transparent 12%, rgba(125, 211, 252, 0.075) 42%, transparent 68%);
+  transform: translateX(-115%);
+  animation: assistantPanelSweep 3.4s ease-in-out infinite;
+}
+
+.assistant-thinking-state {
+  position: relative;
+  z-index: 1;
+  border-radius: 0.875rem;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(2, 6, 23, 0.22);
+  padding: 0.85rem 0.95rem;
+}
+
+.assistant-status-dot {
+  display: inline-block;
+  width: 0.45rem;
+  height: 0.45rem;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  background: #67e8f9;
+  box-shadow: 0 0 0 3px rgba(103, 232, 249, 0.1), 0 0 18px rgba(103, 232, 249, 0.38);
+  animation: assistantStatusPulse 1.45s ease-in-out infinite;
+}
+
+.assistant-skeleton-line {
+  position: relative;
+  height: 0.55rem;
+  overflow: hidden;
+  border-radius: 9999px;
+  background: rgba(148, 163, 184, 0.12);
+}
+
+.assistant-skeleton-line::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(226, 232, 240, 0.18), transparent);
+  transform: translateX(-100%);
+  animation: assistantSkeletonSweep 1.65s ease-in-out infinite;
+}
+
+.assistant-markdown-streaming::after {
+  content: '';
+  display: inline-block;
+  width: 0.45rem;
+  height: 1.05em;
+  margin-left: 0.25rem;
+  border-radius: 9999px;
+  background: #67e8f9;
+  vertical-align: -0.15em;
+  box-shadow: 0 0 14px rgba(103, 232, 249, 0.32);
+  animation: assistantCursorBlink 1s steps(2, end) infinite;
+}
+
 /* Typing indicator animation */
 .typing-dot {
   animation: pulseDot 1.4s ease-in-out infinite;
 }
 .typing-dot:nth-child(2) { animation-delay: 0.2s; }
 .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes pulseDot {
+  0%, 80%, 100% {
+    transform: scale(0.6);
+    opacity: 0.4;
+  }
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes assistantBubbleBreath {
+  0%, 100% {
+    box-shadow:
+      0 18px 45px rgba(2, 6, 23, 0.16),
+      inset 0 1px 0 rgba(255, 255, 255, 0.05),
+      0 0 0 rgba(125, 211, 252, 0);
+  }
+  50% {
+    box-shadow:
+      0 18px 45px rgba(2, 6, 23, 0.18),
+      inset 0 1px 0 rgba(255, 255, 255, 0.06),
+      0 0 26px rgba(125, 211, 252, 0.08);
+  }
+}
+
+@keyframes assistantStatusLine {
+  0%, 100% {
+    opacity: 0.46;
+  }
+  50% {
+    opacity: 0.95;
+  }
+}
+
+@keyframes assistantPanelSweep {
+  0%, 34% {
+    transform: translateX(-115%);
+    opacity: 0;
+  }
+  50% {
+    opacity: 1;
+  }
+  78%, 100% {
+    transform: translateX(115%);
+    opacity: 0;
+  }
+}
+
+@keyframes assistantStatusPulse {
+  0%, 100% {
+    opacity: 0.55;
+    transform: scale(0.82);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes assistantSkeletonSweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes assistantCursorBlink {
+  0%, 45% {
+    opacity: 1;
+  }
+  46%, 100% {
+    opacity: 0.22;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .assistant-bubble.is-streaming,
+  .assistant-bubble.is-streaming::before,
+  .assistant-bubble.is-streaming::after,
+  .assistant-status-dot,
+  .assistant-skeleton-line::after,
+  .assistant-markdown-streaming::after,
+  .typing-dot {
+    animation: none !important;
+  }
+
+  .assistant-bubble.is-streaming::after,
+  .assistant-skeleton-line::after {
+    display: none;
+  }
+}

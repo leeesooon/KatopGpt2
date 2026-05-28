@@ -1,4 +1,4 @@
-import { Clipboard, Cpu, FilePlus2, GitCompareArrows, Loader2, PenLine, RotateCcw, Rows3, ScanText, Search, Sparkles, Square, Trash2 } from 'lucide-react'
+import { Clipboard, Cpu, FilePlus2, GitCompareArrows, Loader2, PenLine, RotateCcw, Rows3, Search, Sparkles, Square, Trash2 } from 'lucide-react'
 import type { DocumentAgentMode, DocumentSelection, WorkspaceDocument } from '../types'
 import type { RunnableDocumentAgentMode } from './useDocumentAgentRunner'
 
@@ -24,6 +24,7 @@ interface DocumentAssistantPanelProps {
   instruction: string
   streamingContent: string
   hasActiveRun: boolean
+  canStop: boolean
   hasApiConfig: boolean
   canRetry: boolean
   modelOptions: DocumentAssistantModelOption[]
@@ -58,7 +59,6 @@ const ASSISTANT_MODES: Array<{
   { mode: 'create', label: '初稿', hint: '生成新的 Markdown 初稿', icon: FilePlus2 },
   { mode: 'rewrite', label: '改写', hint: '改写当前选区', icon: PenLine },
   { mode: 'expand', label: '扩写', hint: '生成增量补充内容', icon: Rows3 },
-  { mode: 'summarize', label: '总结', hint: '总结当前文档', icon: ScanText },
 ]
 
 function buildLineDiff(original: string, suggestion: string): DiffLine[] {
@@ -109,6 +109,7 @@ export default function DocumentAssistantPanel({
   instruction,
   streamingContent,
   hasActiveRun,
+  canStop,
   hasApiConfig,
   canRetry,
   modelOptions,
@@ -210,7 +211,7 @@ export default function DocumentAssistantPanel({
               <span className="uppercase tracking-[0.24em]">任务</span>
               {selection && <span>{selection.text.length} 字符选区</span>}
             </div>
-            <div className="grid grid-cols-4 gap-1.5">
+            <div className="grid grid-cols-3 gap-1.5">
               {ASSISTANT_MODES.map((action) => {
                 const disabledReason = getModeDisabledReason(action.mode, activeDocument, selection)
                 const isSelected = selectedMode === action.mode
@@ -223,7 +224,7 @@ export default function DocumentAssistantPanel({
                     disabled={hasBlockingRun || Boolean(disabledReason)}
                     title={disabledReason ?? action.hint}
                     aria-label={action.label}
-                    className={`flex h-8 items-center justify-center rounded-xl border px-2 transition disabled:cursor-not-allowed disabled:opacity-35 ${
+                    className={`inline-flex h-8 items-center justify-center rounded-xl border px-2 transition disabled:cursor-not-allowed disabled:opacity-35 ${
                       isSelected
                         ? 'border-amber-200/35 bg-amber-200/12 text-amber-50 shadow-[0_0_0_1px_rgba(251,191,36,0.08)]'
                         : 'border-white/10 bg-black/12 text-surface-400 hover:border-white/20 hover:bg-white/[0.05] hover:text-white'
@@ -248,8 +249,9 @@ export default function DocumentAssistantPanel({
                 {hasBlockingRun ? (
                   <button
                     onClick={onStop}
-                    className="flex flex-1 items-center justify-center text-rose-100 transition hover:bg-rose-400/10"
-                    title="停止生成"
+                    disabled={!canStop}
+                    className="inline-flex flex-1 items-center justify-center text-rose-100 transition hover:bg-rose-400/10 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
+                    title={canStop ? '停止生成' : '请在聊天输入栏停止生成'}
                     aria-label="停止生成"
                   >
                     <Square size={14} fill="currentColor" />
@@ -261,14 +263,14 @@ export default function DocumentAssistantPanel({
                       disabled={!canRun}
                       title={runDisabledReason ?? '运行'}
                       aria-label="运行"
-                      className="flex flex-1 items-center justify-center border-b border-white/10 bg-primary-600 text-white transition hover:bg-primary-500 disabled:bg-white/[0.03] disabled:text-surface-600 disabled:hover:bg-white/[0.03]"
+                      className="inline-flex flex-1 items-center justify-center border-b border-white/10 bg-primary-600 text-white transition hover:bg-primary-500 disabled:bg-white/[0.03] disabled:text-surface-600 disabled:hover:bg-white/[0.03]"
                     >
                       <Sparkles size={15} />
                     </button>
                     <button
                       onClick={onRetry}
                       disabled={!canRetry}
-                      className="flex flex-1 items-center justify-center text-surface-400 transition hover:bg-white/[0.06] hover:text-surface-100 disabled:text-surface-700 disabled:hover:bg-transparent"
+                      className="inline-flex flex-1 items-center justify-center text-surface-400 transition hover:bg-white/[0.06] hover:text-surface-100 disabled:text-surface-700 disabled:hover:bg-transparent"
                       title={canRetry ? '重试' : '暂无可重试的任务'}
                       aria-label="重试"
                     >
@@ -290,7 +292,7 @@ export default function DocumentAssistantPanel({
                 <Loader2 size={18} className="mx-auto mb-3 animate-spin text-sky-100" />
                 <h3 className="text-sm font-medium text-surface-100">正在等待模型返回内容</h3>
                 <p className="mt-2 text-xs leading-5 text-surface-400">
-                  如果长时间没有输出，可以点击右侧停止按钮结束本次任务。
+                  {canStop ? '如果长时间没有输出，可以点击右侧停止按钮结束本次任务。' : '如果长时间没有输出，可以在聊天输入栏停止本次任务。'}
                 </p>
               </div>
             ) : hasStreamingDraft ? (
@@ -299,7 +301,7 @@ export default function DocumentAssistantPanel({
                 <Loader2 size={13} className="animate-spin" />
                 正在生成草稿
               </div>
-              <div className="min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap rounded-2xl bg-black/15 px-3 py-2 text-sm leading-6 text-surface-200">
+              <div className="assistant-markdown-streaming min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap rounded-2xl bg-black/15 px-3 py-2 text-sm leading-6 text-surface-200">
                 {streamingContent}
               </div>
             </div>
@@ -325,7 +327,7 @@ export default function DocumentAssistantPanel({
                   <button
                     onClick={() => onApplySuggestion(primaryApplyMode)}
                     disabled={isPrimaryApplyDisabled}
-                    className="btn-primary h-8 min-w-[76px] justify-center rounded-xl px-2 text-[11px] leading-none disabled:opacity-40"
+                    className="btn-primary inline-flex h-8 min-w-[76px] items-center justify-center rounded-xl px-2 text-[11px] leading-none disabled:opacity-40"
                   >
                     {primaryApplyLabel}
                   </button>
@@ -333,7 +335,7 @@ export default function DocumentAssistantPanel({
                     <button
                       disabled={hasBlockingRun}
                       onClick={() => onApplySuggestion('append-document')}
-                      className="btn-ghost h-8 min-w-[76px] justify-center rounded-xl border border-white/10 px-2 text-[11px] leading-none disabled:opacity-40"
+                      className="btn-ghost inline-flex h-8 min-w-[76px] items-center justify-center rounded-xl border border-white/10 px-2 text-[11px] leading-none disabled:opacity-40"
                     >
                       追加末尾
                     </button>
@@ -341,14 +343,14 @@ export default function DocumentAssistantPanel({
                   <button
                     disabled={hasBlockingRun}
                     onClick={onCreateFromSuggestion}
-                    className="btn-ghost h-8 min-w-[76px] justify-center rounded-xl border border-white/10 px-2 text-[11px] leading-none disabled:opacity-40"
+                    className="btn-ghost inline-flex h-8 min-w-[76px] items-center justify-center rounded-xl border border-white/10 px-2 text-[11px] leading-none disabled:opacity-40"
                   >
                     新建文档
                   </button>
                   <button
                     disabled={hasBlockingRun}
                     onClick={() => void handleCopySuggestion()}
-                    className="btn-ghost h-8 w-8 justify-center rounded-xl border border-white/10 p-0 disabled:opacity-40"
+                    className="btn-ghost inline-flex h-8 w-8 items-center justify-center rounded-xl border border-white/10 p-0 disabled:opacity-40"
                     title="复制"
                     aria-label="复制"
                   >
@@ -357,7 +359,7 @@ export default function DocumentAssistantPanel({
                   <button
                     disabled={hasBlockingRun}
                     onClick={onClearSuggestion}
-                    className="btn-ghost h-8 w-8 justify-center rounded-xl border border-white/10 p-0 text-rose-100 disabled:opacity-40"
+                    className="btn-ghost inline-flex h-8 w-8 items-center justify-center rounded-xl border border-white/10 p-0 text-rose-100 disabled:opacity-40"
                     title="放弃"
                     aria-label="放弃"
                   >

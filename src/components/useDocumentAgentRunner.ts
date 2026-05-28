@@ -10,7 +10,6 @@ import type { DocumentAgentMode, DocumentSelection, Message, WorkspaceDocument }
 
 export type RunnableDocumentAgentMode = Exclude<DocumentAgentMode, 'chat'>
 
-const DOCUMENT_AGENT_IDLE_COMPLETE_MS = 5000
 const DOCUMENT_AGENT_FIRST_CHUNK_TIMEOUT_MS = 45000
 
 interface UseDocumentAgentRunnerOptions {
@@ -46,6 +45,7 @@ export function useDocumentAgentRunner({
   const conversations = useChatStore((state) => state.conversations)
   const activeConversationId = useChatStore((state) => state.activeConversationId)
   const startTask = useWorkspaceStore((state) => state.startTask)
+  const updateTaskDraft = useWorkspaceStore((state) => state.updateTaskDraft)
   const completeTask = useWorkspaceStore((state) => state.completeTask)
   const failTask = useWorkspaceStore((state) => state.failTask)
   const clearLatestSuggestion = useWorkspaceStore((state) => state.clearLatestSuggestion)
@@ -60,19 +60,12 @@ export function useDocumentAgentRunner({
   const runningModeRef = useRef<RunnableDocumentAgentMode>('expand')
   const isMountedRef = useRef(true)
   const runIdRef = useRef(0)
-  const idleCompleteTimerRef = useRef<number | null>(null)
   const firstChunkTimerRef = useRef<number | null>(null)
 
   const apiConfig = resolveApiConfig(settings.providers, settings.activeModel)
   const hasApiConfig = Boolean(apiConfig)
   const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId)
   const activeAssistantProfileId = activeConversation?.assistantProfileId ?? settings.activeAssistantProfileId
-
-  const clearIdleCompleteTimer = useCallback(() => {
-    if (idleCompleteTimerRef.current === null) return
-    window.clearTimeout(idleCompleteTimerRef.current)
-    idleCompleteTimerRef.current = null
-  }, [])
 
   const clearFirstChunkTimer = useCallback(() => {
     if (firstChunkTimerRef.current === null) return
@@ -103,7 +96,6 @@ export function useDocumentAgentRunner({
     if (runIdRef.current !== runId) return
 
     const finalContent = streamingContentRef.current.trim()
-    clearIdleCompleteTimer()
     clearFirstChunkTimer()
     runIdRef.current += 1
     abortController.abort()
@@ -118,7 +110,7 @@ export function useDocumentAgentRunner({
     if (isMountedRef.current) {
       finishRun(runId)
     }
-  }, [clearFirstChunkTimer, clearIdleCompleteTimer, completeTask, failTask, finishRun])
+  }, [clearFirstChunkTimer, completeTask, failTask, finishRun])
 
   const run = useCallback(async (mode: RunnableDocumentAgentMode, userPrompt: string) => {
     if (abortControllerRef.current) return
@@ -180,13 +172,6 @@ export function useDocumentAgentRunner({
       return true
     }
 
-    const scheduleIdleComplete = () => {
-      clearIdleCompleteTimer()
-      idleCompleteTimerRef.current = window.setTimeout(() => {
-        completeRunFromTimer(runId, abortController, request.title, mode)
-      }, DOCUMENT_AGENT_IDLE_COMPLETE_MS)
-    }
-
     try {
       let referenceContext: string | undefined
       const knowledgeResult = searchAssistantKnowledge(settings, `${userPrompt}\n\n${request.prompt}`, activeAssistantProfileId)
@@ -229,20 +214,18 @@ export function useDocumentAgentRunner({
           clearFirstChunkTimer()
         }
         streamingContentRef.current += chunk
+        updateTaskDraft(streamingContentRef.current, mode, request.title)
         if (isMountedRef.current) {
           setStreamingContent(streamingContentRef.current)
         }
-        scheduleIdleComplete()
       }
 
       if (runIdRef.current !== runId) return
       clearFirstChunkTimer()
-      clearIdleCompleteTimer()
       completeCurrentRun()
     } catch (error) {
       if (runIdRef.current !== runId) return
       clearFirstChunkTimer()
-      clearIdleCompleteTimer()
       if (isAbortError(error)) {
         const stoppedContent = streamingContentRef.current.trim()
         if (stoppedContent) {
@@ -263,7 +246,6 @@ export function useDocumentAgentRunner({
     } finally {
       if (runIdRef.current === runId) {
         clearFirstChunkTimer()
-        clearIdleCompleteTimer()
       }
       if (runIdRef.current === runId) {
         abortControllerRef.current = null
@@ -278,7 +260,6 @@ export function useDocumentAgentRunner({
     beginRun,
     clearLatestSuggestion,
     clearFirstChunkTimer,
-    clearIdleCompleteTimer,
     completeRunFromTimer,
     completeTask,
     failTask,
@@ -296,12 +277,12 @@ export function useDocumentAgentRunner({
     settings.tavilyApiKey,
     settings.temperature,
     startTask,
+    updateTaskDraft,
   ])
 
   const stop = useCallback(() => {
     const controller = abortControllerRef.current
     clearFirstChunkTimer()
-    clearIdleCompleteTimer()
     controller?.abort()
     runIdRef.current += 1
     abortControllerRef.current = null
@@ -322,11 +303,10 @@ export function useDocumentAgentRunner({
     if (isMountedRef.current) {
       finishRun()
     }
-  }, [clearFirstChunkTimer, clearIdleCompleteTimer, completeTask, failTask, finishRun])
+  }, [clearFirstChunkTimer, completeTask, failTask, finishRun])
 
   const reset = useCallback(() => {
     clearFirstChunkTimer()
-    clearIdleCompleteTimer()
     runIdRef.current += 1
     abortControllerRef.current?.abort()
     abortControllerRef.current = null
@@ -335,7 +315,7 @@ export function useDocumentAgentRunner({
       setStreamingContent('')
       finishRun()
     }
-  }, [clearFirstChunkTimer, clearIdleCompleteTimer, finishRun])
+  }, [clearFirstChunkTimer, finishRun])
 
   const retry = useCallback(() => {
     if (!lastRunRequest || abortControllerRef.current) return
@@ -344,13 +324,12 @@ export function useDocumentAgentRunner({
 
   useEffect(() => {
     return () => {
-      clearIdleCompleteTimer()
       clearFirstChunkTimer()
       isMountedRef.current = false
       activeRunIdRef.current = null
       abortControllerRef.current?.abort()
     }
-  }, [clearFirstChunkTimer, clearIdleCompleteTimer])
+  }, [clearFirstChunkTimer])
 
   return {
     isRunning,

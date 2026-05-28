@@ -9,7 +9,14 @@ import RoleAvatar from './RoleAvatar'
 import { useChatStore } from '../store/chatStore'
 import { useWorkspaceStore } from '../store/workspaceStore'
 import { buildAssistantSystemPrompt, resolveAssistantProfile } from '../services/assistantProfiles'
-import type { AssistantProfile, ChatInputMode, DocumentAgentMode, ImageAttachment, FileAttachment } from '../types'
+import type {
+  AssistantProfile,
+  ChatInputMode,
+  DocumentAgentMode,
+  ImageAttachment,
+  FileAttachment,
+  ImageGenerationSize,
+} from '../types'
 import {
   FILE_INPUT_ACCEPT,
   IMAGE_PROMPT_PRESETS,
@@ -49,6 +56,12 @@ interface InputAreaProps {
   onRoleSelected?: (profile: AssistantProfile) => void
 }
 
+const IMAGE_SIZE_OPTIONS: Array<{ value: ImageGenerationSize; label: string; title: string }> = [
+  { value: '1024x1024', label: '方图', title: '1024×1024 方图' },
+  { value: '1024x1536', label: '竖图', title: '1024×1536 竖图' },
+  { value: '1536x1024', label: '横图', title: '1536×1024 横图' },
+]
+
 export default function InputArea({
   onSend,
   onStop,
@@ -71,6 +84,7 @@ export default function InputArea({
     searchEnabled,
     setSearchEnabled,
     settings,
+    updateSettings,
     setAssistantProfilesOpen,
     isPresentationWorkspaceOpen,
     setPresentationWorkspaceOpen,
@@ -298,7 +312,6 @@ export default function InputArea({
     create: '生成初稿',
     rewrite: '改写文档',
     expand: '扩写文档',
-    summarize: '总结文档',
   }
 
   const placeholder = pendingAction === 'chat'
@@ -324,6 +337,7 @@ export default function InputArea({
   const activeAssistant = resolveAssistantProfile(settings, activeAssistantProfileId)
   const visibleAssistantProfiles = settings.assistantProfiles.filter((profile) => !profile.isHidden)
   const enabledKnowledgeCount = activeAssistant?.knowledgeDocuments.filter((document) => document.enabled).length ?? 0
+  const activeImageSize = settings.imageGeneration.size
 
   const handleSelectRole = (profileId: string) => {
     const selectedProfile = visibleAssistantProfiles.find((profile) => profile.id === profileId)
@@ -360,6 +374,15 @@ export default function InputArea({
     setPresentationWorkspaceOpen(true)
   }
 
+  const handleImageSizeChange = (size: ImageGenerationSize) => {
+    updateSettings({
+      imageGeneration: {
+        ...settings.imageGeneration,
+        size,
+      },
+    })
+  }
+
   const pendingAttachmentTasks = attachmentTasks.filter((task) => task.status !== 'ready')
 
   const getTaskStatusText = (status: string) => {
@@ -380,7 +403,7 @@ export default function InputArea({
 
   return (
     <div
-      className="border-t border-surface-800/50 bg-surface-900/30 p-4 relative"
+      className="relative z-20 border-t border-surface-800/50 bg-surface-900/30 p-4"
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
@@ -398,7 +421,7 @@ export default function InputArea({
       )}
 
       <div className="max-w-3xl mx-auto">
-        <div className="mb-2 flex items-center gap-2">
+        <div className="mb-2 flex flex-wrap items-center gap-2">
           {!isImageMode && activeAssistant && (
             <div ref={roleSelectorRef} className="relative">
               {isRoleSelectorOpen && (
@@ -532,6 +555,30 @@ export default function InputArea({
           )}
           {isImageMode && (
             <>
+              <div
+                className="inline-flex h-8 items-center rounded-full border border-white/10 bg-white/5 p-0.5 text-xs"
+                title="图片尺寸"
+              >
+                {IMAGE_SIZE_OPTIONS.map((option) => {
+                  const isActiveSize = activeImageSize === option.value
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => handleImageSizeChange(option.value)}
+                      disabled={isStreaming}
+                      className={`h-7 rounded-full px-2.5 transition disabled:opacity-50 ${
+                        isActiveSize
+                          ? 'bg-fuchsia-500/20 text-fuchsia-100'
+                          : 'text-surface-400 hover:text-white'
+                      }`}
+                      title={option.title}
+                    >
+                      {option.label}
+                    </button>
+                  )
+                })}
+              </div>
               <button
                 onClick={() => setIsImageSeriesMode((enabled) => !enabled)}
                 disabled={isStreaming}

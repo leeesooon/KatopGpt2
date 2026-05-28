@@ -21,6 +21,10 @@ interface WorkspaceFileTreeProps {
   onCollapse?: () => void
 }
 
+function hasSupportedDocumentExtension(fileName: string) {
+  return /\.(md|markdown|txt)$/i.test(fileName)
+}
+
 function buildTree(filePaths: string[]) {
   const root: FileNode = { name: '', path: '', type: 'directory', children: [] }
 
@@ -296,7 +300,7 @@ export default function WorkspaceFileTree({
   const handleCreate = async () => {
     const normalizedName = draftName.trim().replace(/\\/g, '/')
     if (!normalizedName) return
-    const finalName = /\.md$/i.test(normalizedName) ? normalizedName : `${normalizedName}.md`
+    const finalName = hasSupportedDocumentExtension(normalizedName) ? normalizedName : `${normalizedName}.md`
     const created = await onCreate(finalName)
     if (!created) return
     setDraftName('')
@@ -318,7 +322,7 @@ export default function WorkspaceFileTree({
         <div className="flex shrink-0 items-center gap-1.5">
           <button
             onClick={() => setIsCreating((value) => !value)}
-            className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-surface-300 transition hover:bg-white/10 hover:text-white"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-surface-300 transition hover:bg-white/10 hover:text-white"
             title="新建文档"
           >
             <Plus size={15} />
@@ -326,7 +330,7 @@ export default function WorkspaceFileTree({
           {onSwitchWorkspace && (
             <button
               onClick={onSwitchWorkspace}
-              className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-surface-300 transition hover:bg-white/10 hover:text-white"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-surface-300 transition hover:bg-white/10 hover:text-white"
               title="切换工作区"
             >
               <FolderOpen size={15} />
@@ -335,7 +339,7 @@ export default function WorkspaceFileTree({
           {onCollapse && (
             <button
               onClick={onCollapse}
-              className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-surface-300 transition hover:bg-white/10 hover:text-white"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-surface-300 transition hover:bg-white/10 hover:text-white"
               title="收起工作区"
             >
               <PanelLeftClose size={15} />

@@ -51,6 +51,18 @@ interface FetchedWebPage {
   contentType: string
 }
 
+export interface WebPageReadProgress {
+  phase: 'checking_pages' | 'reading_pages'
+  total: number
+  completed: number
+  sourceCount: number
+}
+
+interface ReadWebPagesOptions {
+  signal?: AbortSignal
+  onProgress?: (progress: WebPageReadProgress) => void
+}
+
 function normalizeWhitespace(text: string) {
   return text
     .replace(/\u00a0/g, ' ')
@@ -173,15 +185,37 @@ function parseWebPage(html: string, fallbackUrl: string, contentType: string) {
   }
 }
 
-async function fetchWebPage(url: string): Promise<FetchedWebPage> {
+async function fetchWebPage(url: string, signal?: AbortSignal): Promise<FetchedWebPage> {
   if (window.electronAPI?.fetchWebPage) {
-    return window.electronAPI.fetchWebPage(url)
+    const requestId = crypto.randomUUID()
+    let wasAborted = false
+    const cancelElectronFetch = () => {
+      wasAborted = true
+      void window.electronAPI?.cancelFetchWebPage?.(requestId)
+    }
+
+    if (signal?.aborted) {
+      throw new DOMException('The operation was aborted.', 'AbortError')
+    }
+
+    signal?.addEventListener('abort', cancelElectronFetch, { once: true })
+    try {
+      return await window.electronAPI.fetchWebPage(url, requestId)
+    } catch (error) {
+      if (wasAborted || (error instanceof Error && error.name === 'AbortError')) {
+        throw new DOMException('The operation was aborted.', 'AbortError')
+      }
+      throw error
+    } finally {
+      signal?.removeEventListener('abort', cancelElectronFetch)
+    }
   }
 
   const response = await fetch(url, {
     headers: {
       Accept: 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8',
     },
+    signal,
   })
 
   if (!response.ok) {
@@ -195,19 +229,36 @@ async function fetchWebPage(url: string): Promise<FetchedWebPage> {
   }
 }
 
-export async function readWebPagesFromText(text: string) {
+export async function readWebPagesFromText(text: string, options: ReadWebPagesOptions = {}) {
   const urls = extractUrlsFromText(text)
+  options.onProgress?.({
+    phase: 'checking_pages',
+    total: urls.length,
+    completed: 0,
+    sourceCount: 0,
+  })
+
   if (urls.length === 0) {
     return {
       sources: [] as SearchResult[],
     }
   }
 
+  let completed = 0
+  let sourceCount = 0
+  options.onProgress?.({
+    phase: 'reading_pages',
+    total: urls.length,
+    completed,
+    sourceCount,
+  })
+
   const pages = await Promise.all(
     urls.map(async (url) => {
       try {
-        const page = await fetchWebPage(url)
+        const page = await fetchWebPage(url, options.signal)
         const parsed = parseWebPage(page.html, page.finalUrl, page.contentType)
+        sourceCount += 1
 
         return {
           source: {
@@ -218,11 +269,22 @@ export async function readWebPagesFromText(text: string) {
           contentText: parsed.contentText,
         }
       } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') {
+          throw error
+        }
         console.group('%c[Web Page] %c✗ Failed to read', 'color:#ef4444;font-weight:bold', 'color:#64748b')
         console.log('%cURL: %c%s', 'color:#8494b2', 'color:#e8ecf4', url)
         console.error(error)
         console.groupEnd()
         return null
+      } finally {
+        completed += 1
+        options.onProgress?.({
+          phase: 'reading_pages',
+          total: urls.length,
+          completed,
+          sourceCount,
+        })
       }
     })
   )

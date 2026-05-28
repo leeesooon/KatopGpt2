@@ -11,7 +11,7 @@ import { readWebPagesFromText, formatWebPageContext } from '../services/webpage'
 import { runAgenticSearch } from '../services/agenticSearch'
 import { buildConversationSummary, buildSmartContextMessages, shouldUpdateConversationSummary } from '../services/contextManager'
 import { buildAssistantSystemPrompt, resolveAssistantProfile, searchAssistantKnowledge } from '../services/assistantProfiles'
-import type { AssistantProfile, ChatInputMode, ImageAttachment, FileAttachment, SearchResult } from '../types'
+import type { AssistantProfile, AssistantWorkState, ChatInputMode, ImageAttachment, FileAttachment, SearchResult } from '../types'
 import MessageBubble from './MessageBubble'
 import InputArea from './InputArea'
 import ImageZoomViewer from './ImageZoomViewer'
@@ -203,6 +203,10 @@ function buildImageSeriesChapterPrompt(setting: string, chapter: ImageSeriesChap
   ].filter(Boolean).join('\n\n')
 }
 
+function formatSearchEngineName(engine: 'serper' | 'tavily') {
+  return engine === 'tavily' ? 'Tavily' : 'Serper'
+}
+
 export default function ChatView() {
   const {
     conversations,
@@ -226,6 +230,7 @@ export default function ChatView() {
   const roleFlashTimerRef = useRef<number | null>(null)
   const previousConversationIdRef = useRef<string | null>(null)
   const [streamingDrafts, setStreamingDrafts] = useState<Record<string, string>>({})
+  const [assistantWorkStates, setAssistantWorkStates] = useState<Record<string, AssistantWorkState>>({})
   const [inputMode, setInputMode] = useState<ChatInputMode>('chat')
   const [imageReferenceDraft, setImageReferenceDraft] = useState<ImageAttachment | null>(null)
   const [roleFlash, setRoleFlash] = useState<RoleFlashState | null>(null)
@@ -242,6 +247,8 @@ export default function ChatView() {
   })
   const isCurrentStreaming = activeConversationId ? streamingConvIds.includes(activeConversationId) : false
   const isImageGenerating = inputMode === 'image' && isCurrentStreaming
+  const latestMessage = renderedMessages[renderedMessages.length - 1]
+  const latestWorkState = latestMessage ? assistantWorkStates[latestMessage.id] : undefined
   const {
     messagesEndRef,
     scrollContainerRef,
@@ -250,7 +257,7 @@ export default function ChatView() {
   } = useChatScroll({
     activeConversationId,
     messageCount: renderedMessages.length,
-    latestMessageContent: renderedMessages[renderedMessages.length - 1]?.content,
+    latestMessageContent: `${latestMessage?.content ?? ''}${latestWorkState ? JSON.stringify(latestWorkState) : ''}`,
   })
 
   const contextStats = calculateContextStats(messages)
@@ -928,7 +935,24 @@ export default function ChatView() {
     const abortController = new AbortController()
     abortMapRef.current.set(convId, abortController)
 
-    // Add empty assistant message
+    const assistantMsg = addMessage(convId, { role: 'assistant', content: '' })
+    setStreamingDrafts((state) => ({ ...state, [assistantMsg.id]: '' }))
+    const setAssistantWorkState = (workState: AssistantWorkState) => {
+      setAssistantWorkStates((state) => ({ ...state, [assistantMsg.id]: workState }))
+    }
+    const clearAssistantWorkState = () => {
+      setAssistantWorkStates((state) => {
+        const next = { ...state }
+        delete next[assistantMsg.id]
+        return next
+      })
+    }
+    setAssistantWorkState({
+      phase: 'checking_pages',
+      label: '正在检查网页链接',
+      detail: '准备联网资料',
+      sourceCount: 0,
+    })
 
     // Web references and search
     let referenceSources: SearchResult[] = []
@@ -937,46 +961,9 @@ export default function ChatView() {
     const knowledgeResult = searchAssistantKnowledge(settings, messageContent, assistantProfileIdForRequest)
     const assistantSystemPrompt = buildAssistantSystemPrompt(settings, knowledgeResult.context || undefined, assistantProfileIdForRequest)
 
-    const webPages = await readWebPagesFromText(messageContent)
-    if (webPages.sources.length > 0) {
-      const startIndex = referenceSources.length + 1
-      referenceSections.push(`以下是用户提供网页的提取内容：\n\n${formatWebPageContext(webPages.sources, 5000, startIndex)}`)
-      referenceSources = [...referenceSources, ...webPages.sources]
-    }
-
-    if ((searchEnabled || settings.enableSearchByDefault) && apiKey) {
-      try {
-        const startIndex = referenceSources.length + 1
-        const searchResult = await runAgenticSearch(
-          apiConfig,
-          messageContent,
-          previousMessages,
-          apiKey,
-          settings.searchEngine,
-          searchEnabled,
-          startIndex,
-          abortController.signal
-        )
-        if (searchResult.context) {
-          referenceSections.push(`以下是网络搜索结果：\n\n${searchResult.context}`)
-          referenceSources = [...referenceSources, ...searchResult.results]
-        }
-      } catch (err) {
-        if (err instanceof SearchApiError) {
-          // Non-blocking: continue without search
-        }
-      }
-    }
-
-    const assistantMsg = addMessage(convId, { role: 'assistant', content: '' })
-    setStreamingDrafts((state) => ({ ...state, [assistantMsg.id]: '' }))
     let fullContent = ''
     let rafPending = false
     let pendingFrame = 0
-
-    if (isDocumentAction) {
-      workspaceState.startTask(documentRequest.title)
-    }
 
     const cancelPendingMessageUpdate = () => {
       if (pendingFrame) {
@@ -987,6 +974,103 @@ export default function ChatView() {
     }
 
     try {
+      const webPages = await readWebPagesFromText(messageContent, {
+        signal: abortController.signal,
+        onProgress: (progress) => {
+          if (progress.phase === 'checking_pages') {
+            setAssistantWorkState({
+              phase: 'checking_pages',
+              label: progress.total > 0 ? '正在检查网页链接' : '正在准备回答',
+              detail: progress.total > 0 ? `发现 ${progress.total} 个链接` : '未检测到网页链接',
+              sourceCount: referenceSources.length + progress.sourceCount,
+            })
+            return
+          }
+
+          setAssistantWorkState({
+            phase: 'reading_pages',
+            label: '正在读取网页内容',
+            detail: `已读取 ${progress.completed}/${progress.total} 个链接`,
+            sourceCount: referenceSources.length + progress.sourceCount,
+          })
+        },
+      })
+      if (webPages.sources.length > 0) {
+        const startIndex = referenceSources.length + 1
+        referenceSections.push(`以下是用户提供网页的提取内容：\n\n${formatWebPageContext(webPages.sources, 5000, startIndex)}`)
+        referenceSources = [...referenceSources, ...webPages.sources]
+      }
+
+      if ((searchEnabled || settings.enableSearchByDefault) && apiKey) {
+        try {
+          const engineName = formatSearchEngineName(settings.searchEngine)
+          const startIndex = referenceSources.length + 1
+          const searchResult = await runAgenticSearch(
+            apiConfig,
+            messageContent,
+            previousMessages,
+            apiKey,
+            settings.searchEngine,
+            searchEnabled,
+            startIndex,
+            {
+              signal: abortController.signal,
+              onProgress: (progress) => {
+                if (progress.phase === 'planning_search') {
+                  setAssistantWorkState({
+                    phase: 'planning_search',
+                    label: '正在判断是否需要联网搜索',
+                    detail: `使用 ${engineName}`,
+                    engine: progress.engine,
+                    sourceCount: referenceSources.length + progress.sourceCount,
+                  })
+                  return
+                }
+
+                if (progress.phase === 'searching') {
+                  setAssistantWorkState({
+                    phase: 'searching',
+                    label: '正在检索网络资料',
+                    detail: `已发现 ${referenceSources.length + progress.sourceCount} 条来源`,
+                    engine: progress.engine,
+                    sourceCount: referenceSources.length + progress.sourceCount,
+                  })
+                  return
+                }
+
+                setAssistantWorkState({
+                  phase: 'organizing',
+                  label: '正在整理检索结果',
+                  detail: `共 ${referenceSources.length + progress.sourceCount} 条来源`,
+                  engine: progress.engine,
+                  sourceCount: referenceSources.length + progress.sourceCount,
+                })
+              },
+            }
+          )
+          if (searchResult.context) {
+            referenceSections.push(`以下是网络搜索结果：\n\n${searchResult.context}`)
+            referenceSources = [...referenceSources, ...searchResult.results]
+          }
+        } catch (err) {
+          if (err instanceof Error && err.name === 'AbortError') {
+            throw err
+          }
+          if (err instanceof SearchApiError) {
+            // Non-blocking: continue without search
+          }
+        }
+      }
+
+      if (isDocumentAction) {
+        workspaceState.startTask(documentRequest.title)
+      }
+      setAssistantWorkState({
+        phase: 'answering',
+        label: '正在组织回答',
+        detail: referenceSources.length > 0 ? `共 ${referenceSources.length} 条来源` : undefined,
+        sourceCount: referenceSources.length,
+      })
       const allMessages = useChatStore
         .getState()
         .conversations.find((c) => c.id === convId)!
@@ -1024,8 +1108,12 @@ export default function ChatView() {
         referenceContext || undefined
       )
 
+      clearAssistantWorkState()
       for await (const chunk of stream) {
         fullContent += chunk
+        if (isDocumentAction) {
+          useWorkspaceStore.getState().updateTaskDraft(fullContent, workspaceState.pendingAction, documentRequest.title, assistantMsg.id)
+        }
         // Throttle state updates to 1 per animation frame
         if (!rafPending) {
           rafPending = true
@@ -1049,6 +1137,7 @@ export default function ChatView() {
         delete next[assistantMsg.id]
         return next
       })
+      clearAssistantWorkState()
 
       if (isDocumentAction && fullContent.trim()) {
         useWorkspaceStore.getState().completeTask(fullContent, workspaceState.pendingAction, assistantMsg.id, documentRequest.title)
@@ -1062,6 +1151,7 @@ export default function ChatView() {
       }
     } catch (err: unknown) {
       cancelPendingMessageUpdate()
+      clearAssistantWorkState()
 
       if (err instanceof Error && err.name === 'AbortError') {
         updateMessage(
@@ -1084,8 +1174,10 @@ export default function ChatView() {
         delete next[assistantMsg.id]
         return next
       })
+      clearAssistantWorkState()
     } finally {
       cancelPendingMessageUpdate()
+      clearAssistantWorkState()
       setConversationStreaming(convId!, false)
       abortMapRef.current.delete(convId!)
     }
@@ -1166,6 +1258,8 @@ export default function ChatView() {
             <MessageBubble
               key={msg.id}
               message={msg}
+              isStreaming={msg.role === 'assistant' && Object.prototype.hasOwnProperty.call(streamingDrafts, msg.id)}
+              workState={assistantWorkStates[msg.id]}
               onContinueImageEdit={handleContinueImageEdit}
               onOpenImagePreview={handleOpenImagePreview}
             />

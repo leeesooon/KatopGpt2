@@ -107,10 +107,10 @@ export function buildDocumentTaskPrompt({
   }
 
   return {
-    title: '总结当前文档',
+    title: '扩写当前文档',
     prompt: [
       ...contextSections,
-      '## 任务\n\n请把当前文档总结成一份结构化 Markdown 摘要，包含核心结论、关键要点、待补充项。',
+      '## 任务\n\n请生成可直接插入当前 Markdown 文档的增量扩写内容。',
     ].join('\n\n'),
   }
 }

@@ -117,7 +117,7 @@ export interface FileAttachment {
   validationWarning?: string
 }
 
-export type DocumentAgentMode = 'chat' | 'create' | 'rewrite' | 'expand' | 'summarize'
+export type DocumentAgentMode = 'chat' | 'create' | 'rewrite' | 'expand'
 
 export type DocumentEditorMode = 'write' | 'preview' | 'split'
 
@@ -197,6 +197,22 @@ export interface Message {
   /** Search results attached to this message (for assistant responses) */
   searchResults?: SearchResult[]
   timestamp: number
+}
+
+export type AssistantWorkPhase =
+  | 'checking_pages'
+  | 'reading_pages'
+  | 'planning_search'
+  | 'searching'
+  | 'organizing'
+  | 'answering'
+
+export interface AssistantWorkState {
+  phase: AssistantWorkPhase
+  label: string
+  detail?: string
+  engine?: SearchEngine
+  sourceCount?: number
 }
 
 export interface Conversation {

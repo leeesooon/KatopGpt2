@@ -14,7 +14,7 @@ import remarkGfm from 'remark-gfm'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { Copy, Check, User, Bot, FileText, Download, ExternalLink, Sparkles } from 'lucide-react'
-import type { FileAttachment, ImageAttachment, Message } from '../types'
+import type { AssistantWorkState, FileAttachment, ImageAttachment, Message } from '../types'
 import SourcesPanel from './SourcesPanel'
 import { normalizeExternalUrl, openExternalUrl } from '../utils/externalLinks'
 import MermaidBlock from './MermaidBlock'
@@ -23,6 +23,8 @@ import type { WorkspaceImageViewPayload } from './workspaceMarkdown'
 
 interface MessageBubbleProps {
   message: Message
+  isStreaming?: boolean
+  workState?: AssistantWorkState
   onContinueImageEdit?: (image: ImageAttachment) => void
   onOpenImagePreview?: (image: WorkspaceImageViewPayload) => void
 }
@@ -398,7 +400,65 @@ function MarkdownTable({ children, sources }: { children: ReactNode; sources: { 
   )
 }
 
-const MessageBubble = memo(function MessageBubble({ message, onContinueImageEdit, onOpenImagePreview }: MessageBubbleProps) {
+function formatAssistantWorkEngine(engine?: AssistantWorkState['engine']) {
+  if (!engine) return null
+  return engine === 'tavily' ? 'Tavily' : 'Serper'
+}
+
+function AssistantThinkingState({ workState }: { workState?: AssistantWorkState }) {
+  const engineLabel = formatAssistantWorkEngine(workState?.engine)
+  const sourceCount = workState?.sourceCount
+  const detailItems = [
+    workState?.detail,
+    engineLabel ? `搜索引擎：${engineLabel}` : null,
+    sourceCount != null ? `来源：${sourceCount} 条` : null,
+  ].filter(Boolean)
+
+  return (
+    <div className="assistant-thinking-state" aria-live="polite">
+      <div className="flex min-w-0 items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2 text-sm text-surface-200">
+          <span className="assistant-status-dot" aria-hidden="true" />
+          <span className="truncate">{workState?.label ?? '正在组织回答'}</span>
+          <div className="flex shrink-0 items-center gap-1" aria-hidden="true">
+            <span className="typing-dot h-1.5 w-1.5 rounded-full bg-cyan-200/80" />
+            <span className="typing-dot h-1.5 w-1.5 rounded-full bg-cyan-200/80" />
+            <span className="typing-dot h-1.5 w-1.5 rounded-full bg-cyan-200/80" />
+          </div>
+        </div>
+        {workState && (
+          <span className="shrink-0 rounded-full border border-cyan-200/15 bg-cyan-300/10 px-2 py-0.5 text-[10px] text-cyan-100">
+            检索中
+          </span>
+        )}
+      </div>
+      {detailItems.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {detailItems.map((item) => (
+            <span
+              key={item}
+              className="rounded-md border border-surface-700/45 bg-surface-900/35 px-2 py-1 text-[11px] text-surface-400"
+            >
+              {item}
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="mt-3 space-y-2" aria-hidden="true">
+        <div className="assistant-skeleton-line w-[78%]" />
+        <div className="assistant-skeleton-line w-[58%]" />
+      </div>
+    </div>
+  )
+}
+
+const MessageBubble = memo(function MessageBubble({
+  message,
+  isStreaming = false,
+  workState,
+  onContinueImageEdit,
+  onOpenImagePreview,
+}: MessageBubbleProps) {
   const isUser = message.role === 'user'
   const [showCopyButton, setShowCopyButton] = useState(false)
   const [copiedMessage, setCopiedMessage] = useState(false)
@@ -410,6 +470,7 @@ const MessageBubble = memo(function MessageBubble({ message, onContinueImageEdit
     () => unwrapOuterMarkdownFence(message.content),
     [message.content]
   )
+  const hasMessageContent = message.content.trim().length > 0
 
   const markdownComponents = useMemo(() => {
     const createCitationContainer = (Tag: CitationContainerTag) =>
@@ -511,13 +572,14 @@ const MessageBubble = memo(function MessageBubble({ message, onContinueImageEdit
   }, [message.searchResults, onOpenImagePreview])
 
   const handleCopyMessage = async () => {
+    if (!hasMessageContent) return
     await navigator.clipboard.writeText(message.content)
     setCopiedMessage(true)
     setTimeout(() => setCopiedMessage(false), 2000)
   }
 
   const handleConvertToMarkdown = async () => {
-    if (!message.content.trim()) return
+    if (!hasMessageContent || isStreaming) return
     setIsConverting(true)
     try {
       const created = await createDocumentFromContent(renderedContent, inferMarkdownFileName(renderedContent))
@@ -528,6 +590,18 @@ const MessageBubble = memo(function MessageBubble({ message, onContinueImageEdit
       setIsConverting(false)
     }
   }
+
+  const assistantActionsClassName = [
+    'flex shrink-0 items-center gap-1.5 transition-opacity duration-200',
+    showCopyButton || copiedMessage || isConverting
+      ? 'opacity-100'
+      : 'opacity-0 group-hover/message:opacity-100 group-focus-within/message:opacity-100',
+  ].join(' ')
+  const assistantBubbleClassName = [
+    'assistant-bubble group/message relative max-w-[90%] overflow-hidden rounded-2xl border px-4 py-3 text-surface-200',
+    'border-surface-700/40 bg-surface-800/50 shadow-[0_18px_45px_rgba(2,6,23,0.16),inset_0_1px_0_rgba(255,255,255,0.05)]',
+    isStreaming ? 'is-streaming border-cyan-300/25' : '',
+  ].filter(Boolean).join(' ')
 
   return (
     <div className={`flex gap-3 animate-fade-in ${isUser ? 'flex-row-reverse' : ''}`}>
@@ -554,30 +628,54 @@ const MessageBubble = memo(function MessageBubble({ message, onContinueImageEdit
           setShowCopyButton(false)
           setCopiedMessage(false)
         }}
-        className={`relative ${isUser ? 'max-w-[75%]' : 'max-w-[90%]'} rounded-2xl px-4 py-3 ${
-          isUser
-            ? 'bg-primary-600/20 border border-primary-500/20 text-surface-100'
-            : 'bg-surface-800/50 border border-surface-700/30 text-surface-200'
-        }`}
+        onFocus={() => !isUser && setShowCopyButton(true)}
+        onBlur={(event) => {
+          const nextTarget = event.relatedTarget as Node | null
+          if (isUser || (nextTarget && event.currentTarget.contains(nextTarget))) return
+          setShowCopyButton(false)
+          setCopiedMessage(false)
+        }}
+        className={isUser
+          ? 'relative max-w-[75%] rounded-2xl border border-primary-500/20 bg-primary-600/20 px-4 py-3 text-surface-100'
+          : assistantBubbleClassName}
       >
-        {/* 复制按钮 - 仅在 AI 消息上显示 */}
-        {!isUser && showCopyButton && message.content && (
-          <div className="absolute top-2 right-2 flex items-center gap-1.5 z-10">
-            <button
-              onClick={() => void handleConvertToMarkdown()}
-              disabled={isConverting}
-              className="px-2.5 py-1.5 rounded-lg bg-surface-700/80 hover:bg-surface-600/80 text-surface-300 hover:text-surface-100 transition-all opacity-90 hover:opacity-100 backdrop-blur-sm text-xs disabled:opacity-50"
-              title="转为 Markdown 文档"
-            >
-              {isConverting ? '转换中...' : '转为文档'}
-            </button>
-            <button
-              onClick={handleCopyMessage}
-              className="p-1.5 rounded-lg bg-surface-700/80 hover:bg-surface-600/80 text-surface-300 hover:text-surface-100 transition-all opacity-90 hover:opacity-100 backdrop-blur-sm"
-              title={copiedMessage ? '已复制' : '复制消息'}
-            >
-              {copiedMessage ? <Check size={14} /> : <Copy size={14} />}
-            </button>
+        {!isUser && (
+          <div className="relative z-[1] mb-3 flex min-w-0 items-center justify-between gap-3 border-b border-white/5 pb-2">
+            <div className="flex min-w-0 items-center gap-2 text-xs">
+              <span className={`inline-flex h-5 w-5 items-center justify-center rounded-md border ${
+                isStreaming
+                  ? 'border-cyan-200/20 bg-cyan-300/10 text-cyan-100'
+                  : 'border-emerald-200/15 bg-emerald-300/10 text-emerald-100'
+              }`}>
+                <Bot size={13} />
+              </span>
+              <span className="font-medium text-surface-200">AI 助手</span>
+              <span className="text-surface-600">/</span>
+              <span className={isStreaming ? 'text-cyan-200' : 'text-surface-500'}>
+                {isStreaming ? '回答中' : '已完成'}
+              </span>
+            </div>
+            <div className={assistantActionsClassName}>
+              <button
+                type="button"
+                onClick={() => void handleConvertToMarkdown()}
+                disabled={isStreaming || isConverting || !hasMessageContent}
+                className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-surface-600/40 bg-surface-900/50 px-2.5 text-[11px] text-surface-300 transition hover:border-surface-500/60 hover:bg-surface-700/70 hover:text-surface-100 disabled:cursor-not-allowed disabled:opacity-40"
+                title={isStreaming ? '回答完成后可转为 Markdown 文档' : '转为 Markdown 文档'}
+              >
+                <FileText size={12} />
+                {isConverting ? '转换中...' : '转为文档'}
+              </button>
+              <button
+                type="button"
+                onClick={handleCopyMessage}
+                disabled={!hasMessageContent}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-surface-600/40 bg-surface-900/50 text-surface-300 transition hover:border-surface-500/60 hover:bg-surface-700/70 hover:text-surface-100 disabled:cursor-not-allowed disabled:opacity-40"
+                title={copiedMessage ? '已复制' : '复制消息'}
+              >
+                {copiedMessage ? <Check size={14} /> : <Copy size={14} />}
+              </button>
+            </div>
           </div>
         )}
         {isUser ? (
@@ -615,13 +713,9 @@ const MessageBubble = memo(function MessageBubble({ message, onContinueImageEdit
             <p className="text-sm leading-relaxed whitespace-pre-wrap">{message.content}</p>
           </>
         ) : message.content === '' ? (
-          <div className="flex items-center gap-1.5 py-0.5">
-            <div className="typing-dot w-2 h-2 rounded-full bg-surface-400" />
-            <div className="typing-dot w-2 h-2 rounded-full bg-surface-400" />
-            <div className="typing-dot w-2 h-2 rounded-full bg-surface-400" />
-          </div>
+          <AssistantThinkingState workState={workState} />
         ) : (
-          <>
+          <div className="relative z-[1]">
             {message.images && message.images.length > 0 && (
               <div className="flex flex-wrap gap-2 mb-3">
                 {message.images.map((img) => (
@@ -629,7 +723,7 @@ const MessageBubble = memo(function MessageBubble({ message, onContinueImageEdit
                 ))}
               </div>
             )}
-            <div className="markdown-body text-sm">
+            <div className={`markdown-body text-sm ${isStreaming ? 'assistant-markdown-streaming' : ''}`}>
               <ReactMarkdown 
                 remarkPlugins={[remarkGfm]} 
                 components={markdownComponents}
@@ -639,11 +733,9 @@ const MessageBubble = memo(function MessageBubble({ message, onContinueImageEdit
               </ReactMarkdown>
             </div>
             {message.searchResults && message.searchResults.length > 0 && (
-              <>
-                <SourcesPanel sources={message.searchResults} />
-              </>
+              <SourcesPanel sources={message.searchResults} />
             )}
-          </>
+          </div>
         )}
       </div>
     </div>

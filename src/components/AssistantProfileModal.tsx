@@ -368,7 +368,7 @@ export default function AssistantProfileModal() {
             <div>
               <div className="text-xs font-medium text-surface-300">头像选择</div>
               <div className="mt-0.5 text-[11px] text-surface-500">
-                使用统一线稿头像；也可以清除预设后改用自定义标识。
+                使用可爱动物头像；也可以清除预设后改用自定义标识。
               </div>
             </div>
             <button

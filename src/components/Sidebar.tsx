@@ -1,6 +1,8 @@
 import React, { useState } from 'react'
-import { Plus, MessageSquare, Trash2, Settings, Pencil, Check, X, Loader2 } from 'lucide-react'
+import { Plus, Trash2, Settings, Pencil, Check, X, Loader2 } from 'lucide-react'
 import { useChatStore } from '../store/chatStore'
+import RoleAvatar from './RoleAvatar'
+import { getDefaultAvatarIdForProfile } from '../services/roleAvatars'
 
 export default function Sidebar() {
   const {
@@ -12,6 +14,7 @@ export default function Sidebar() {
     setSettingsOpen,
     streamingConvIds,
     updateConversationTitle,
+    settings,
   } = useChatStore()
 
   const [renamingId, setRenamingId] = useState<string | null>(null)
@@ -60,86 +63,90 @@ export default function Sidebar() {
             还没有对话，点击上方按钮开始
           </div>
         )}
-        {conversations.map((conv) => (
-          <div
-            key={conv.id}
-            onClick={() => {
-              if (renamingId !== conv.id) setActiveConversation(conv.id)
-            }}
-            className={`group flex items-center gap-2.5 px-3 py-2.5 rounded-lg cursor-pointer transition-all duration-150 ${
-              activeConversationId === conv.id
-                ? 'bg-primary-600/15 text-primary-300 border border-primary-500/20'
-                : 'text-surface-300 hover:bg-surface-800/60 border border-transparent'
-            }`}
-          >
-            <MessageSquare
-              size={15}
-              className={`shrink-0 ${
+        {conversations.map((conv) => {
+          const profile = settings.assistantProfiles.find((item) => item.id === conv.assistantProfileId)
+          const avatarId = profile?.avatarId ?? getDefaultAvatarIdForProfile(conv.assistantProfileId)
+
+          return (
+            <div
+              key={conv.id}
+              onClick={() => {
+                if (renamingId !== conv.id) setActiveConversation(conv.id)
+              }}
+              className={`group flex items-center gap-2.5 px-3 py-2.5 rounded-lg cursor-pointer transition-all duration-150 ${
                 activeConversationId === conv.id
-                  ? 'text-primary-400'
-                  : 'text-surface-500'
+                  ? 'bg-primary-600/15 text-primary-300 border border-primary-500/20'
+                  : 'text-surface-300 hover:bg-surface-800/60 border border-transparent'
               }`}
-            />
-            {renamingId === conv.id ? (
-              <input
-                type="text"
-                value={renameValue}
-                onChange={(e) => setRenameValue(e.target.value)}
-                onBlur={submitRename}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') submitRename()
-                  if (e.key === 'Escape') cancelRename()
-                }}
-                className="flex-1 bg-surface-800 border border-primary-500/50 rounded px-2 py-1 text-sm text-surface-100 focus:outline-none"
-                autoFocus
+            >
+              <RoleAvatar
+                avatarId={avatarId}
+                emoji={profile?.emoji}
+                size="xs"
+                className={activeConversationId === conv.id ? 'opacity-100' : 'opacity-80'}
+                title={profile ? `角色：${profile.name}` : '角色'}
               />
-            ) : (
-              <span className="text-sm truncate flex-1">{conv.title}</span>
-            )}
-            {streamingConvIds.includes(conv.id) && (
-              <Loader2 size={13} className="text-primary-400 animate-spin shrink-0" />
-            )}
-            <div className={`flex items-center gap-0.5 ${renamingId === conv.id ? '' : 'opacity-0 group-hover:opacity-100'}`}>
-              <button
-                onClick={(e) => {
-                  if (renamingId === conv.id) {
-                    submitRename()
-                  } else {
-                    startRename(e, conv.id, conv.title)
-                  }
-                }}
-                className="p-1 hover:bg-surface-700/50 rounded transition-all"
-              >
-                {renamingId === conv.id ? (
-                  <Check size={13} className="text-green-400" />
-                ) : (
-                  <Pencil size={13} className="text-surface-400 hover:text-surface-200" />
-                )}
-              </button>
               {renamingId === conv.id ? (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    cancelRename()
+                <input
+                  type="text"
+                  value={renameValue}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  onBlur={submitRename}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') submitRename()
+                    if (e.key === 'Escape') cancelRename()
                   }}
-                  className="p-1 hover:bg-red-500/20 rounded transition-all"
-                >
-                  <X size={13} className="text-surface-400 hover:text-red-400" />
-                </button>
+                  className="flex-1 bg-surface-800 border border-primary-500/50 rounded px-2 py-1 text-sm text-surface-100 focus:outline-none"
+                  autoFocus
+                />
               ) : (
+                <span className="text-sm truncate flex-1">{conv.title}</span>
+              )}
+              {streamingConvIds.includes(conv.id) && (
+                <Loader2 size={13} className="text-primary-400 animate-spin shrink-0" />
+              )}
+              <div className={`flex items-center gap-0.5 ${renamingId === conv.id ? '' : 'opacity-0 group-hover:opacity-100'}`}>
                 <button
                   onClick={(e) => {
-                    e.stopPropagation()
-                    deleteConversation(conv.id)
+                    if (renamingId === conv.id) {
+                      submitRename()
+                    } else {
+                      startRename(e, conv.id, conv.title)
+                    }
                   }}
-                  className="p-1 hover:bg-red-500/20 rounded transition-all"
+                  className="p-1 hover:bg-surface-700/50 rounded transition-all"
                 >
-                  <Trash2 size={13} className="text-surface-400 hover:text-red-400" />
+                  {renamingId === conv.id ? (
+                    <Check size={13} className="text-green-400" />
+                  ) : (
+                    <Pencil size={13} className="text-surface-400 hover:text-surface-200" />
+                  )}
                 </button>
-              )}
+                {renamingId === conv.id ? (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      cancelRename()
+                    }}
+                    className="p-1 hover:bg-red-500/20 rounded transition-all"
+                  >
+                    <X size={13} className="text-surface-400 hover:text-red-400" />
+                  </button>
+                ) : (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      deleteConversation(conv.id)
+                    }}
+                    className="p-1 hover:bg-red-500/20 rounded transition-all"
+                  >
+                    <Trash2 size={13} className="text-surface-400 hover:text-red-400" />
+                  </button>
+                )}
+              </div>
             </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
 
       {/* Settings Button */}

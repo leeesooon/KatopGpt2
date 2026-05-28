@@ -44,6 +44,7 @@ interface WorkspaceSession {
   pendingAction: DocumentAgentMode
   composerDraft: ComposerDraft | null
   latestSuggestion: DocumentSuggestion | null
+  streamingSuggestion: DocumentSuggestion | null
   taskState: TaskState
   isWorkspaceLoading: boolean
   isSaving: boolean
@@ -61,7 +62,7 @@ interface WorkspaceState extends WorkspaceSession {
   saveActiveDocument: () => Promise<void>
   createDocument: (relativePath: string, initialContent?: string) => Promise<boolean>
   createDocumentFromContent: (content: string, suggestedName?: string) => Promise<boolean>
-  createDocumentFromSuggestion: (relativePath: string) => Promise<void>
+  createDocumentFromSuggestion: (relativePath: string) => Promise<boolean>
   renameDocument: (oldRelativePath: string, newRelativePath: string) => Promise<boolean>
   deleteDocument: (relativePath: string) => Promise<boolean>
   setEditorMode: (mode: DocumentEditorMode) => void
@@ -73,6 +74,7 @@ interface WorkspaceState extends WorkspaceSession {
   clearPendingAction: () => void
   consumeComposerDraft: () => void
   startTask: (title: string) => void
+  updateTaskDraft: (content: string, mode: DocumentAgentMode, title?: string, sourceMessageId?: string) => void
   completeTask: (content: string, mode: DocumentAgentMode, sourceMessageId?: string, title?: string, message?: string) => void
   failTask: (message: string, title?: string) => void
   clearTaskState: () => void
@@ -99,6 +101,9 @@ const EMPTY_TASK_STATE: TaskState = {
   message: '打开工作区后，可以生成 Markdown 初稿或改写当前文档。',
 }
 
+const ALLOWED_NEW_DOCUMENT_EXTENSIONS = new Set(['.md', '.markdown', '.txt'])
+const INVALID_WORKSPACE_PATH_CHARS = /[<>:"|?*\u0000-\u001f]/g
+
 function createEmptySession(): WorkspaceSession {
   return {
     currentWorkspace: null,
@@ -113,6 +118,7 @@ function createEmptySession(): WorkspaceSession {
     pendingAction: 'chat',
     composerDraft: null,
     latestSuggestion: null,
+    streamingSuggestion: null,
     taskState: EMPTY_TASK_STATE,
     isWorkspaceLoading: false,
     isSaving: false,
@@ -123,6 +129,39 @@ function createEmptySession(): WorkspaceSession {
 
 function normalizeRelativePath(relativePath: string) {
   return relativePath.replace(/\\/g, '/').replace(/^\/+/, '').trim()
+}
+
+function getPathExtension(relativePath: string) {
+  const fileName = relativePath.split('/').filter(Boolean).pop() ?? ''
+  const extensionStart = fileName.lastIndexOf('.')
+  return extensionStart > 0 ? fileName.slice(extensionStart).toLowerCase() : ''
+}
+
+function normalizeNewDocumentPath(relativePath: string) {
+  const normalized = normalizeRelativePath(relativePath)
+  if (!normalized) {
+    return { error: '文档名称不能为空' }
+  }
+
+  const segments = normalized.split('/').map((segment) => segment.trim()).filter(Boolean)
+  if (segments.some((segment) => segment === '.' || segment === '..')) {
+    return { error: '文档路径不能包含 . 或 ..' }
+  }
+
+  const cleanedSegments = segments.map((segment) => segment.replace(INVALID_WORKSPACE_PATH_CHARS, '').trim())
+  if (cleanedSegments.some((segment) => !segment)) {
+    return { error: '文档名称包含无效字符' }
+  }
+
+  let nextPath = cleanedSegments.join('/')
+  const extension = getPathExtension(nextPath)
+  if (!extension) {
+    nextPath = `${nextPath}.md`
+  } else if (!ALLOWED_NEW_DOCUMENT_EXTENSIONS.has(extension)) {
+    return { error: '当前仅支持 .md、.markdown 或 .txt 文档' }
+  }
+
+  return { path: nextPath }
 }
 
 function titleFromPath(relativePath: string) {
@@ -179,6 +218,7 @@ function createDocumentSwitchPatch(activeDocumentPath: string | null) {
     pendingAction: 'chat' as const,
     composerDraft: null,
     latestSuggestion: null,
+    streamingSuggestion: null,
     taskState: EMPTY_TASK_STATE,
   }
 }
@@ -197,6 +237,7 @@ function pickWorkspaceSession(state: WorkspaceSession): WorkspaceSession {
     pendingAction: state.pendingAction,
     composerDraft: state.composerDraft,
     latestSuggestion: state.latestSuggestion,
+    streamingSuggestion: state.streamingSuggestion,
     taskState: state.taskState,
     isWorkspaceLoading: state.isWorkspaceLoading,
     isSaving: state.isSaving,
@@ -259,6 +300,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         pendingRenamePath: null,
         selection: null,
         latestSuggestion: null,
+        streamingSuggestion: null,
         isWorkspaceLoading: false,
       })
 
@@ -430,8 +472,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const workspace = get().currentWorkspace
     if (!workspace || !window.electronAPI?.createWorkspaceDocument) return false
 
-    const normalizedPath = normalizeRelativePath(relativePath)
-    if (!normalizedPath) return false
+    const pathResult = normalizeNewDocumentPath(relativePath)
+    if (!pathResult.path) {
+      setSessionState(set, { error: pathResult.error ?? '创建文档失败' })
+      return false
+    }
+
+    const normalizedPath = pathResult.path
+    if (get().filePaths.includes(normalizedPath)) {
+      setSessionState(set, { error: `已存在同名文档：${titleFromPath(normalizedPath)}` })
+      return false
+    }
 
     setSessionState(set, { isSaving: true, saveSource: null, error: null })
 
@@ -539,16 +590,29 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   createDocumentFromSuggestion: async (relativePath) => {
     const suggestion = get().latestSuggestion
-    if (!suggestion) return
-    await get().createDocument(relativePath, suggestion.content)
+    if (!suggestion) return false
+    const created = await get().createDocument(relativePath, suggestion.content)
+    if (!created) {
+      setSessionState(set, {
+        taskState: {
+          status: 'failed',
+          title: '新建文档失败',
+          message: get().error ?? '请检查文档名称后重试。',
+        },
+      })
+      return false
+    }
+
     setSessionState(set, {
       latestSuggestion: null,
+      streamingSuggestion: null,
       taskState: {
         status: 'ready',
         title: '建议已保存为新文档',
         message: '已创建新文档，如需继续修改可以直接在编辑器中处理。',
       },
     })
+    return true
   },
 
   renameDocument: async (oldRelativePath, newRelativePath) => {
@@ -556,8 +620,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     if (!workspace || !window.electronAPI?.renameWorkspaceDocument) return false
 
     const normalizedOldPath = normalizeRelativePath(oldRelativePath)
-    const normalizedNewPath = normalizeRelativePath(newRelativePath)
-    if (!normalizedOldPath || !normalizedNewPath) return false
+    const newPathResult = normalizeNewDocumentPath(newRelativePath)
+    if (!normalizedOldPath || !newPathResult.path) {
+      setSessionState(set, { error: newPathResult.error ?? '重命名文档失败' })
+      return false
+    }
+
+    const normalizedNewPath = newPathResult.path
+    if (normalizedOldPath !== normalizedNewPath && get().filePaths.includes(normalizedNewPath)) {
+      setSessionState(set, { error: `已存在同名文档：${titleFromPath(normalizedNewPath)}` })
+      return false
+    }
 
     setSessionState(set, { isSaving: true, saveSource: null, error: null })
 
@@ -651,6 +724,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           activeDocumentPath: nextActiveDocumentPath,
           selection: session.activeDocumentPath === normalizedPath ? null : session.selection,
           latestSuggestion: session.activeDocumentPath === normalizedPath ? null : session.latestSuggestion,
+          streamingSuggestion: session.activeDocumentPath === normalizedPath ? null : session.streamingSuggestion,
           documents: nextDocuments,
           taskState: {
             status: 'ready',
@@ -689,11 +763,36 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   startTask: (title) => setSessionState(set, {
     pendingAction: 'chat',
     latestSuggestion: null,
+    streamingSuggestion: null,
     taskState: {
       status: 'running',
       title,
       message: '正在为当前文档生成建议...',
     },
+  }),
+
+  updateTaskDraft: (content, mode, title, sourceMessageId) => setSessionState(set, (session) => {
+    const cleanContent = sanitizeDocumentSuggestion(content)
+    if (!cleanContent) {
+      return {
+        streamingSuggestion: null,
+      }
+    }
+
+    return {
+      streamingSuggestion: {
+        content: cleanContent,
+        sourceMessageId,
+        title: title ?? session.taskState.title ?? '正在生成文档建议',
+        createdAt: session.streamingSuggestion?.createdAt ?? Date.now(),
+        mode,
+      },
+      taskState: {
+        status: 'running',
+        title: title ?? session.taskState.title,
+        message: 'AI 正在流式输出，当前草稿会实时保留。',
+      },
+    }
   }),
 
   completeTask: (content, mode, sourceMessageId, title, message) => setSessionState(set, {
@@ -704,6 +803,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       createdAt: Date.now(),
       mode,
     },
+    streamingSuggestion: null,
     taskState: {
       status: 'ready',
       title: title ?? '文档建议已生成',
@@ -716,6 +816,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   }),
 
   failTask: (message, title) => setSessionState(set, {
+    streamingSuggestion: null,
     taskState: {
       status: 'failed',
       title: title ?? '文档任务失败',
@@ -774,11 +875,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
               : '建议已替换当前选区。',
       },
       latestSuggestion: null,
+      streamingSuggestion: null,
     }))
   },
 
   clearLatestSuggestion: () => setSessionState(set, {
     latestSuggestion: null,
+    streamingSuggestion: null,
     taskState: EMPTY_TASK_STATE,
   }),
 
@@ -795,6 +898,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     pendingAction: 'chat',
     composerDraft: null,
     latestSuggestion: null,
+    streamingSuggestion: null,
     selection: null,
     taskState: EMPTY_TASK_STATE,
   }),

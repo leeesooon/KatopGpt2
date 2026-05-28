@@ -62,11 +62,12 @@ export async function webSearch(
   apiKey: string,
   engine: 'serper' | 'tavily' = 'tavily',
   lang: string = 'zh-CN',
-  maxResults: number = 8
+  maxResults: number = 8,
+  signal?: AbortSignal
 ): Promise<SearchResult[]> {
   // Route to appropriate search engine
   if (engine === 'tavily') {
-    return tavilySearch(query, apiKey, maxResults)
+    return tavilySearch(query, apiKey, maxResults, signal)
   }
   
   // Serper implementation below
@@ -98,6 +99,7 @@ export async function webSearch(
         lr: lrParam,
         num: maxResults,
       }),
+      signal,
     })
 
     if (!response.ok) {
@@ -159,7 +161,8 @@ interface TavilyResponse {
 async function tavilySearch(
   query: string,
   apiKey: string,
-  maxResults: number = 8
+  maxResults: number = 8,
+  signal?: AbortSignal
 ): Promise<SearchResult[]> {
   // Check cache first
   const cached = searchCache.get(query)
@@ -186,6 +189,7 @@ async function tavilySearch(
         include_answer: false,
         include_raw_content: false,
       }),
+      signal,
     })
 
     if (!response.ok) {

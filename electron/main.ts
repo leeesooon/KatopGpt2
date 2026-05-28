@@ -26,6 +26,7 @@ let workspaceWindow: BrowserWindow | null = null
 let presentationWindow: BrowserWindow | null = null
 const activeApiStreams = new Map<string, AbortController>()
 const activeImageGenerations = new Map<string, AbortController>()
+const activeWebPageFetches = new Map<string, AbortController>()
 
 const APP_AMPERSAND_RE = /&(?:amp(?:;|%3[Bb])|#38;)/gi
 const ALLOWED_EXTERNAL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:'])
@@ -1347,37 +1348,49 @@ async function proxyChatStream(
   }
 }
 
-async function fetchWebPage(rawUrl: string) {
+async function fetchWebPage(rawUrl: string, requestId?: string) {
   const externalUrl = normalizeExternalUrl(rawUrl)
   if (!externalUrl) {
     throw new Error('无效网页链接')
   }
 
-  const response = await fetch(externalUrl, {
-    headers: {
-      Accept: 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-      'User-Agent': WEB_FETCH_USER_AGENT,
-    },
-    redirect: 'follow',
-  })
-
-  if (!response.ok) {
-    throw new Error(`网页请求失败 (${response.status})`)
+  const abortController = new AbortController()
+  if (requestId) {
+    activeWebPageFetches.set(requestId, abortController)
   }
 
-  const contentType = response.headers.get('content-type') ?? ''
-  const isReadableContent = READABLE_WEB_CONTENT_TYPES.some((type) => contentType.includes(type))
-  if (contentType && !isReadableContent) {
-    throw new Error(`暂不支持读取该网页类型：${contentType}`)
-  }
+  try {
+    const response = await fetch(externalUrl, {
+      headers: {
+        Accept: 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        'User-Agent': WEB_FETCH_USER_AGENT,
+      },
+      redirect: 'follow',
+      signal: abortController.signal,
+    })
 
-  const html = (await response.text()).slice(0, MAX_WEB_PAGE_CHARS)
+    if (!response.ok) {
+      throw new Error(`网页请求失败 (${response.status})`)
+    }
 
-  return {
-    finalUrl: normalizeExternalUrl(response.url) ?? externalUrl,
-    contentType,
-    html,
+    const contentType = response.headers.get('content-type') ?? ''
+    const isReadableContent = READABLE_WEB_CONTENT_TYPES.some((type) => contentType.includes(type))
+    if (contentType && !isReadableContent) {
+      throw new Error(`暂不支持读取该网页类型：${contentType}`)
+    }
+
+    const html = (await response.text()).slice(0, MAX_WEB_PAGE_CHARS)
+
+    return {
+      finalUrl: normalizeExternalUrl(response.url) ?? externalUrl,
+      contentType,
+      html,
+    }
+  } finally {
+    if (requestId) {
+      activeWebPageFetches.delete(requestId)
+    }
   }
 }
 
@@ -1647,7 +1660,14 @@ function registerDocumentIpcHandlers() {
 }
 
 function registerApiIpcHandlers() {
-  ipcMain.handle('web:fetchPage', (_event, url: string) => fetchWebPage(url))
+  ipcMain.handle('web:fetchPage', (_event, url: string, requestId?: string) => fetchWebPage(url, requestId))
+  ipcMain.handle('web:cancelFetchPage', (_event, requestId: string) => {
+    const controller = activeWebPageFetches.get(requestId)
+    if (!controller) return false
+    controller.abort()
+    activeWebPageFetches.delete(requestId)
+    return true
+  })
   ipcMain.handle('api:testConnection', (_event, config: ApiConnectionConfig) => testApiConnection(config))
   ipcMain.handle('api:completeChat', (_event, request: CompleteChatRequest) => completeChat(request))
   ipcMain.handle('api:generateImage', (_event, request: GenerateImageRequest) => generateImage(request))
@@ -1725,6 +1745,8 @@ app.on('window-all-closed', () => {
   activeApiStreams.clear()
   activeImageGenerations.forEach((controller) => controller.abort())
   activeImageGenerations.clear()
+  activeWebPageFetches.forEach((controller) => controller.abort())
+  activeWebPageFetches.clear()
   if (process.platform !== 'darwin') {
     app.quit()
   }

@@ -13,6 +13,25 @@ interface AgenticSearchResult {
   context: string
 }
 
+export type AgenticSearchProgress =
+  | { phase: 'planning_search'; engine: SearchEngine; sourceCount: number }
+  | { phase: 'searching'; engine: SearchEngine; sourceCount: number }
+  | { phase: 'organizing'; engine: SearchEngine; sourceCount: number }
+
+interface AgenticSearchOptions {
+  signal?: AbortSignal
+  onProgress?: (progress: AgenticSearchProgress) => void
+}
+
+function isAbortSignal(value: AbortSignal | AgenticSearchOptions | undefined): value is AbortSignal {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && 'aborted' in value
+    && 'addEventListener' in value
+  )
+}
+
 function extractJsonObject(text: string) {
   const trimmed = text.trim()
   try {
@@ -148,26 +167,36 @@ export async function runAgenticSearch(
   engine: SearchEngine,
   forceSearch: boolean,
   startIndex: number,
-  signal?: AbortSignal
+  options?: AbortSignal | AgenticSearchOptions
 ): Promise<AgenticSearchResult> {
+  const signal = isAbortSignal(options) ? options : options?.signal
+  const onProgress = isAbortSignal(options) ? undefined : options?.onProgress
+
+  onProgress?.({ phase: 'planning_search', engine, sourceCount: 0 })
   const plan = await planSearch(config, userPrompt, recentMessages, forceSearch, signal)
   if (!plan.shouldSearch || plan.queries.length === 0) {
     return { results: [], context: '' }
   }
 
+  onProgress?.({ phase: 'searching', engine, sourceCount: 0 })
   const firstRound = await Promise.all(
-    plan.queries.map((query) => webSearch(query, apiKey, engine, 'zh-CN', 5))
+    plan.queries.map((query) => webSearch(query, apiKey, engine, 'zh-CN', 5, signal))
   )
   let mergedResults = mergeSearchResults(firstRound).slice(0, 10)
+  onProgress?.({ phase: 'searching', engine, sourceCount: mergedResults.length })
 
+  onProgress?.({ phase: 'organizing', engine, sourceCount: mergedResults.length })
   const followUpQueries = await planFollowUpSearch(config, userPrompt, mergedResults, signal)
   if (followUpQueries.length > 0) {
+    onProgress?.({ phase: 'searching', engine, sourceCount: mergedResults.length })
     const followUp = await Promise.all(
-      followUpQueries.map((query) => webSearch(query, apiKey, engine, 'zh-CN', 5))
+      followUpQueries.map((query) => webSearch(query, apiKey, engine, 'zh-CN', 5, signal))
     )
     mergedResults = mergeSearchResults([mergedResults, ...followUp]).slice(0, 12)
+    onProgress?.({ phase: 'searching', engine, sourceCount: mergedResults.length })
   }
 
+  onProgress?.({ phase: 'organizing', engine, sourceCount: mergedResults.length })
   return {
     results: mergedResults,
     context: formatSearchContext(mergedResults, 5000, startIndex),

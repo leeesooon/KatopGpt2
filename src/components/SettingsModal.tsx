@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   X, Eye, EyeOff, CheckCircle, AlertCircle, Loader2,
   Plus, Trash2, ChevronDown, ChevronUp, Server, ImageIcon, Sparkles, Download,
@@ -99,6 +99,25 @@ export default function SettingsModal() {
   const [isCheckingPresentationTools, setIsCheckingPresentationTools] = useState(false)
   const [isInstallingPresentationTools, setIsInstallingPresentationTools] = useState(false)
   const [presentationToolsMessage, setPresentationToolsMessage] = useState<string | null>(null)
+  const overlayPointerStartedRef = useRef(false)
+
+  useEffect(() => {
+    if (!isSettingsOpen) return
+    setSystemPrompt(settings.systemPrompt)
+    setTemperature(settings.temperature)
+    setMaxTokens(settings.maxTokens)
+    setContextWindowSize(settings.contextWindowSize)
+    setSearchEngine(settings.searchEngine)
+    setSerperApiKey(settings.serperApiKey)
+    setTavilyApiKey(settings.tavilyApiKey)
+    setEnableSearchByDefault(settings.enableSearchByDefault)
+    setImageProviderId(settings.imageGeneration.providerId ?? '')
+    setImageModel(settings.imageGeneration.model ?? '')
+    setImagePlannerProviderId(settings.imageGeneration.plannerProviderId ?? '')
+    setImagePlannerModel(settings.imageGeneration.plannerModel ?? '')
+    setImageSize(settings.imageGeneration.size)
+    setImageQuality(settings.imageGeneration.quality)
+  }, [isSettingsOpen])
 
   useEffect(() => {
     if (!isSettingsOpen) return
@@ -250,8 +269,14 @@ export default function SettingsModal() {
     setSettingsOpen(false)
   }
 
+  const handleOverlayMouseDown = (e: React.MouseEvent) => {
+    overlayPointerStartedRef.current = e.target === e.currentTarget
+  }
+
   const handleOverlayClick = (e: React.MouseEvent) => {
-    if (e.target === e.currentTarget) setSettingsOpen(false)
+    const shouldClose = overlayPointerStartedRef.current && e.target === e.currentTarget
+    overlayPointerStartedRef.current = false
+    if (shouldClose) setSettingsOpen(false)
   }
 
   const handleExternalLinkClick = (e: React.MouseEvent<HTMLAnchorElement>, url: string) => {
@@ -455,6 +480,7 @@ export default function SettingsModal() {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in"
+      onMouseDown={handleOverlayMouseDown}
       onClick={handleOverlayClick}
     >
       <div className="w-full max-w-2xl mx-4 glass-panel rounded-2xl shadow-2xl animate-slide-up overflow-hidden">
