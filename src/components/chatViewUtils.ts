@@ -1,4 +1,4 @@
-import { resolveApiConfig, supportsImageGeneration } from '../types'
+import { resolveApiConfig, resolveImageGenerationModelSelection } from '../types'
 import type { ApiConfig, AppSettings, FileAttachment, Message } from '../types'
 import type { SpreadsheetExecutionPlan } from '../services/chatApi'
 
@@ -135,26 +135,7 @@ function inferRateLabelFromPlan(plan: SpreadsheetExecutionPlan) {
 }
 
 export function resolveImageGenerationConfig(settings: AppSettings): ApiConfig | null {
-  const imageSettings = settings.imageGeneration
-  const explicitSelection = imageSettings.providerId && imageSettings.model
-    ? { providerId: imageSettings.providerId, model: imageSettings.model }
-    : null
-  const explicitConfig = resolveApiConfig(settings.providers, explicitSelection)
-  if (explicitConfig) return explicitConfig
-
-  for (const provider of settings.providers) {
-    const model = provider.models.find((item) => supportsImageGeneration(item))
-    if (model) {
-      return {
-        baseUrl: provider.baseUrl,
-        apiKey: provider.apiKey,
-        model: model.name,
-        multimodal: model.multimodal,
-      }
-    }
-  }
-
-  return null
+  return resolveApiConfig(settings.providers, resolveImageGenerationModelSelection(settings))
 }
 
 export function buildImageGenerationPrompt(userPrompt: string) {

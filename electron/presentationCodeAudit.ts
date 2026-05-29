@@ -13,6 +13,9 @@ const WIDE_HEIGHT_IN = 7.5
 const SIZE_TOLERANCE_IN = 0.06
 const CONTENT_TOLERANCE_IN = 0.03
 const MAX_AUDIT_MESSAGES = 12
+const MIN_CONTENT_COVERAGE_RATIO = 0.16
+const MIN_RICH_VISUAL_SHAPES = 3
+const MIN_CONTENT_TEXT_CHARS = 80
 
 interface SlideSize {
   widthEmu: number
@@ -36,6 +39,14 @@ interface OverflowAmount {
   right: number
   bottom: number
   max: number
+}
+
+interface SlideQualityStats {
+  contentArea: number
+  textChars: number
+  contentElementCount: number
+  mediaVisualCount: number
+  nonTextShapeCount: number
 }
 
 function emuToInches(value: number) {
@@ -134,11 +145,17 @@ function parseElementName(elementXml: string) {
 }
 
 function hasNonEmptyText(elementXml: string) {
+  return getElementText(elementXml).length > 0
+}
+
+function getElementText(elementXml: string) {
+  const textParts: string[] = []
   const textMatches = elementXml.matchAll(/<a:t\b[^>]*>([\s\S]*?)<\/a:t>/g)
   for (const match of textMatches) {
-    if (decodeXmlText(match[1]).trim()) return true
+    const text = decodeXmlText(match[1]).trim()
+    if (text) textParts.push(text)
   }
-  return false
+  return textParts.join('')
 }
 
 function isContentElement(tag: string, elementXml: string) {
@@ -153,6 +170,83 @@ function isFullSlideBackground(box: ElementBox, size: SlideSize) {
     && Math.abs(box.y) <= CONTENT_TOLERANCE_IN
     && Math.abs(box.w - size.widthIn) <= CONTENT_TOLERANCE_IN
     && Math.abs(box.h - size.heightIn) <= CONTENT_TOLERANCE_IN
+}
+
+function clampBoxToSlide(box: ElementBox, size: SlideSize): ElementBox | null {
+  const x = Math.max(0, Math.min(size.widthIn, box.x))
+  const y = Math.max(0, Math.min(size.heightIn, box.y))
+  const right = Math.max(0, Math.min(size.widthIn, box.right))
+  const bottom = Math.max(0, Math.min(size.heightIn, box.bottom))
+  const w = Math.max(0, right - x)
+  const h = Math.max(0, bottom - y)
+  if (w <= 0 || h <= 0) return null
+  return { x, y, w, h, right, bottom }
+}
+
+function getClampedBoxArea(box: ElementBox, size: SlideSize) {
+  const clamped = clampBoxToSlide(box, size)
+  return clamped ? clamped.w * clamped.h : 0
+}
+
+function isThinLineBox(box: ElementBox) {
+  return box.w <= 0.06 || box.h <= 0.06 || box.w * box.h <= 0.015
+}
+
+function hasChartOrTable(elementXml: string) {
+  return /<(c:chart|a:tbl)\b/.test(elementXml)
+}
+
+function estimateTextContentArea(box: ElementBox, text: string, size: SlideSize) {
+  const compactText = text.replace(/\s+/g, '')
+  if (!compactText) return 0
+  const clampedArea = getClampedBoxArea(box, size)
+  const estimatedLineCount = Math.max(1, Math.ceil(compactText.length / 24))
+  const estimatedArea = Math.min(box.w, size.widthIn - 1.2) * estimatedLineCount * 0.24
+  return Math.min(clampedArea, Math.max(0.1, estimatedArea))
+}
+
+function estimateContentArea(tag: string, elementXml: string, box: ElementBox, size: SlideSize) {
+  if (isFullSlideBackground(box, size)) return 0
+  if (tag === 'pic' || tag === 'graphicFrame' || hasChartOrTable(elementXml)) {
+    return getClampedBoxArea(box, size)
+  }
+
+  const text = getElementText(elementXml)
+  if (text) {
+    return estimateTextContentArea(box, text, size)
+  }
+
+  if (tag === 'sp' && !isThinLineBox(box)) {
+    return getClampedBoxArea(box, size) * 0.55
+  }
+
+  return 0
+}
+
+function updateSlideQualityStats(
+  stats: SlideQualityStats,
+  tag: string,
+  elementXml: string,
+  box: ElementBox,
+  size: SlideSize
+) {
+  if (isFullSlideBackground(box, size)) return
+
+  const text = getElementText(elementXml)
+  const contentArea = estimateContentArea(tag, elementXml, box, size)
+  if (contentArea > 0) {
+    stats.contentArea += contentArea
+    stats.contentElementCount += 1
+  }
+  if (text) {
+    stats.textChars += text.replace(/\s+/g, '').length
+  }
+  if (tag === 'pic' || tag === 'graphicFrame' || hasChartOrTable(elementXml)) {
+    stats.mediaVisualCount += 1
+  }
+  if (tag === 'sp' && !text && !isThinLineBox(box)) {
+    stats.nonTextShapeCount += 1
+  }
 }
 
 function getOverflow(box: ElementBox, size: SlideSize): OverflowAmount {
@@ -182,6 +276,49 @@ function formatOverflowDirections(overflow: OverflowAmount) {
 function makeOverflowMessage(slideNumber: number, elementName: string, box: ElementBox, overflow: OverflowAmount) {
   const directionText = formatOverflowDirections(overflow)
   return `第 ${slideNumber} 页「${elementName}」内容元素越界：x=${formatInches(box.x)}，y=${formatInches(box.y)}，w=${formatInches(box.w)}，h=${formatInches(box.h)}，${directionText}。`
+}
+
+function isMiddleSlide(slideNumber: number, slideCount: number) {
+  return slideNumber > 1 && slideNumber < slideCount
+}
+
+function formatPercent(value: number) {
+  return `${Math.round(value * 100)}%`
+}
+
+function addQualityDiagnostics(
+  diagnostics: PresentationCodeDiagnostic[],
+  slideNumber: number,
+  slideCount: number,
+  stats: SlideQualityStats,
+  slideSize: SlideSize
+) {
+  if (!isMiddleSlide(slideNumber, slideCount)) return
+
+  const slideArea = slideSize.widthIn * slideSize.heightIn
+  const coverageRatio = slideArea > 0 ? stats.contentArea / slideArea : 0
+  const hasRichVisual = stats.mediaVisualCount > 0 || stats.nonTextShapeCount >= MIN_RICH_VISUAL_SHAPES
+
+  if (coverageRatio < MIN_CONTENT_COVERAGE_RATIO && diagnostics.length < MAX_AUDIT_MESSAGES) {
+    diagnostics.push({
+      level: 'warning',
+      message: `第 ${slideNumber} 页主体内容覆盖率偏低（估算 ${formatPercent(coverageRatio)}），建议补充语义矢量图、卡片网格、流程线或练习/案例组件，避免大块留白。`,
+    })
+  }
+
+  if (!hasRichVisual && diagnostics.length < MAX_AUDIT_MESSAGES) {
+    diagnostics.push({
+      level: 'warning',
+      message: `第 ${slideNumber} 页缺少语义矢量图、图表、图片或足够丰富的图形结构，建议使用 tools.addSemanticSvg 或增加流程/对比/清单组件。`,
+    })
+  }
+
+  if (stats.textChars < MIN_CONTENT_TEXT_CHARS && stats.contentElementCount <= 3 && diagnostics.length < MAX_AUDIT_MESSAGES) {
+    diagnostics.push({
+      level: 'warning',
+      message: `第 ${slideNumber} 页可见内容偏少，建议把短要点扩展成并列目标卡、概念/示例/练习三栏或 2x2 信息网格。`,
+    })
+  }
 }
 
 export async function auditPresentationCodePptx(pptxPath: string): Promise<PresentationCodePptxAuditResult> {
@@ -223,15 +360,25 @@ export async function auditPresentationCodePptx(pptxPath: string): Promise<Prese
     .sort((a, b) => slidePathToNumber(a) - slidePathToNumber(b))
 
   let hiddenOverflowCount = 0
+  const slideCount = slideFiles.length
 
   for (const slideFile of slideFiles) {
     const slideXml = await zip.file(slideFile)?.async('string')
     if (!slideXml) continue
 
     const slideNumber = slidePathToNumber(slideFile)
+    const qualityStats: SlideQualityStats = {
+      contentArea: 0,
+      textChars: 0,
+      contentElementCount: 0,
+      mediaVisualCount: 0,
+      nonTextShapeCount: 0,
+    }
+
     for (const element of getElementBlocks(slideXml)) {
       const box = parseElementBox(element.xml)
       if (!box || isFullSlideBackground(box, slideSize)) continue
+      updateSlideQualityStats(qualityStats, element.tag, element.xml, box, slideSize)
 
       const overflow = getOverflow(box, slideSize)
       if (overflow.max <= CONTENT_TOLERANCE_IN) continue
@@ -255,6 +402,8 @@ export async function auditPresentationCodePptx(pptxPath: string): Promise<Prese
         hiddenOverflowCount += 1
       }
     }
+
+    addQualityDiagnostics(diagnostics, slideNumber, slideCount, qualityStats, slideSize)
   }
 
   if (hiddenOverflowCount > 0) {

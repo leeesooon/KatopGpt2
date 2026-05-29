@@ -91,6 +91,27 @@ function formatRunFailureForRepair(result: {
   ].filter(Boolean).join('\n\n')
 }
 
+function getPresentationQualityWarnings(diagnostics: PresentationCodeDiagnostic[] | undefined) {
+  const qualityPatterns = [
+    '主体内容覆盖率偏低',
+    '缺少 SVG',
+    '缺少语义矢量图',
+    '可见内容偏少',
+    '大块留白',
+  ]
+  return (diagnostics ?? []).filter((diagnostic) =>
+    diagnostic.level === 'warning'
+    && qualityPatterns.some((pattern) => diagnostic.message.includes(pattern))
+  )
+}
+
+function formatQualityWarningsForRepair(diagnostics: PresentationCodeDiagnostic[]) {
+  return formatRunFailureForRepair({
+    message: '真实预览已生成，但画面质量审计提示页面偏空，请补充语义矢量图、卡片网格、流程/案例/练习组件并提升主体内容覆盖率。',
+    diagnostics,
+  })
+}
+
 interface PresentationWorkspaceProps {
   standalone?: boolean
 }
@@ -397,9 +418,12 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
       setStatusMessage('代码已生成，正在执行并渲染真实预览...')
 
       const firstRun = await runCodeArtifact(first.artifact, first.input, false)
-      if (firstRun?.ok) return
+      const qualityWarnings = getPresentationQualityWarnings(firstRun?.diagnostics)
+      if (firstRun?.ok && qualityWarnings.length === 0) return
 
-      setStatusMessage('首次执行失败，正在让模型自动修复一次...')
+      setStatusMessage(firstRun?.ok
+        ? '真实预览发现画面偏空，正在自动补充语义矢量图和版式密度...'
+        : '首次执行失败，正在让模型自动修复一次...')
       const repaired = await generatePresentationCodeDeck({
         config: apiConfig,
         topic: cleanTopic,
@@ -409,7 +433,9 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
         themeId,
         files,
         previousCode: first.artifact.code,
-        failureMessage: formatRunFailureForRepair(firstRun),
+        failureMessage: firstRun?.ok
+          ? formatQualityWarningsForRepair(qualityWarnings)
+          : formatRunFailureForRepair(firstRun),
         stdout: firstRun?.stdout,
         stderr: firstRun?.stderr,
         signal: abortController.signal,
@@ -422,7 +448,21 @@ export default function PresentationWorkspace({ standalone = false }: Presentati
 
       const secondRun = await runCodeArtifact(repaired.artifact, repaired.input, true)
       if (!secondRun?.ok) {
+        if (firstRun?.ok) {
+          setArtifact(first.artifact)
+          setCodeInput(first.input)
+          setPreviewSlides(firstRun.slides ?? [])
+          setCodeSessionId(firstRun.sessionId ?? null)
+          setDiagnostics(firstRun.diagnostics ?? [])
+          setLastRunOutput({ stdout: firstRun.stdout, stderr: firstRun.stderr })
+          setStatusMessage('自动质量修复失败，已恢复首次可用预览。')
+        }
         setErrorMessage(`自动修复后仍失败：${secondRun?.errorMessage || secondRun?.message || '未知错误'}`)
+      } else {
+        const repairedQualityWarnings = getPresentationQualityWarnings(secondRun.diagnostics)
+        if (repairedQualityWarnings.length > 0) {
+          setStatusMessage(`已生成真实预览，但仍有 ${repairedQualityWarnings.length} 条画面密度提醒，可按诊断继续优化。`)
+        }
       }
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {

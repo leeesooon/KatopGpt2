@@ -4,7 +4,8 @@ import {
   Trash2, Upload, X,
 } from 'lucide-react'
 import { useChatStore } from '../store/chatStore'
-import type { AssistantProfile, KnowledgeDocument } from '../types'
+import type { AssistantProfile, KnowledgeDocument, ModelSelection } from '../types'
+import { supportsGeneralChat } from '../types'
 import { createKnowledgeDocument, resolveActiveAssistantProfile } from '../services/assistantProfiles'
 import { ROLE_AVATAR_CATEGORIES, ROLE_AVATAR_DEFINITIONS } from '../services/roleAvatars'
 import type { RoleAvatarCategory } from '../services/roleAvatars'
@@ -24,6 +25,7 @@ interface ProfileForm {
   description: string
   emoji: string
   avatarId?: string
+  defaultModel: ModelSelection | null
   instructions: string
   tone: string
   outputFormat: string
@@ -47,6 +49,7 @@ function profileToForm(profile: AssistantProfile): ProfileForm {
     description: profile.description,
     emoji: profile.emoji,
     avatarId: profile.avatarId,
+    defaultModel: profile.defaultModel ?? null,
     instructions: profile.instructions,
     tone: profile.tone,
     outputFormat: profile.outputFormat,
@@ -61,6 +64,7 @@ function createEmptyForm(): ProfileForm {
     description: '描述这个助手适合处理什么任务。',
     emoji: '★',
     avatarId: 'assistant-general',
+    defaultModel: null,
     instructions: '说明这个助手应该如何理解问题、遵守哪些规则、避免哪些行为。',
     tone: '清晰、直接、可执行。',
     outputFormat: '先给结论，再给必要步骤。',
@@ -163,6 +167,16 @@ export default function AssistantProfileModal() {
     () => ROLE_AVATAR_DEFINITIONS.filter((avatar) => avatar.category === avatarCategory),
     [avatarCategory]
   )
+  const chatModelOptions = useMemo(() => settings.providers.flatMap((provider) =>
+    provider.models
+      .filter((model) => supportsGeneralChat(model))
+      .map((model) => ({
+        value: `${provider.id}::${model.name}`,
+        providerId: provider.id,
+        model: model.name,
+        label: `${provider.name} / ${model.name}`,
+      }))
+  ), [settings.providers])
 
   const knowledgeStats = useMemo(() => {
     if (!selectedProfile) return { enabledCount: 0, chunkCount: 0 }
@@ -351,6 +365,39 @@ export default function AssistantProfileModal() {
       )}
     </div>
   )
+
+  const renderDefaultModelSelect = () => {
+    const selectedValue = selectedForm.defaultModel
+      ? `${selectedForm.defaultModel.providerId}::${selectedForm.defaultModel.model}`
+      : ''
+
+    return (
+      <div className="space-y-1.5">
+        <label className="text-xs font-medium text-surface-400">默认聊天模型</label>
+        <select
+          value={selectedValue}
+          onChange={(event) => {
+            const option = chatModelOptions.find((item) => item.value === event.target.value)
+            setSelectedForm({
+              ...selectedForm,
+              defaultModel: option
+                ? { providerId: option.providerId, model: option.model }
+                : null,
+            })
+          }}
+          className="input-field"
+        >
+          <option value="">跟随全局默认模型</option>
+          {chatModelOptions.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+        <p className="text-[10px] text-surface-500">
+          新会话会复制该模型；已有会话不会随助手配置变更。
+        </p>
+      </div>
+    )
+  }
 
   const renderAvatarPicker = () => (
     <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3">
@@ -630,6 +677,7 @@ export default function AssistantProfileModal() {
                     {renderField('简介', selectedForm.description, (description) => setSelectedForm({ ...selectedForm, description }), {
                       placeholder: '说明这个助手适合处理什么任务',
                     })}
+                    {renderDefaultModelSelect()}
                     {renderField('核心指令', selectedForm.instructions, (instructions) => setSelectedForm({ ...selectedForm, instructions }), {
                       rows: 6,
                       placeholder: '这个助手应该遵守的核心规则',

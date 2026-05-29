@@ -4,7 +4,13 @@ import { useChatStore } from '../store/chatStore'
 import { useWorkspaceStore } from '../store/workspaceStore'
 import { streamChat, parseSpreadsheetIntent, generateImage, cancelGenerateImage, completeChatText, ChatApiError } from '../services/chatApi'
 import { recognizeImages } from '../services/ocr'
-import { resolveApiConfig } from '../types'
+import {
+  normalizeChatModelSelection,
+  resolveApiConfig,
+  resolveConversationApiConfig,
+  resolveConversationModelSelection,
+  resolveImageGenerationModelSelection,
+} from '../types'
 import { prepareDocumentAgentRequest } from '../services/agentOrchestrator'
 import { SearchApiError } from '../services/searchApi'
 import { readWebPagesFromText, formatWebPageContext } from '../services/webpage'
@@ -70,6 +76,7 @@ interface RoleFlashState {
 
 const MIN_IMAGE_SERIES_COUNT = 2
 const MAX_IMAGE_SERIES_COUNT = 8
+const MAX_IMAGE_REFERENCE_COUNT = 10
 const IMAGE_SCALE_MIN = 0.5
 const IMAGE_SCALE_MAX = 4
 
@@ -365,8 +372,11 @@ export default function ChatView() {
     const assistantProfileIdForRequest = conversationForRequest?.assistantProfileId ?? settings.activeAssistantProfileId
 
     if (inputMode === 'image') {
-      const imageConfig = resolveImageGenerationConfig(settings)
-      if (!imageConfig) {
+      const imageModelSelection = resolveImageGenerationModelSelection(settings)
+      const imageConfig = imageModelSelection
+        ? resolveApiConfig(settings.providers, imageModelSelection)
+        : null
+      if (!imageConfig || !imageModelSelection) {
         addMessage(convId, {
           role: 'assistant',
           content: '请先在设置中为至少一个模型开启“生图”能力，或配置默认生图模型。',
@@ -377,6 +387,7 @@ export default function ChatView() {
       addMessage(convId, {
         role: 'user',
         content,
+        images: images.length > 0 ? images : undefined,
         metadata: { kind: 'image_generation' },
       })
 
@@ -387,12 +398,14 @@ export default function ChatView() {
       }
 
       if (options?.imageSeries?.enabled) {
-        const plannerSelection = settings.imageGeneration.plannerProviderId && settings.imageGeneration.plannerModel
+        const explicitPlannerSelection = settings.imageGeneration.plannerProviderId && settings.imageGeneration.plannerModel
           ? {
               providerId: settings.imageGeneration.plannerProviderId,
               model: settings.imageGeneration.plannerModel,
             }
-          : settings.activeModel
+          : null
+        const plannerSelection = normalizeChatModelSelection(settings.providers, explicitPlannerSelection)
+          ?? resolveConversationModelSelection(settings, conversationForRequest)
         const chatConfig = resolveApiConfig(settings.providers, plannerSelection)
         if (!chatConfig) {
           addMessage(convId, {
@@ -415,7 +428,7 @@ export default function ChatView() {
           metadata: {
             kind: 'image_generation',
             originalPrompt: content,
-            providerId: settings.imageGeneration.providerId,
+            providerId: imageModelSelection.providerId,
             model: imageConfig.model,
             size: settings.imageGeneration.size,
             quality: settings.imageGeneration.quality,
@@ -430,7 +443,7 @@ export default function ChatView() {
             metadata: {
               kind: 'image_generation',
               originalPrompt: content,
-              providerId: settings.imageGeneration.providerId,
+              providerId: imageModelSelection.providerId,
               model: imageConfig.model,
               size: settings.imageGeneration.size,
               quality: settings.imageGeneration.quality,
@@ -449,7 +462,7 @@ export default function ChatView() {
             metadata: {
               kind: 'image_generation',
               originalPrompt: content,
-              providerId: settings.imageGeneration.providerId,
+              providerId: imageModelSelection.providerId,
               model: imageConfig.model,
               size: settings.imageGeneration.size,
               quality: settings.imageGeneration.quality,
@@ -505,7 +518,7 @@ export default function ChatView() {
               metadata: {
                 kind: 'image_generation',
                 originalPrompt: content,
-                providerId: settings.imageGeneration.providerId,
+                providerId: imageModelSelection.providerId,
                 model: imageConfig.model,
                 size: settings.imageGeneration.size,
                 quality: settings.imageGeneration.quality,
@@ -692,7 +705,7 @@ export default function ChatView() {
             metadata: {
               kind: 'image_generation',
               originalPrompt: content,
-              providerId: settings.imageGeneration.providerId,
+              providerId: imageModelSelection.providerId,
               model: imageConfig.model,
               size: settings.imageGeneration.size,
               quality: settings.imageGeneration.quality,
@@ -711,12 +724,12 @@ export default function ChatView() {
       const requestId = `${convId}-${Date.now()}`
       registerImageRequest(convId, requestId)
       const generatedAt = Date.now()
-      const referenceImages = images.slice(0, 1)
+      const referenceImages = images.slice(0, MAX_IMAGE_REFERENCE_COUNT)
       const hasReferenceImage = referenceImages.length > 0
       const enhancedPrompt = buildImageGenerationPrompt(content)
       const assistantMessage = addMessage(convId, {
         role: 'assistant',
-        content: hasReferenceImage ? '正在基于参考图生成图片...' : '正在生成图片...',
+        content: hasReferenceImage ? `正在基于 ${referenceImages.length} 张参考图生成图片...` : '正在生成图片...',
         images: [{
           id: `generating-${generatedAt}`,
           name: `generated-${generatedAt}.png`,
@@ -726,7 +739,7 @@ export default function ChatView() {
           kind: 'image_generation',
           originalPrompt: content,
           enhancedPrompt,
-          providerId: settings.imageGeneration.providerId,
+          providerId: imageModelSelection.providerId,
           model: imageConfig.model,
           size: settings.imageGeneration.size,
           quality: settings.imageGeneration.quality,
@@ -765,7 +778,7 @@ export default function ChatView() {
             originalPrompt: content,
             enhancedPrompt,
             revisedPrompt: result.revisedPrompt,
-            providerId: settings.imageGeneration.providerId,
+            providerId: imageModelSelection.providerId,
             model: imageConfig.model,
             size: settings.imageGeneration.size,
             quality: settings.imageGeneration.quality,
@@ -778,7 +791,7 @@ export default function ChatView() {
       return
     }
 
-    const apiConfig = resolveApiConfig(settings.providers, settings.activeModel)
+    const apiConfig = resolveConversationApiConfig(settings, conversationForRequest)
     if (!apiConfig) return
 
     const workspaceState = useWorkspaceStore.getState()
@@ -1198,7 +1211,7 @@ export default function ChatView() {
 
   const apiConfigured = inputMode === 'image'
     ? resolveImageGenerationConfig(settings) !== null
-    : resolveApiConfig(settings.providers, settings.activeModel) !== null
+    : resolveConversationApiConfig(settings, activeConversation) !== null
 
   // Empty state
   if (!activeConversationId) {

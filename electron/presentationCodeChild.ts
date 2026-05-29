@@ -2,6 +2,7 @@ import fs from 'fs'
 import { createRequire } from 'module'
 import path from 'path'
 import pptxgen from 'pptxgenjs'
+import { createPresentationSvgTools } from './presentationSvgTools'
 
 async function main() {
   const inputPath = process.argv[2]
@@ -29,6 +30,7 @@ async function main() {
     assets: Array.isArray(input.files) ? input.files : [],
     outputPath,
     workDir: path.dirname(path.resolve(generatedModulePath)),
+    tools: createPresentationSvgTools(input),
   })
 
   if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size === 0) {

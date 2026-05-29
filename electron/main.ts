@@ -44,6 +44,7 @@ const IMAGE_MIME_EXTENSIONS: Record<string, string> = {
   'image/gif': 'gif',
   'image/svg+xml': 'svg',
 }
+const MAX_IMAGE_REFERENCE_COUNT = 10
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -1073,7 +1074,7 @@ async function completeChat(request: CompleteChatRequest) {
 async function generateImage(request: GenerateImageRequest): Promise<GenerateImageResult> {
   const baseUrl = normalizeApiBaseUrl(request.baseUrl)
   const prompt = request.prompt.trim()
-  const referenceImages = request.images?.filter((image) => image.base64).slice(0, 12) ?? []
+  const referenceImages = request.images?.filter((image) => image.base64).slice(0, MAX_IMAGE_REFERENCE_COUNT) ?? []
   const url = referenceImages.length > 0 ? `${baseUrl}/images/edits` : `${baseUrl}/images/generations`
   const abortController = new AbortController()
 

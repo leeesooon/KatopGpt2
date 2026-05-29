@@ -12,6 +12,7 @@ import type {
   ModelConfig,
   PresentationRenderToolsStatus,
 } from '../types'
+import { supportsGeneralChat, supportsImageGeneration } from '../types'
 import { openExternalUrl } from '../utils/externalLinks'
 
 interface ProviderFormData {
@@ -64,7 +65,7 @@ function fromProvider(p: ApiProvider): ProviderFormData {
 export default function SettingsModal() {
   const {
     settings, updateSettings, isSettingsOpen, setSettingsOpen,
-    addProvider, updateProvider, deleteProvider,
+    addProvider, updateProvider, deleteProvider, setActiveModel,
   } = useChatStore()
 
   const [expandedId, setExpandedId] = useState<string | null>(null)
@@ -87,6 +88,8 @@ export default function SettingsModal() {
   const [serperApiKey, setSerperApiKey] = useState(settings.serperApiKey)
   const [tavilyApiKey, setTavilyApiKey] = useState(settings.tavilyApiKey)
   const [enableSearchByDefault, setEnableSearchByDefault] = useState(settings.enableSearchByDefault)
+  const [defaultModelProviderId, setDefaultModelProviderId] = useState(settings.activeModel?.providerId ?? '')
+  const [defaultModel, setDefaultModel] = useState(settings.activeModel?.model ?? '')
   const [showSerperKey, setShowSerperKey] = useState(false)
   const [showTavilyKey, setShowTavilyKey] = useState(false)
   const [imageProviderId, setImageProviderId] = useState(settings.imageGeneration.providerId ?? '')
@@ -111,6 +114,8 @@ export default function SettingsModal() {
     setSerperApiKey(settings.serperApiKey)
     setTavilyApiKey(settings.tavilyApiKey)
     setEnableSearchByDefault(settings.enableSearchByDefault)
+    setDefaultModelProviderId(settings.activeModel?.providerId ?? '')
+    setDefaultModel(settings.activeModel?.model ?? '')
     setImageProviderId(settings.imageGeneration.providerId ?? '')
     setImageModel(settings.imageGeneration.model ?? '')
     setImagePlannerProviderId(settings.imageGeneration.plannerProviderId ?? '')
@@ -247,6 +252,10 @@ export default function SettingsModal() {
   }
 
   const handleSaveGeneral = () => {
+    setActiveModel(defaultModelProviderId && defaultModel
+      ? { providerId: defaultModelProviderId, model: defaultModel }
+      : null
+    )
     updateSettings({
       systemPrompt,
       temperature,
@@ -476,6 +485,19 @@ export default function SettingsModal() {
     </div>
     )
   }
+
+  const generalChatProviders = settings.providers.filter((provider) =>
+    provider.models.some((model) => supportsGeneralChat(model))
+  )
+  const imageGenerationProviders = settings.providers.filter((provider) =>
+    provider.models.some((model) => supportsImageGeneration(model))
+  )
+  const defaultModelProvider = generalChatProviders.find((provider) => provider.id === defaultModelProviderId)
+  const defaultModelOptions = defaultModelProvider?.models.filter((model) => supportsGeneralChat(model)) ?? []
+  const imageProvider = imageGenerationProviders.find((provider) => provider.id === imageProviderId)
+  const imageModelOptions = imageProvider?.models.filter((model) => supportsImageGeneration(model)) ?? []
+  const imagePlannerProvider = generalChatProviders.find((provider) => provider.id === imagePlannerProviderId)
+  const imagePlannerModelOptions = imagePlannerProvider?.models.filter((model) => supportsGeneralChat(model)) ?? []
 
   return (
     <div
@@ -818,7 +840,7 @@ export default function SettingsModal() {
                   className="input-field"
                 >
                   <option value="">自动选择已开启生图的模型</option>
-                  {settings.providers.map((provider) => (
+                  {imageGenerationProviders.map((provider) => (
                     <option key={provider.id} value={provider.id}>{provider.name}</option>
                   ))}
                 </select>
@@ -831,8 +853,9 @@ export default function SettingsModal() {
                   className="input-field"
                 >
                   <option value="">自动选择</option>
-                  {(settings.providers.find((provider) => provider.id === imageProviderId)?.models ?? [])
-                    .map((model) => <option key={model.name} value={model.name}>{model.name}</option>)}
+                  {imageModelOptions.map((model) => (
+                    <option key={model.name} value={model.name}>{model.name}</option>
+                  ))}
                 </select>
               </div>
               <div className="space-y-1.5">
@@ -846,7 +869,7 @@ export default function SettingsModal() {
                   className="input-field"
                 >
                   <option value="">使用当前聊天模型</option>
-                  {settings.providers.map((provider) => (
+                  {generalChatProviders.map((provider) => (
                     <option key={provider.id} value={provider.id}>{provider.name}</option>
                   ))}
                 </select>
@@ -859,9 +882,9 @@ export default function SettingsModal() {
                   className="input-field"
                 >
                   <option value="">使用当前聊天模型</option>
-                  {(settings.providers.find((provider) => provider.id === imagePlannerProviderId)?.models ?? [])
-                    .filter((model) => model.capabilities?.chat ?? true)
-                    .map((model) => <option key={model.name} value={model.name}>{model.name}</option>)}
+                  {imagePlannerModelOptions.map((model) => (
+                    <option key={model.name} value={model.name}>{model.name}</option>
+                  ))}
                 </select>
               </div>
               <div className="space-y-1.5">
@@ -892,6 +915,42 @@ export default function SettingsModal() {
             <h3 className="text-sm font-semibold text-surface-300 uppercase tracking-wider">
               模型参数
             </h3>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-surface-400">默认聊天服务商</label>
+                <select
+                  value={defaultModelProviderId}
+                  onChange={(e) => {
+                    setDefaultModelProviderId(e.target.value)
+                    setDefaultModel('')
+                  }}
+                  className="input-field"
+                >
+                  <option value="">未选择默认服务商</option>
+                  {generalChatProviders.map((provider) => (
+                    <option key={provider.id} value={provider.id}>{provider.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-surface-400">默认聊天模型</label>
+                <select
+                  value={defaultModel}
+                  onChange={(e) => setDefaultModel(e.target.value)}
+                  disabled={!defaultModelProviderId}
+                  className="input-field disabled:opacity-50"
+                >
+                  <option value="">未选择默认模型</option>
+                  {defaultModelOptions.map((model) => (
+                    <option key={model.name} value={model.name}>{model.name}</option>
+                  ))}
+                </select>
+                <p className="text-[10px] text-surface-500">
+                  新会话会复制该默认模型；已有会话不会被自动修改。
+                </p>
+              </div>
+            </div>
 
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-surface-400">系统提示词</label>

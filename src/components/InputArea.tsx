@@ -2,7 +2,7 @@
 import {
   Send, Square, ImagePlus, Paperclip, X, FileText, Search, Loader2,
   SquareArrowOutUpRight, Download, Sparkles, ChevronUp, Check, SlidersHorizontal,
-  Layers3,
+  Layers3, Plus, Trash2, Pencil, RotateCcw,
 } from 'lucide-react'
 import ModelSelector from './ModelSelector'
 import RoleAvatar from './RoleAvatar'
@@ -16,10 +16,13 @@ import type {
   ImageAttachment,
   FileAttachment,
   ImageGenerationSize,
+  ImagePromptPresetModule,
 } from '../types'
+import { normalizeImageGenerationSettings } from '../types'
 import {
+  createDefaultImagePromptModules,
   FILE_INPUT_ACCEPT,
-  IMAGE_PROMPT_PRESETS,
+  normalizeImagePromptModules,
 } from './inputAreaAttachments'
 import { useAttachmentProcessor } from './useAttachmentProcessor'
 
@@ -62,6 +65,45 @@ const IMAGE_SIZE_OPTIONS: Array<{ value: ImageGenerationSize; label: string; tit
   { value: '1536x1024', label: '横图', title: '1536×1024 横图' },
 ]
 
+function createPromptPresetId(prefix: string) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+type PromptManagerDraftMode =
+  | 'add-module'
+  | 'rename-module'
+  | 'add-group'
+  | 'rename-group'
+  | 'add-item'
+  | 'rename-item'
+
+interface PromptManagerDraft {
+  mode: PromptManagerDraftMode
+  value: string
+  moduleId?: string
+  groupId?: string
+  itemId?: string
+}
+
+type PromptManagerConfirmMode = 'delete-module' | 'delete-group' | 'delete-item' | 'reset'
+
+interface PromptManagerConfirm {
+  mode: PromptManagerConfirmMode
+  message: string
+  moduleId?: string
+  groupId?: string
+  itemId?: string
+}
+
+const PROMPT_MANAGER_DRAFT_TITLES: Record<PromptManagerDraftMode, string> = {
+  'add-module': '新模块名称',
+  'rename-module': '重命名模块',
+  'add-group': '新分组名称',
+  'rename-group': '重命名分组',
+  'add-item': '新提示词',
+  'rename-item': '编辑提示词',
+}
+
 export default function InputArea({
   onSend,
   onStop,
@@ -99,6 +141,10 @@ export default function InputArea({
   const [input, setInput] = useState('')
   const [workspaceWindowOpen, setWorkspaceWindowOpen] = useState(false)
   const [isPromptPanelOpen, setIsPromptPanelOpen] = useState(false)
+  const [activePromptModuleId, setActivePromptModuleId] = useState('')
+  const [isPromptManagerOpen, setIsPromptManagerOpen] = useState(false)
+  const [promptManagerDraft, setPromptManagerDraft] = useState<PromptManagerDraft | null>(null)
+  const [promptManagerConfirm, setPromptManagerConfirm] = useState<PromptManagerConfirm | null>(null)
   const [isImageSeriesMode, setIsImageSeriesMode] = useState(false)
   const [imageSeriesCount, setImageSeriesCount] = useState(4)
   const [imageSeriesMode, setImageSeriesMode] = useState<'template_parallel' | 'sequential'>('template_parallel')
@@ -106,6 +152,7 @@ export default function InputArea({
   const [isRoleSelectorOpen, setIsRoleSelectorOpen] = useState(false)
   const [expandedFileId, setExpandedFileId] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const promptManagerInputRef = useRef<HTMLInputElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const roleSelectorRef = useRef<HTMLDivElement>(null)
@@ -131,6 +178,23 @@ export default function InputArea({
     setAttachmentError,
     formatFileSize,
   } = useAttachmentProcessor({ isImageMode })
+  const promptModules = useMemo(
+    () => normalizeImagePromptModules(settings.imagePromptModules),
+    [settings.imagePromptModules]
+  )
+  const activePromptModule = promptModules.find((module) => module.id === activePromptModuleId) ?? promptModules[0]
+
+  useEffect(() => {
+    if (promptModules.length === 0) return
+    if (activePromptModuleId && promptModules.some((module) => module.id === activePromptModuleId)) return
+    setActivePromptModuleId(promptModules[0].id)
+  }, [activePromptModuleId, promptModules])
+
+  useEffect(() => {
+    if (isPromptManagerOpen) return
+    setPromptManagerDraft(null)
+    setPromptManagerConfirm(null)
+  }, [isPromptManagerOpen])
 
   useEffect(() => {
     if (!isStreaming && textareaRef.current) {
@@ -149,6 +213,25 @@ export default function InputArea({
       setAttachmentError(null)
     }
   }, [clearFiles, clearImages, imageReferenceDraft, inputMode, isImageMode, setAttachmentError])
+
+  useEffect(() => {
+    if (!isImageMode) return
+
+    const normalizedImageGeneration = normalizeImageGenerationSettings(
+      settings.imageGeneration,
+      settings.providers
+    )
+    if (
+      normalizedImageGeneration.providerId === settings.imageGeneration.providerId
+      && normalizedImageGeneration.model === settings.imageGeneration.model
+      && normalizedImageGeneration.plannerProviderId === settings.imageGeneration.plannerProviderId
+      && normalizedImageGeneration.plannerModel === settings.imageGeneration.plannerModel
+    ) {
+      return
+    }
+
+    updateSettings({ imageGeneration: normalizedImageGeneration })
+  }, [isImageMode, settings.imageGeneration, settings.providers, updateSettings])
 
   useEffect(() => {
     if (!imageReferenceDraft) return
@@ -380,6 +463,291 @@ export default function InputArea({
         ...settings.imageGeneration,
         size,
       },
+    })
+  }
+
+  const savePromptModules = (modules: ImagePromptPresetModule[], nextActiveModuleId?: string) => {
+    const normalizedModules = normalizeImagePromptModules(modules)
+    updateSettings({ imagePromptModules: normalizedModules })
+    if (nextActiveModuleId) {
+      setActivePromptModuleId(nextActiveModuleId)
+      return
+    }
+    if (!normalizedModules.some((module) => module.id === activePromptModuleId)) {
+      setActivePromptModuleId(normalizedModules[0]?.id ?? '')
+    }
+  }
+
+  const openPromptManagerDraft = (draft: PromptManagerDraft) => {
+    setPromptManagerConfirm(null)
+    setPromptManagerDraft(draft)
+    requestAnimationFrame(() => {
+      promptManagerInputRef.current?.focus()
+      promptManagerInputRef.current?.select()
+    })
+  }
+
+  const openPromptManagerConfirm = (confirm: PromptManagerConfirm) => {
+    setPromptManagerDraft(null)
+    setPromptManagerConfirm(confirm)
+  }
+
+  const closePromptManagerAction = () => {
+    setPromptManagerDraft(null)
+    setPromptManagerConfirm(null)
+  }
+
+  const handleSubmitPromptManagerDraft = () => {
+    if (!promptManagerDraft) return
+    const text = promptManagerDraft.value.trim()
+    if (!text) return
+
+    if (promptManagerDraft.mode === 'add-module') {
+      const moduleId = createPromptPresetId('prompt-module')
+      savePromptModules([
+        ...promptModules,
+        {
+          id: moduleId,
+          name: text,
+          groups: [
+            {
+              id: createPromptPresetId('prompt-group'),
+              name: '常用',
+              items: [],
+            },
+          ],
+        },
+      ], moduleId)
+      closePromptManagerAction()
+      return
+    }
+
+    if (promptManagerDraft.mode === 'rename-module' && promptManagerDraft.moduleId) {
+      savePromptModules(promptModules.map((module) =>
+        module.id === promptManagerDraft.moduleId ? { ...module, name: text } : module
+      ))
+      closePromptManagerAction()
+      return
+    }
+
+    if (promptManagerDraft.mode === 'add-group' && promptManagerDraft.moduleId) {
+      savePromptModules(promptModules.map((module) =>
+        module.id === promptManagerDraft.moduleId
+          ? {
+              ...module,
+              groups: [
+                ...module.groups,
+                { id: createPromptPresetId('prompt-group'), name: text, items: [] },
+              ],
+            }
+          : module
+      ))
+      closePromptManagerAction()
+      return
+    }
+
+    if (promptManagerDraft.mode === 'rename-group' && promptManagerDraft.moduleId && promptManagerDraft.groupId) {
+      savePromptModules(promptModules.map((module) =>
+        module.id === promptManagerDraft.moduleId
+          ? {
+              ...module,
+              groups: module.groups.map((group) =>
+                group.id === promptManagerDraft.groupId ? { ...group, name: text } : group
+              ),
+            }
+          : module
+      ))
+      closePromptManagerAction()
+      return
+    }
+
+    if (promptManagerDraft.mode === 'add-item' && promptManagerDraft.moduleId && promptManagerDraft.groupId) {
+      savePromptModules(promptModules.map((module) =>
+        module.id === promptManagerDraft.moduleId
+          ? {
+              ...module,
+              groups: module.groups.map((group) =>
+                group.id === promptManagerDraft.groupId
+                  ? {
+                      ...group,
+                      items: [
+                        ...group.items,
+                        { id: createPromptPresetId('prompt-item'), label: text, text },
+                      ],
+                    }
+                  : group
+              ),
+            }
+          : module
+      ))
+      closePromptManagerAction()
+      return
+    }
+
+    if (
+      promptManagerDraft.mode === 'rename-item'
+      && promptManagerDraft.moduleId
+      && promptManagerDraft.groupId
+      && promptManagerDraft.itemId
+    ) {
+      savePromptModules(promptModules.map((module) =>
+        module.id === promptManagerDraft.moduleId
+          ? {
+              ...module,
+              groups: module.groups.map((group) =>
+                group.id === promptManagerDraft.groupId
+                  ? {
+                      ...group,
+                      items: group.items.map((item) =>
+                        item.id === promptManagerDraft.itemId ? { ...item, label: text, text } : item
+                      ),
+                    }
+                  : group
+              ),
+            }
+          : module
+      ))
+      closePromptManagerAction()
+    }
+  }
+
+  const handleConfirmPromptManagerAction = () => {
+    if (!promptManagerConfirm) return
+
+    if (promptManagerConfirm.mode === 'reset') {
+      const defaultModules = createDefaultImagePromptModules()
+      savePromptModules(defaultModules, defaultModules[0]?.id)
+      closePromptManagerAction()
+      return
+    }
+
+    if (promptManagerConfirm.mode === 'delete-module' && promptManagerConfirm.moduleId) {
+      if (promptModules.length <= 1) return
+      const nextModules = promptModules.filter((module) => module.id !== promptManagerConfirm.moduleId)
+      savePromptModules(nextModules, nextModules[0]?.id)
+      closePromptManagerAction()
+      return
+    }
+
+    if (promptManagerConfirm.mode === 'delete-group' && promptManagerConfirm.moduleId && promptManagerConfirm.groupId) {
+      savePromptModules(promptModules.map((module) =>
+        module.id === promptManagerConfirm.moduleId
+          ? { ...module, groups: module.groups.filter((group) => group.id !== promptManagerConfirm.groupId) }
+          : module
+      ))
+      closePromptManagerAction()
+      return
+    }
+
+    if (
+      promptManagerConfirm.mode === 'delete-item'
+      && promptManagerConfirm.moduleId
+      && promptManagerConfirm.groupId
+      && promptManagerConfirm.itemId
+    ) {
+      savePromptModules(promptModules.map((module) =>
+        module.id === promptManagerConfirm.moduleId
+          ? {
+              ...module,
+              groups: module.groups.map((group) =>
+                group.id === promptManagerConfirm.groupId
+                  ? { ...group, items: group.items.filter((item) => item.id !== promptManagerConfirm.itemId) }
+                  : group
+              ),
+            }
+          : module
+      ))
+      closePromptManagerAction()
+    }
+  }
+
+  const handleAddPromptModule = () => {
+    openPromptManagerDraft({ mode: 'add-module', value: '' })
+  }
+
+  const handleRenamePromptModule = () => {
+    if (!activePromptModule) return
+    openPromptManagerDraft({
+      mode: 'rename-module',
+      moduleId: activePromptModule.id,
+      value: activePromptModule.name,
+    })
+  }
+
+  const handleDeletePromptModule = () => {
+    if (!activePromptModule || promptModules.length <= 1) return
+    openPromptManagerConfirm({
+      mode: 'delete-module',
+      moduleId: activePromptModule.id,
+      message: `删除提示词模块「${activePromptModule.name}」？`,
+    })
+  }
+
+  const handleResetPromptModules = () => {
+    openPromptManagerConfirm({
+      mode: 'reset',
+      message: '恢复内置提示词模块？当前自定义内容会被替换。',
+    })
+  }
+
+  const handleAddPromptGroup = () => {
+    if (!activePromptModule) return
+    openPromptManagerDraft({
+      mode: 'add-group',
+      moduleId: activePromptModule.id,
+      value: '',
+    })
+  }
+
+  const handleRenamePromptGroup = (groupId: string, currentName: string) => {
+    if (!activePromptModule) return
+    openPromptManagerDraft({
+      mode: 'rename-group',
+      moduleId: activePromptModule.id,
+      groupId,
+      value: currentName,
+    })
+  }
+
+  const handleDeletePromptGroup = (groupId: string, groupName: string) => {
+    if (!activePromptModule) return
+    openPromptManagerConfirm({
+      mode: 'delete-group',
+      moduleId: activePromptModule.id,
+      groupId,
+      message: `删除分组「${groupName}」？`,
+    })
+  }
+
+  const handleAddPromptItem = (groupId: string) => {
+    if (!activePromptModule) return
+    openPromptManagerDraft({
+      mode: 'add-item',
+      moduleId: activePromptModule.id,
+      groupId,
+      value: '',
+    })
+  }
+
+  const handleRenamePromptItem = (groupId: string, itemId: string, currentText: string) => {
+    if (!activePromptModule) return
+    openPromptManagerDraft({
+      mode: 'rename-item',
+      moduleId: activePromptModule.id,
+      groupId,
+      itemId,
+      value: currentText,
+    })
+  }
+
+  const handleDeletePromptItem = (groupId: string, itemId: string, itemLabel: string) => {
+    if (!activePromptModule) return
+    openPromptManagerConfirm({
+      mode: 'delete-item',
+      moduleId: activePromptModule.id,
+      groupId,
+      itemId,
+      message: `删除短语「${itemLabel}」？`,
     })
   }
 
@@ -634,39 +1002,283 @@ export default function InputArea({
           )}
         </div>
         {isImageMode && isPromptPanelOpen && (
-          <div className="mb-2 rounded-xl border border-fuchsia-300/15 bg-fuchsia-950/10 p-3 shadow-lg shadow-fuchsia-950/10">
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <p className="text-xs font-medium text-fuchsia-100">点击标签追加到提示词</p>
-              <button
-                onClick={() => setIsPromptPanelOpen(false)}
-                className="rounded-full p-1 text-surface-400 transition hover:bg-white/10 hover:text-white"
-                title="关闭提示词增强"
-              >
-                <X size={13} />
-              </button>
+          <div className="mb-2 overflow-hidden rounded-xl border border-fuchsia-300/15 bg-fuchsia-950/10 p-3 shadow-lg shadow-fuchsia-950/10 max-sm:fixed max-sm:inset-x-3 max-sm:bottom-24 max-sm:z-50 max-sm:max-h-[68vh] max-sm:overflow-y-auto max-sm:bg-surface-950/95 max-sm:shadow-2xl max-sm:shadow-black/40">
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-xs font-medium text-fuchsia-100">
+                  {isPromptManagerOpen ? '管理提示词增强' : '点击标签追加到提示词'}
+                </p>
+                {activePromptModule?.description && (
+                  <p className="mt-0.5 truncate text-[10px] text-surface-500">
+                    {activePromptModule.description}
+                  </p>
+                )}
+              </div>
+              <div className="flex shrink-0 items-center gap-1">
+                {isPromptManagerOpen && (
+                  <button
+                    type="button"
+                    onClick={handleResetPromptModules}
+                    className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full px-2 py-1 text-[11px] text-surface-400 transition hover:bg-white/10 hover:text-white"
+                    title="恢复默认提示词"
+                  >
+                    <RotateCcw size={12} />
+                    恢复默认
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setIsPromptManagerOpen((open) => !open)}
+                  className={`inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full px-2 py-1 text-[11px] transition ${
+                    isPromptManagerOpen
+                      ? 'bg-fuchsia-300/15 text-fuchsia-100'
+                      : 'text-surface-400 hover:bg-white/10 hover:text-white'
+                  }`}
+                  title={isPromptManagerOpen ? '完成提示词管理' : '管理提示词'}
+                >
+                  <SlidersHorizontal size={12} />
+                  {isPromptManagerOpen ? '完成' : '管理'}
+                </button>
+                <button
+                  onClick={() => setIsPromptPanelOpen(false)}
+                  className="rounded-full p-1 text-surface-400 transition hover:bg-white/10 hover:text-white"
+                  title="关闭提示词增强"
+                >
+                  <X size={13} />
+                </button>
+              </div>
             </div>
+
+            <div className="mb-3 flex gap-1 overflow-x-auto rounded-full border border-white/10 bg-white/[0.03] p-1">
+              {promptModules.map((module) => {
+                const isActiveModule = activePromptModule?.id === module.id
+                return (
+                  <button
+                    key={module.id}
+                    type="button"
+                    onClick={() => setActivePromptModuleId(module.id)}
+                    className={`h-7 shrink-0 whitespace-nowrap rounded-full px-3 text-xs transition ${
+                      isActiveModule
+                        ? 'bg-fuchsia-400/18 text-fuchsia-50'
+                        : 'text-surface-400 hover:bg-white/10 hover:text-white'
+                    }`}
+                    title={module.name}
+                  >
+                    {module.name}
+                  </button>
+                )
+              })}
+            </div>
+
+            {isPromptManagerOpen && activePromptModule && (
+              <div className="mb-3 flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  onClick={handleAddPromptModule}
+                  className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-surface-300 transition hover:bg-white/10 hover:text-white"
+                >
+                  <Plus size={12} />
+                  新模块
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRenamePromptModule}
+                  className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-surface-300 transition hover:bg-white/10 hover:text-white"
+                >
+                  <Pencil size={12} />
+                  重命名模块
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDeletePromptModule}
+                  disabled={promptModules.length <= 1}
+                  className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full border border-red-300/15 bg-red-300/10 px-2.5 py-1 text-[11px] text-red-200 transition hover:bg-red-300/15 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <Trash2 size={12} />
+                  删除模块
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAddPromptGroup}
+                  className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full border border-fuchsia-300/20 bg-fuchsia-300/10 px-2.5 py-1 text-[11px] text-fuchsia-100 transition hover:bg-fuchsia-300/15"
+                >
+                  <Plus size={12} />
+                  新分组
+                </button>
+              </div>
+            )}
+
+            {isPromptManagerOpen && (promptManagerDraft || promptManagerConfirm) && (
+              <div className="mb-3 rounded-xl border border-fuchsia-300/15 bg-fuchsia-300/5 p-2">
+                {promptManagerDraft ? (
+                  <form
+                    className="flex flex-col gap-2 sm:flex-row sm:items-center"
+                    onSubmit={(event) => {
+                      event.preventDefault()
+                      handleSubmitPromptManagerDraft()
+                    }}
+                  >
+                    <label className="shrink-0 text-[11px] font-medium text-fuchsia-100">
+                      {PROMPT_MANAGER_DRAFT_TITLES[promptManagerDraft.mode]}
+                    </label>
+                    <input
+                      ref={promptManagerInputRef}
+                      value={promptManagerDraft.value}
+                      onChange={(event) => setPromptManagerDraft({
+                        ...promptManagerDraft,
+                        value: event.target.value,
+                      })}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Escape') {
+                          event.preventDefault()
+                          closePromptManagerAction()
+                        }
+                      }}
+                      className="min-w-0 flex-1 rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 text-xs text-surface-100 outline-none transition placeholder:text-surface-600 focus:border-fuchsia-300/40"
+                      placeholder="输入名称或短语"
+                    />
+                    <div className="flex shrink-0 items-center gap-1">
+                      <button
+                        type="submit"
+                        className="inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-fuchsia-300/15 px-2.5 py-1.5 text-[11px] text-fuchsia-100 transition hover:bg-fuchsia-300/25"
+                      >
+                        <Check size={12} />
+                        保存
+                      </button>
+                      <button
+                        type="button"
+                        onClick={closePromptManagerAction}
+                        className="inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2.5 py-1.5 text-[11px] text-surface-400 transition hover:bg-white/10 hover:text-white"
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <p className="text-xs text-surface-300">{promptManagerConfirm?.message}</p>
+                    <div className="flex shrink-0 items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={handleConfirmPromptManagerAction}
+                        className="inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-red-300/15 px-2.5 py-1.5 text-[11px] text-red-100 transition hover:bg-red-300/25"
+                      >
+                        <Check size={12} />
+                        确认
+                      </button>
+                      <button
+                        type="button"
+                        onClick={closePromptManagerAction}
+                        className="inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2.5 py-1.5 text-[11px] text-surface-400 transition hover:bg-white/10 hover:text-white"
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="space-y-2">
-              {IMAGE_PROMPT_PRESETS.map((presetGroup) => (
-                <div key={presetGroup.group} className="flex flex-wrap items-center gap-1.5">
-                  <span className="w-10 shrink-0 text-[11px] text-surface-500">{presetGroup.group}</span>
-                  {presetGroup.items.map((item) => (
-                    <button
-                      key={item}
-                      onClick={() => appendPromptPreset(item)}
-                      className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-surface-300 transition hover:border-fuchsia-300/30 hover:bg-fuchsia-300/10 hover:text-fuchsia-100"
-                    >
-                      {item}
-                    </button>
-                  ))}
+              {activePromptModule?.groups.length ? activePromptModule.groups.map((presetGroup) => (
+                <div
+                  key={presetGroup.id}
+                  className={isPromptManagerOpen
+                    ? 'rounded-xl border border-white/10 bg-black/15 p-2'
+                    : 'flex flex-wrap items-center gap-1.5'
+                  }
+                >
+                  <div className={isPromptManagerOpen ? 'mb-2 flex items-center gap-2' : 'contents'}>
+                    <span className={`${isPromptManagerOpen ? 'min-w-0 flex-1 truncate' : 'w-16 shrink-0'} text-[11px] font-medium text-surface-500`}>
+                      {presetGroup.name}
+                    </span>
+                    {isPromptManagerOpen && (
+                      <div className="flex shrink-0 items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => handleAddPromptItem(presetGroup.id)}
+                          className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full px-2 py-1 text-[11px] text-fuchsia-100 transition hover:bg-fuchsia-300/10"
+                        >
+                          <Plus size={11} />
+                          短语
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleRenamePromptGroup(presetGroup.id, presetGroup.name)}
+                          className="rounded-full p-1 text-surface-400 transition hover:bg-white/10 hover:text-white"
+                          title="重命名分组"
+                        >
+                          <Pencil size={12} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeletePromptGroup(presetGroup.id, presetGroup.name)}
+                          className="rounded-full p-1 text-red-300 transition hover:bg-red-300/10"
+                          title="删除分组"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                  <div className={isPromptManagerOpen ? 'flex flex-wrap gap-1.5' : 'contents'}>
+                    {presetGroup.items.map((item) => (
+                      isPromptManagerOpen ? (
+                        <span
+                          key={item.id}
+                          className="inline-flex max-w-full items-center gap-1 rounded-full border border-white/10 bg-white/5 py-1 pl-2 pr-1 text-[11px] text-surface-300"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => handleRenamePromptItem(presetGroup.id, item.id, item.text)}
+                            className="max-w-[160px] truncate whitespace-nowrap text-left transition hover:text-fuchsia-100"
+                            title="编辑短语"
+                          >
+                            {item.label}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeletePromptItem(presetGroup.id, item.id, item.label)}
+                            className="rounded-full p-0.5 text-surface-500 transition hover:bg-red-300/10 hover:text-red-300"
+                            title="删除短语"
+                          >
+                            <X size={10} />
+                          </button>
+                        </span>
+                      ) : (
+                        <button
+                          key={item.id}
+                          type="button"
+                          onClick={() => appendPromptPreset(item.text)}
+                          className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-surface-300 transition hover:border-fuchsia-300/30 hover:bg-fuchsia-300/10 hover:text-fuchsia-100"
+                        >
+                          {item.label}
+                        </button>
+                      )
+                    ))}
+                    {isPromptManagerOpen && presetGroup.items.length === 0 && (
+                      <button
+                        type="button"
+                        onClick={() => handleAddPromptItem(presetGroup.id)}
+                        className="rounded-full border border-dashed border-white/15 px-2 py-1 text-[11px] text-surface-500 transition hover:border-fuchsia-300/30 hover:text-fuchsia-100"
+                      >
+                        添加短语
+                      </button>
+                    )}
+                  </div>
                 </div>
-              ))}
+              )) : (
+                <div className="rounded-xl border border-dashed border-white/10 px-3 py-6 text-center text-xs text-surface-500">
+                  暂无提示词分组
+                </div>
+              )}
             </div>
           </div>
         )}
         <div className="glass-panel rounded-xl p-2">
           {/* Model selector row */}
           <div className="mb-1 flex items-center justify-between gap-2 border-b border-surface-700/30 px-1 pb-1.5">
-            <ModelSelector />
+            <ModelSelector mode={inputMode} />
           </div>
 
           {/* Image previews */}
@@ -820,7 +1432,7 @@ export default function InputArea({
               disabled={disabled || isStreaming}
               className="shrink-0 p-2 hover:bg-surface-700/50 text-surface-400 hover:text-surface-200
                          rounded-lg transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed"
-              title={isImageMode ? '添加参考图（仅保留 1 张）' : '添加图片'}
+              title={isImageMode ? '添加参考图（可多选）' : '添加图片'}
             >
               <ImagePlus size={18} />
             </button>
@@ -828,7 +1440,7 @@ export default function InputArea({
               ref={imageInputRef}
               type="file"
               accept="image/*"
-              multiple={!isImageMode}
+              multiple
               onChange={handleImageSelect}
               className="hidden"
             />

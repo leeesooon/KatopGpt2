@@ -129,6 +129,8 @@ type SpreadsheetPlannerFailureReason =
   | 'json_parse_failed'
   | 'fallback_request_failed'
 
+const MAX_IMAGE_REFERENCE_COUNT = 10
+
 function logSpreadsheetPlanner(reason: SpreadsheetPlannerFailureReason, details: Record<string, unknown>) {
   console.warn('[spreadsheet-planner]', reason, details)
 }
@@ -902,7 +904,7 @@ export async function generateImage(
     apiKey: config.apiKey,
     model: config.model,
     prompt: request.prompt,
-    images: request.images?.slice(0, 12).map((image) => ({
+    images: request.images?.slice(0, MAX_IMAGE_REFERENCE_COUNT).map((image) => ({
       base64: image.base64,
       name: image.name,
     })),

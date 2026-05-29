@@ -89,7 +89,7 @@ export function useAttachmentProcessor({ isImageMode }: UseAttachmentProcessorOp
     updateTask(taskId ?? '', { status: 'reading', message: '正在读取图片' })
     const base64 = await readFileAsDataUrl(file)
     const nextImage = { id: uuidv4(), base64, name: file.name }
-    setImages((prev) => isImageMode ? [nextImage] : [...prev, nextImage])
+    setImages((prev) => [...prev, nextImage])
     updateTask(taskId ?? '', {
       status: 'ready',
       message: '已添加图片',
@@ -199,8 +199,8 @@ export function useAttachmentProcessor({ isImageMode }: UseAttachmentProcessorOp
 
   const processImageFiles = useCallback((fileList: FileList | File[]) => {
     const imageFiles = Array.from(fileList).filter((file) => file.type.startsWith('image/'))
-    processFiles(isImageMode ? imageFiles.slice(0, 1) : imageFiles)
-  }, [isImageMode, processFiles])
+    processFiles(imageFiles)
+  }, [processFiles])
 
   const retryTask = useCallback((taskId: string) => {
     const task = attachmentTasks.find((item) => item.id === taskId)
@@ -229,8 +229,8 @@ export function useAttachmentProcessor({ isImageMode }: UseAttachmentProcessorOp
   }, [])
 
   const addImageAttachment = useCallback((image: ImageAttachment) => {
-    setImages((prev) => isImageMode ? [image] : [...prev, image])
-  }, [isImageMode])
+    setImages((prev) => [...prev, image])
+  }, [])
 
   const clearAttachments = useCallback(() => {
     setImages([])

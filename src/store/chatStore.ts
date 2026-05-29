@@ -2,7 +2,14 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { v4 as uuidv4 } from 'uuid'
 import type { Conversation, Message, AppSettings, ApiProvider, ModelSelection, ModelConfig, SearchResult, AssistantProfile, KnowledgeDocument } from '../types'
-import { DEFAULT_SETTINGS } from '../types'
+import {
+  DEFAULT_SETTINGS,
+  findFirstChatModelSelection,
+  normalizeChatModelSelection,
+  normalizeImageGenerationSettings,
+  normalizeImagePromptModules,
+  resolveDefaultConversationModelSelection,
+} from '../types'
 import {
   cloneProfileAsCustom,
   getDefaultAssistantProfiles,
@@ -10,6 +17,20 @@ import {
   resolveDefaultAssistantProfile,
   resetBuiltInProfile,
 } from '../services/assistantProfiles'
+
+function sanitizeAssistantProfileModels(profiles: AssistantProfile[], providers: ApiProvider[]) {
+  return profiles.map((profile) => ({
+    ...profile,
+    defaultModel: normalizeChatModelSelection(providers, profile.defaultModel),
+  }))
+}
+
+function sanitizeConversationModels(conversations: Conversation[], providers: ApiProvider[]) {
+  return conversations.map((conversation) => ({
+    ...conversation,
+    modelSelection: normalizeChatModelSelection(providers, conversation.modelSelection),
+  }))
+}
 
 interface ChatState {
   conversations: Conversation[]
@@ -31,6 +52,7 @@ interface ChatState {
   updateConversationTitle: (id: string, title: string) => void
   updateConversationSummary: (id: string, summary: Conversation['summary']) => void
   setConversationAssistantProfile: (conversationId: string, profileId: string) => void
+  setConversationModelSelection: (conversationId: string, selection: ModelSelection | null) => void
 
   // Message actions
   addMessage: (conversationId: string, message: Omit<Message, 'id' | 'timestamp'>) => Message
@@ -47,7 +69,7 @@ interface ChatState {
   setActiveModel: (selection: ModelSelection | null) => void
 
   // Settings actions
-  updateSettings: (settings: Partial<Pick<AppSettings, 'systemPrompt' | 'temperature' | 'maxTokens' | 'contextWindowSize' | 'searchEngine' | 'serperApiKey' | 'tavilyApiKey' | 'enableSearchByDefault' | 'imageGeneration'>>) => void
+  updateSettings: (settings: Partial<Pick<AppSettings, 'systemPrompt' | 'temperature' | 'maxTokens' | 'contextWindowSize' | 'searchEngine' | 'serperApiKey' | 'tavilyApiKey' | 'enableSearchByDefault' | 'imageGeneration' | 'imagePromptModules'>>) => void
   setSettingsOpen: (open: boolean) => void
   setAssistantProfilesOpen: (open: boolean) => void
   setPresentationWorkspaceOpen: (open: boolean) => void
@@ -90,11 +112,13 @@ export const useChatStore = create<ChatState>()(
       createConversation: () => {
         const id = uuidv4()
         const defaultProfile = resolveDefaultAssistantProfile(get().settings)
+        const modelSelection = resolveDefaultConversationModelSelection(get().settings, defaultProfile?.id)
         const conversation: Conversation = {
           id,
           title: '新对话',
           messages: [],
           assistantProfileId: defaultProfile?.id,
+          modelSelection,
           createdAt: Date.now(),
           updatedAt: Date.now(),
         }
@@ -144,6 +168,20 @@ export const useChatStore = create<ChatState>()(
           conversations: state.conversations.map((conversation) =>
             conversation.id === conversationId
               ? { ...conversation, assistantProfileId: profileId, updatedAt: Date.now() }
+              : conversation
+          ),
+        }))
+      },
+
+      setConversationModelSelection: (conversationId, selection) => {
+        set((state) => ({
+          conversations: state.conversations.map((conversation) =>
+            conversation.id === conversationId
+              ? {
+                  ...conversation,
+                  modelSelection: normalizeChatModelSelection(state.settings.providers, selection),
+                  updatedAt: Date.now(),
+                }
               : conversation
           ),
         }))
@@ -217,11 +255,16 @@ export const useChatStore = create<ChatState>()(
           const newProviders = [...state.settings.providers, newProvider]
           // Auto-select first model if nothing selected
           let activeModel = state.settings.activeModel
-          if (!activeModel && newProvider.models.length > 0) {
-            activeModel = { providerId: id, model: newProvider.models[0].name }
+          if (!activeModel) {
+            activeModel = findFirstChatModelSelection(newProviders)
           }
           return {
-            settings: { ...state.settings, providers: newProviders, activeModel },
+            settings: {
+              ...state.settings,
+              providers: newProviders,
+              activeModel: normalizeChatModelSelection(newProviders, activeModel),
+              imageGeneration: normalizeImageGenerationSettings(state.settings.imageGeneration, newProviders),
+            },
           }
         })
         return id
@@ -237,13 +280,20 @@ export const useChatStore = create<ChatState>()(
           if (activeModel?.providerId === id) {
             const updated = newProviders.find((p) => p.id === id)
             if (updated && !updated.models.some(m => m.name === activeModel!.model)) {
-              activeModel = updated.models.length > 0
-                ? { providerId: id, model: updated.models[0].name }
-                : null
+              activeModel = findFirstChatModelSelection(newProviders)
             }
           }
+          const assistantProfiles = sanitizeAssistantProfileModels(state.settings.assistantProfiles, newProviders)
+          const conversations = sanitizeConversationModels(state.conversations, newProviders)
           return {
-            settings: { ...state.settings, providers: newProviders, activeModel },
+            conversations,
+            settings: {
+              ...state.settings,
+              providers: newProviders,
+              activeModel: normalizeChatModelSelection(newProviders, activeModel),
+              imageGeneration: normalizeImageGenerationSettings(state.settings.imageGeneration, newProviders),
+              assistantProfiles,
+            },
           }
         })
       },
@@ -254,26 +304,46 @@ export const useChatStore = create<ChatState>()(
           let activeModel = state.settings.activeModel
           if (activeModel?.providerId === id) {
             // Pick first available model from remaining providers
-            const fallback = newProviders.find((p) => p.models.length > 0)
-            activeModel = fallback
-              ? { providerId: fallback.id, model: fallback.models[0].name }
-              : null
+            activeModel = findFirstChatModelSelection(newProviders)
           }
+          const assistantProfiles = sanitizeAssistantProfileModels(state.settings.assistantProfiles, newProviders)
+          const conversations = sanitizeConversationModels(state.conversations, newProviders)
           return {
-            settings: { ...state.settings, providers: newProviders, activeModel },
+            conversations,
+            settings: {
+              ...state.settings,
+              providers: newProviders,
+              activeModel: normalizeChatModelSelection(newProviders, activeModel),
+              imageGeneration: normalizeImageGenerationSettings(state.settings.imageGeneration, newProviders),
+              assistantProfiles,
+            },
           }
         })
       },
 
       setActiveModel: (selection) => {
         set((state) => ({
-          settings: { ...state.settings, activeModel: selection },
+          settings: {
+            ...state.settings,
+            activeModel: normalizeChatModelSelection(state.settings.providers, selection),
+          },
         }))
       },
 
       updateSettings: (newSettings) => {
+        const imagePromptModules = newSettings.imagePromptModules
+          ? normalizeImagePromptModules(newSettings.imagePromptModules)
+          : undefined
+        const imageGeneration = newSettings.imageGeneration
+          ? normalizeImageGenerationSettings(newSettings.imageGeneration, get().settings.providers)
+          : undefined
         set((state) => ({
-          settings: { ...state.settings, ...newSettings },
+          settings: {
+            ...state.settings,
+            ...newSettings,
+            ...(imagePromptModules ? { imagePromptModules } : {}),
+            ...(imageGeneration ? { imageGeneration } : {}),
+          },
         }))
       },
 
@@ -286,6 +356,7 @@ export const useChatStore = create<ChatState>()(
         const now = Date.now()
         const newProfile: AssistantProfile = {
           ...profile,
+          defaultModel: normalizeChatModelSelection(get().settings.providers, profile.defaultModel),
           id,
           isBuiltIn: false,
           isHidden: false,
@@ -304,9 +375,15 @@ export const useChatStore = create<ChatState>()(
 
       updateAssistantProfile: (id, updates) => {
         set((state) => {
+          const normalizedUpdates = 'defaultModel' in updates
+            ? {
+                ...updates,
+                defaultModel: normalizeChatModelSelection(state.settings.providers, updates.defaultModel),
+              }
+            : updates
           const updatedProfiles = state.settings.assistantProfiles.map((profile) =>
               profile.id === id
-                ? { ...profile, ...updates, updatedAt: Date.now() }
+                ? { ...profile, ...normalizedUpdates, updatedAt: Date.now() }
                 : profile
           )
           const currentDefault = updatedProfiles.find((profile) => profile.id === state.settings.activeAssistantProfileId)
@@ -490,7 +567,7 @@ export const useChatStore = create<ChatState>()(
     }),
     {
       name: 'katop-gpt-storage',
-      version: 11,
+      version: 14,
       partialize: (state) => ({
         conversations: state.conversations,
         activeConversationId: state.activeConversationId,
@@ -654,12 +731,26 @@ export const useChatStore = create<ChatState>()(
           }
         }
         const finalSettings = state.settings as AppSettings
+        finalSettings.activeModel = normalizeChatModelSelection(finalSettings.providers, finalSettings.activeModel)
+        finalSettings.imageGeneration = normalizeImageGenerationSettings(
+          finalSettings.imageGeneration,
+          finalSettings.providers
+        )
+        finalSettings.imagePromptModules = normalizeImagePromptModules(finalSettings.imagePromptModules)
+        finalSettings.assistantProfiles = sanitizeAssistantProfileModels(
+          finalSettings.assistantProfiles,
+          finalSettings.providers
+        )
         const defaultAssistantProfileId = resolveDefaultAssistantProfile(finalSettings)?.id
         const conversations = state.conversations as Conversation[] | undefined
         if (Array.isArray(conversations)) {
           state.conversations = conversations.map((conversation) => ({
             ...conversation,
             assistantProfileId: conversation.assistantProfileId ?? defaultAssistantProfileId,
+            modelSelection: normalizeChatModelSelection(
+              finalSettings.providers,
+              conversation.modelSelection ?? finalSettings.activeModel
+            ),
           }))
         }
         return state as unknown as ChatState
